@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="local.androiduse.ime" android:versionCode="2" android:versionName="0.2">
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="34" />
+    <application android:label="Android Use 输入" android:allowBackup="false" android:debuggable="false" android:usesCleartextTraffic="false">
+        <service android:name=".DirectCommitImeService" android:label="Android Use 输入"
+            android:permission="android.permission.BIND_INPUT_METHOD" android:exported="true">
+            <intent-filter><action android:name="android.view.InputMethod" /></intent-filter>
+            <meta-data android:name="android.view.im" android:resource="@xml/input_method" />
+        </service>
+    </application>
+</manifest>

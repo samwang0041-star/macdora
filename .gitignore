@@ -1,0 +1,16 @@
+*.apk
+.DS_Store
+.build/
+artifacts/
+.runtime/
+.cache/
+__pycache__/
+*.log
+evidence/private/
+
+# Local credentials and development signing material
+.env
+.env.*
+*.p12
+*.p8
+*.keystore

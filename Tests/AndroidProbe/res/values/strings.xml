@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">本地验收测试 / Local Probe</string>
+    <string name="eyebrow">仅供本地显示与输入验收</string>
+    <string name="title">Android 显示 / 输入探针</string>
+    <string name="description">全屏持续画面、帧计数与触摸计数均留在本机。拖动列表或用中英文编辑框验证输入与滚动。</string>
+    <string name="edit_hint">输入中英文 / Type Chinese or English</string>
+    <string name="edit_initial">本地验收输入 / local acceptance text</string>
+    <string name="tap_count">点击计数 / Tap count: %1$d</string>
+    <string name="motion_caption">VSYNC-driven motion | 连续运动方块</string>
+    <string name="list_caption">本地滚动列表 / Local scroll list · %1$d 项</string>
+    <string name="row_title">本地测试项 %1$03d / Local probe row</string>
+    <string name="row_subtitle">第 %1$03d 条本地内容 · offline row %1$03d</string>
+    <string name="marker_description">顶部帧计数和触摸计数标记区</string>
+</resources>

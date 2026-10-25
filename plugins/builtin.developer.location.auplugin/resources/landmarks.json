@@ -1,0 +1,26 @@
+[
+  {
+    "name": "示例位置",
+    "subtitle": "人民广场 · 黄浦区",
+    "city": "上海",
+    "latitude": 31.230416,
+    "longitude": 121.473701,
+    "coordinateSystem": "gcj02"
+  },
+  {
+    "name": "上海外滩",
+    "subtitle": "滨江步道 · 黄浦区",
+    "city": "上海",
+    "latitude": 31.240000,
+    "longitude": 121.490000,
+    "coordinateSystem": "gcj02"
+  },
+  {
+    "name": "杭州西湖",
+    "subtitle": "湖滨公园 · 上城区",
+    "city": "杭州",
+    "latitude": 30.250000,
+    "longitude": 120.150000,
+    "coordinateSystem": "gcj02"
+  }
+]

@@ -1,0 +1,18 @@
+#!/system/bin/sh
+set -e
+STATE_FILE="/data/local/tmp/au-location-plugin-state.sh"
+
+@APP_PERMISSION_FUNCTION@
+
+if [ -f "$STATE_FILE" ] && [ -n "${ANDROID_USE_ACTIVE_PACKAGE:-}" ]; then
+  if prepare_location_app "$ANDROID_USE_ACTIVE_PACKAGE"; then
+    current="$(settings get global location_background_throttle_package_whitelist 2>/dev/null || true)"
+    case "$current" in ''|null) current=local.androiduse.plugin.gnss ;; esac
+    case ",$current," in
+      *,"$ANDROID_USE_ACTIVE_PACKAGE",*) ;;
+      *) settings put global location_background_throttle_package_whitelist "$current,$ANDROID_USE_ACTIVE_PACKAGE" >/dev/null 2>&1 || true ;;
+    esac
+  fi
+fi
+am startservice -n local.androiduse.plugin.gnss/.GnssKeepWarmService >/dev/null 2>&1 || true
+echo AU_PLUGIN_HOOK_OK

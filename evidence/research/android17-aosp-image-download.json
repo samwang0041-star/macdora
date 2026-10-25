@@ -1,0 +1,8 @@
+{
+  "url": "https://dl.google.com/android/repository/sys-img/android/arm64-v8a-37.0_r06.zip",
+  "size": 865756849,
+  "sha1": "f94cb780748169b5944b7c2e5c0693e5077ec8c4",
+  "sha256": "ffccd67f6e26b1f4911854ba4e8510b2990ab6c71af33f71864d38bf5d80c57e",
+  "imageRoot": ".runtime/images/aosp-api37-r6",
+  "verifiedAgainstOfficialSDKIndex": true
+}

@@ -1,0 +1,11 @@
+a0d699fc7388b8252416c49e6293639de39ab76a03e7302ddced56c284d45200  .cache/upstream/scrcpy-v5.0.1-commit.tar.gz
+764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536  .cache/upstream/scrcpy-server-v5.0.1
+1d3df77343f35c6b2a82bd782bb265ecaca8431d9e09cae0e79b93756738f748  scripts/build_without_gradle.sh
+a5cda1b473274754b0f7adea413ca95c5550781be017e4fab95d58fdf3c66202  .cache/upstream/scrcpy-5.0.1/server/src/main/java/com/genymobile/scrcpy/control/ControlMessage.java
+db10123f91857b7444ce971cbf7c254cc3ffb489dc3630f5de58d2c947765cd9  .cache/upstream/scrcpy-5.0.1/server/src/main/java/com/genymobile/scrcpy/control/ControlMessageReader.java
+a8b6fe982d0d157a347004064d5fbf048950c6a9a5282ae66237f65ec4c31524  .cache/upstream/scrcpy-5.0.1/server/src/main/java/com/genymobile/scrcpy/control/Controller.java
+6afe6f0962476834f684b22f5c2545dcd5fca5954ebcaff7ff7e0d3593b9f941  .cache/upstream/scrcpy-5.0.1/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessage.java
+ebdc39903b137c88817d6767d83e3362733d63886f746d015f1f6662bc72af04  .cache/upstream/scrcpy-5.0.1/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessageWriter.java
+baafe7c0593b8dc72a3541f5cf39b5102c9edcbf4edbc67bdf60a53ba12c78ce  .cache/upstream/scrcpy-5.0.1/server/src/main/java/android/content/IContentProvider.java
+e6785c9b1f17e8daaf62b4a68fc4c3489bd9e38b5b494181d8aad2d8371881c8  .cache/upstream/scrcpy-5.0.1/server/src/main/AndroidManifest.xml
+b406d74c3968f4c366a0293cd1b5d3ebbb7a0ff79dfff19f92adaccc9d7dbb67  ordered-touch.patch

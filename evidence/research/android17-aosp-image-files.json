@@ -1,0 +1,91 @@
+{
+  "imageBuild": "CE2A.260420.051.A3 / 16571990",
+  "androidVersion": "17",
+  "apiLevel": 37,
+  "abi": "arm64-v8a",
+  "revision": 6,
+  "tag": "default",
+  "source": "https://dl.google.com/android/repository/sys-img/android/arm64-v8a-37.0_r06.zip",
+  "files": {
+    "NOTICE.txt": {
+      "size": 6122563,
+      "sha256": "1f39ccfd8643467682794eaf5405e3ca708209b00638123129acfb99c352461e"
+    },
+    "VerifiedBootParams.textproto": {
+      "size": 356,
+      "sha256": "cfaf68b3fbd2aa872143eef6a4f851f12c9e3a8fde006cc6c07b70c9c7764d70"
+    },
+    "advancedFeatures.ini": {
+      "size": 766,
+      "sha256": "7288c4f1f05c3a1e90eec2e02f173ebbe520e725c83fe1a0cb18bd6f0698d3fa"
+    },
+    "build.prop": {
+      "size": 5827,
+      "sha256": "bc3c7f0b753b4898fc17111972a88226efbbf8785e72f52ce452b8316bdad490"
+    },
+    "data/empty_data_disk": {
+      "size": 107,
+      "sha256": "e4dc7c33a83013f3d9eb9b5a5693c912e83a9c7f978933b5c7600039dbfde903"
+    },
+    "data/local.prop": {
+      "size": 46,
+      "sha256": "49b05d093a46d35d85df01fb99133f077fcc725cc49efe1a1bedae884d24e20b"
+    },
+    "data/misc/GoldfishSkinConfig": {
+      "size": 783,
+      "sha256": "763b66cad27dc57354f456bb763e27acf8859059890e6515daba90e77c906b75"
+    },
+    "data/misc/emulator/config/radioconfig.xml": {
+      "size": 1433,
+      "sha256": "534a81b662ad62fc70ec0ea22715670524a05a066afc9fdac8e7c0f5a7789cd7"
+    },
+    "data/misc/emulator/version.txt": {
+      "size": 101,
+      "sha256": "5473738546fe1e52dd625dffa4ac1d8f9fb4964e4be9e159bbae8212d0a2c03d"
+    },
+    "data/misc/modem_simulator/etc/modem_simulator/files/numeric_operator.xml": {
+      "size": 297,
+      "sha256": "c2557e604beea20b67642cdbb14ae7b792f804e4476b3f6cf47035690234f436"
+    },
+    "data/misc/modem_simulator/iccprofile_for_carrierapitests.xml": {
+      "size": 16537,
+      "sha256": "dc4b5f5344f084fc44f89250bbcf2b12e452eb98c104e4ef3ec115366eb6ce32"
+    },
+    "data/misc/modem_simulator/iccprofile_for_sim0.xml": {
+      "size": 14647,
+      "sha256": "a2744726a306b18d7547251026201aa5c6a9e120aa1555992eeb8b0a3b4aa6d9"
+    },
+    "data/misc/modem_simulator/iccprofile_for_sim_tel_alaska.xml": {
+      "size": 14474,
+      "sha256": "462cc26ddaa9d6c470a2d9415771c80e323b526b1863f099accb298955b14db3"
+    },
+    "encryptionkey.img": {
+      "size": 18874368,
+      "sha256": "522bd0b6a2c92e37de465059bb9487bb9597a9aae032b469a8ebe0b38146d8c3"
+    },
+    "kernel-ranchu": {
+      "size": 17304741,
+      "sha256": "046b3ff07270585b31ecefe5fd43609508f5832694e87ab75f5f3634981aee63"
+    },
+    "kernel_cmdline.txt": {
+      "size": 16,
+      "sha256": "5bd6571f46a3e593053a7c6c37f4eed840c0da2278506fa53d1ff021e9d4d8e4"
+    },
+    "ramdisk.img": {
+      "size": 1841024,
+      "sha256": "341b6f447e88c2aff4fe70a5479b19a9ac71972edb75710aedcdc479eb33781e"
+    },
+    "source.properties": {
+      "size": 325,
+      "sha256": "819f8bfd06abff996e3409831a125071fdb22b5a5a3db0b1be4c41b3e1a9aa96"
+    },
+    "system.img": {
+      "size": 1898971136,
+      "sha256": "9bcb7ed20b61777d2095aaee755e7d7b190fa906fab9835f11e2cc34ae6672f0"
+    },
+    "vendor.img": {
+      "size": 101711872,
+      "sha256": "d30fac9a8b318d2bde2e8a10a98d2e8eaf94ded84baa60cadd6b08de69d2480e"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "archiveSHA256": "8aa364f9129842e7b10f86a48142655a92e53443bd62b05ccbc88a79c36c734c",
+  "helperSHA256": "1c53f6ac1de602c08d0cdf7b995f85c34dd89407525e6f6e1f28fdab61c99436",
+  "pluginID": "builtin.developer.location",
+  "sourceSHA256": {
+    "Guest/GNSSKeepWarm/AndroidManifest.xml": "fc7f3ad2e9bac3718eb044e2a310b1a39214cb7e33eb43b3673db0d6cb55430c",
+    "Guest/GNSSKeepWarm/res/values/strings.xml": "c8709b26a89c1f1f603d5268dfbb5b172bf17854f76340d4182798fe64483a75",
+    "Guest/GNSSKeepWarm/src/local/androiduse/plugin/gnss/GnssKeepWarmService.java": "7c82cb45d04a5815d43bd1a9f69f4c1e9675d42edb8e2bd8523ead3cf676bda6",
+    "plugins/templates/app-permissions.sh.inc": "8907847aa52195cfd39e1ebbcaad8d100b161e253ea3caaa73182fc3e0e4d45e",
+    "plugins/templates/location-app-launch.sh.in": "59ebac7759e6eafdb764333392560c6aeed8c0b8211e6d160b45e929f83cbead",
+    "plugins/templates/location-setup.sh.in": "916b95a1e52b5f2eeb163fb88ed8f1f7dc9796198fd801973c5af3381e19c282",
+    "scripts/build-gnss-keepwarm.sh": "5b9ce8b0d23e630df8ffd2801700690cfdb2425a278baa866e67e0da1515b864",
+    "scripts/build-location-plugin.py": "0920752ae4e2252c6eebdb72b82ba435333c312b62e7a6db294ffc59ec792376",
+    "scripts/build-location-plugin.swift": "69b4133d651480d9b00a6d52ac9a7584b0bbc0a1299b33659325b05192ff3e16"
+  },
+  "version": "1.0.1"
+}

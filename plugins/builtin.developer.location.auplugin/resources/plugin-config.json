@@ -1,0 +1,20 @@
+{
+  "altitudeMeters": 15.0,
+  "coordinateCalibrationByDefault": true,
+  "defaultCoordinateSystem": "gcj02",
+  "defaultLabel": "示例位置",
+  "defaultLatitude": 31.230416,
+  "defaultLongitude": 121.473701,
+  "driftEnabledByDefault": true,
+  "driftIntervalMs": 100,
+  "driftJitterMs": 10,
+  "driftMaxRadiusMeters": 10.0,
+  "driftMinRadiusMeters": 1.5,
+  "gcj02Bounds": {
+    "maxLatitude": 53.55,
+    "maxLongitude": 135.05,
+    "minLatitude": 18.15,
+    "minLongitude": 73.66
+  },
+  "horizontalAccuracyMeters": 3.2
+}

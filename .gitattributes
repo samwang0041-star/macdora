@@ -1,0 +1,3 @@
+# Preserve the exact upstream license and the whitespace required by unified diff context.
+Vendor/scrcpy-5.0.1/LICENSE -whitespace
+Vendor/scrcpy-5.0.1/ordered-touch.patch -whitespace

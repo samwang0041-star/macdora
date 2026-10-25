@@ -1,0 +1,32 @@
+{
+  "plugins": [
+    {
+      "accentHex": 1021951,
+      "archiveSHA256": "8aa364f9129842e7b10f86a48142655a92e53443bd62b05ccbc88a79c36c734c",
+      "author": "Macdora",
+      "capabilities": [
+        "hardware.gnss",
+        "qemu.console",
+        "guest.location.bridge",
+        "ui.map.workspace"
+      ],
+      "category": "开发者",
+      "downloadURL": "https://github.com/samwang0041-star/macdora/releases/download/v0.03/builtin.developer.location.auplugin",
+      "driverType": "hardware_gnss_location",
+      "fallbackDownloadURL": "https://raw.githubusercontent.com/samwang0041-star/macdora/main/plugins/dist/builtin.developer.location.auplugin",
+      "iconSymbol": "location.fill.viewfinder",
+      "id": "builtin.developer.location",
+      "manifestSHA256": "b8f1cd95e38e6c456ca861f959666a59ec1f153de6efd5d75762d7e852dccc20",
+      "minHostVersion": "0.1.0",
+      "name": "开发者虚拟定位",
+      "signature": "35AHpLmRzVtxG3s5/54PA6XeBXuGnZ94h76XorFUKy7sCn9kSAmpyZ4FbzbuZwVzo36fSDFd9ROQwIx6rGwcAw==",
+      "signatureKeyID": "official-ed25519-v2",
+      "subtitle": "系统级 GPS 虚拟定位，支持地图搜索选点与 10 米自动漂移",
+      "version": "1.0.1"
+    }
+  ],
+  "publicKeyEd25519": "6SQBB58dPiVa++10GKdGP5D4bHgGfWDWUbizVNwVw6w=",
+  "publicKeyID": "official-ed25519-v2",
+  "repository": "https://github.com/samwang0041-star/macdora",
+  "schemaVersion": 1
+}

@@ -1,0 +1,9 @@
+scrcpy v5.0.1
+Copyright (C) 2018 Genymobile
+Copyright (C) 2018-2026 Romain Vimont
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+Macdora modifications, 2026:
+Ordered input acknowledgments, ordered touch tracking, and an Android input
+controller replacement in Guest/OrderedScrcpy. The distributed server is
+modified; it is not the unmodified upstream server binary.

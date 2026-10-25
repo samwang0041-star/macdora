@@ -1,0 +1,28 @@
+{
+  "accentHex": 1021951,
+  "author": "Macdora",
+  "capabilities": [
+    "hardware.gnss",
+    "qemu.console",
+    "guest.location.bridge",
+    "ui.map.workspace"
+  ],
+  "category": "开发者",
+  "driverType": "hardware_gnss_location",
+  "entrypoints": {
+    "configFile": "resources/plugin-config.json",
+    "onAppLaunch": "hooks/on-app-launch.sh",
+    "onDisable": "hooks/on-disable.sh",
+    "onEnable": "hooks/on-enable.sh",
+    "onLocationUpdate": "hooks/on-location-update.sh",
+    "onRuntimeReady": "hooks/on-runtime-ready.sh",
+    "presetsFile": "resources/landmarks.json"
+  },
+  "iconSymbol": "location.fill.viewfinder",
+  "id": "builtin.developer.location",
+  "minHostVersion": "0.1.0",
+  "name": "开发者虚拟定位",
+  "schemaVersion": 1,
+  "subtitle": "系统级 GPS 虚拟定位，支持地图搜索选点与 10 米自动漂移",
+  "version": "1.0.1"
+}

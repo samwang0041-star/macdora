@@ -1,0 +1,19 @@
+{
+  "algorithm" : "ed25519-sha256",
+  "files" : {
+    "hooks/on-app-launch.sh" : "efdcfa277d3f6f2b3d5673670d3d21ce2d30ffe79574311fb46d0a1299ef110e",
+    "hooks/on-disable.sh" : "e29baa2ab049d8a0755d077882dea1fd7fb05ae09c47ec2af0ba33211ca12b32",
+    "hooks/on-enable.sh" : "ce8cb5a7bb332bee784d4b4ff337fdb6191429b5a479e9f2b7c9fe94b40c87cb",
+    "hooks/on-location-update.sh" : "07f1530fa5fc4dd027455774ce70c1cb42e93772f37d9fac22beb6f397590c86",
+    "hooks/on-runtime-ready.sh" : "ce8cb5a7bb332bee784d4b4ff337fdb6191429b5a479e9f2b7c9fe94b40c87cb",
+    "manifest.json" : "b8f1cd95e38e6c456ca861f959666a59ec1f153de6efd5d75762d7e852dccc20",
+    "resources/landmarks.json" : "37ec1a76daca53914884c46eabb8e003b3dc5c34b7a0279c96b01faff2b957f4",
+    "resources/plugin-config.json" : "b08ae93fbb1e3e4d3ecf1f1c17c3a1aae9f14322aaea0697dcad96bc77995121"
+  },
+  "keyID" : "official-ed25519-v2",
+  "manifestSHA256" : "b8f1cd95e38e6c456ca861f959666a59ec1f153de6efd5d75762d7e852dccc20",
+  "pluginID" : "builtin.developer.location",
+  "publisher" : "samwang0041-star",
+  "signature" : "35AHpLmRzVtxG3s5/54PA6XeBXuGnZ94h76XorFUKy7sCn9kSAmpyZ4FbzbuZwVzo36fSDFd9ROQwIx6rGwcAw==",
+  "version" : "1.0.1"
+}

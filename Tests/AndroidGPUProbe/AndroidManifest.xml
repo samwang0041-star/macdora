@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="local.androiduse.gpuprobe">
+    <uses-sdk
+        android:minSdkVersion="29"
+        android:targetSdkVersion="36" />
+    <uses-feature
+        android:glEsVersion="0x00030001"
+        android:required="true" />
+
+    <application
+        android:allowBackup="false"
+        android:debuggable="true"
+        android:label="GPU Probe"
+        android:supportsRtl="false"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:usesCleartextTraffic="false">
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

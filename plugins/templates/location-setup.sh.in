@@ -1,0 +1,62 @@
+#!/system/bin/sh
+set -e
+umask 077
+STATE_FILE="/data/local/tmp/au-location-plugin-state.sh"
+if [ ! -f "$STATE_FILE" ]; then
+  printf '#!/system/bin/sh\n' > "$STATE_FILE"
+  for setting in secure:location_mode secure:mock_location global:location_background_throttle_interval_ms global:location_background_throttle_package_whitelist; do
+    namespace="${setting%%:*}"
+    name="${setting#*:}"
+    original="$(settings get "$namespace" "$name" 2>/dev/null || echo null)"
+    if [ "$original" = null ] || [ -z "$original" ]; then
+      printf 'settings delete %s %s >/dev/null 2>&1 || true\n' "$namespace" "$name" >> "$STATE_FILE"
+    else
+      escaped="$(printf '%s' "$original" | sed "s/'/'\\\\''/g")"
+      printf "settings put %s %s '%s' >/dev/null 2>&1 || true\n" "$namespace" "$name" "$escaped" >> "$STATE_FILE"
+    fi
+  done
+  chmod 700 "$STATE_FILE"
+fi
+
+@APP_PERMISSION_FUNCTION@
+
+APP_PACKAGES="$(pm list packages -3 2>/dev/null | sed 's/^package://' | grep -v '^local\.androiduse\.' || true)"
+LOCATION_WHITELIST=local.androiduse.plugin.gnss
+for app_pkg in $APP_PACKAGES; do
+  if prepare_location_app "$app_pkg"; then
+    LOCATION_WHITELIST="$LOCATION_WHITELIST,$app_pkg"
+  fi
+done
+settings put secure location_mode 3 >/dev/null 2>&1 || true
+settings put secure mock_location 0 >/dev/null 2>&1 || true
+settings put global location_background_throttle_interval_ms 0 >/dev/null 2>&1 || true
+settings put global location_background_throttle_package_whitelist "$LOCATION_WHITELIST" >/dev/null 2>&1 || true
+cmd location set-location-enabled true >/dev/null 2>&1 || true
+
+APK_PATH="/data/local/tmp/au-gnss-keepwarm.apk"
+base64 -d > "$APK_PATH" <<'B64EOF'
+@GNSS_KEEPWARM_APK_BASE64@
+B64EOF
+install_result="$(pm install -r "$APK_PATH" 2>&1 || true)"
+case "$install_result" in
+  *Success*) ;;
+  *INSTALL_FAILED_UPDATE_INCOMPATIBLE*|*INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES*)
+    # Only this stateless helper is replaced when its signing certificate rotates.
+    am startservice -a STOP -n local.androiduse.plugin.gnss/.GnssKeepWarmService >/dev/null 2>&1 || true
+    am stopservice -n local.androiduse.plugin.gnss/.GnssKeepWarmService >/dev/null 2>&1 || true
+    pm uninstall local.androiduse.plugin.gnss >/dev/null 2>&1 || true
+    install_result="$(pm install -r "$APK_PATH" 2>&1 || true)"
+    case "$install_result" in *Success*) ;; *) echo AU_PLUGIN_HOOK_FAIL; exit 1 ;; esac
+    ;;
+  *) echo AU_PLUGIN_HOOK_FAIL; exit 1 ;;
+esac
+pm grant local.androiduse.plugin.gnss android.permission.ACCESS_FINE_LOCATION >/dev/null 2>&1 || true
+pm grant local.androiduse.plugin.gnss android.permission.ACCESS_COARSE_LOCATION >/dev/null 2>&1 || true
+pm grant local.androiduse.plugin.gnss android.permission.ACCESS_BACKGROUND_LOCATION >/dev/null 2>&1 || true
+cmd deviceidle whitelist +local.androiduse.plugin.gnss >/dev/null 2>&1 || true
+appops set local.androiduse.plugin.gnss FINE_LOCATION allow >/dev/null 2>&1 || true
+appops set local.androiduse.plugin.gnss COARSE_LOCATION allow >/dev/null 2>&1 || true
+appops set local.androiduse.plugin.gnss MONITOR_LOCATION allow >/dev/null 2>&1 || true
+appops set local.androiduse.plugin.gnss MONITOR_HIGH_POWER_LOCATION allow >/dev/null 2>&1 || true
+am startservice -n local.androiduse.plugin.gnss/.GnssKeepWarmService >/dev/null 2>&1 || true
+echo AU_PLUGIN_HOOK_OK
