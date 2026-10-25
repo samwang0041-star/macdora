@@ -280,6 +280,48 @@ final class RuntimeLifecycleTests: XCTestCase {
         let stopped = await fixture.controller.stop()
         XCTAssertTrue(stopped)
     }
+
+    func testInputHelperDowngradeOnStderrUninstallsStaleHelperAndOpensMultipleApps() async throws {
+        let stderrProbe = try await ProcessRunner().run(
+            ProcessInvocation(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: [
+                    "-c",
+                    "printf 'Performing Streamed Install\\n'; printf 'adb: failed to install: Failure [INSTALL_FAILED_VERSION_DOWNGRADE: Downgrade detected: Update version code 2 is older than current 3]\\n' >&2; exit 1"
+                ],
+                environment: [:],
+                timeout: 5,
+                captureOutput: true
+            )
+        )
+        XCTAssertEqual(stderrProbe.exitCode, 1)
+        XCTAssertEqual(String(decoding: stderrProbe.stdout, as: UTF8.self), "Performing Streamed Install\n")
+        XCTAssertTrue(stderrProbe.combinedOutputUTF8.contains("INSTALL_FAILED_VERSION_DOWNGRADE"))
+
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        fixture.registry.installedPackages = [
+            "local.androiduse.ime",
+            "com.ruaho.echat.icbc.sandbox",
+            "com.tencent.mm"
+        ]
+        fixture.registry.inputHelperRequiresUninstallBeforeInstall = true
+
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+
+        let firstEndpoint = try await fixture.controller.openDisplay(package: "com.ruaho.echat.icbc.sandbox")
+        XCTAssertEqual(firstEndpoint.package, "com.ruaho.echat.icbc.sandbox")
+        XCTAssertEqual(fixture.registry.uninstalledPackages, ["local.androiduse.ime"])
+        XCTAssertTrue(fixture.registry.installedPackages.contains("local.androiduse.ime"))
+
+        let secondEndpoint = try await fixture.controller.openDisplay(package: "com.tencent.mm")
+        XCTAssertEqual(secondEndpoint.package, "com.tencent.mm")
+        XCTAssertEqual(fixture.registry.uninstalledPackages, ["local.androiduse.ime"])
+
+        let stopped = await fixture.controller.stop()
+        XCTAssertTrue(stopped)
+    }
 }
 
 private actor LifecycleGate {
@@ -329,8 +371,10 @@ private final class LifecycleRegistry: @unchecked Sendable {
     var secureContentVisible = false
     var displayDefaultsAtLaunch: [Bool] = []
     var installedPackages = Set<String>()
+    var uninstalledPackages: [String] = []
     var failNextCatalogRefresh = false
     var failNextGuestEnvironmentSetup = false
+    var inputHelperRequiresUninstallBeforeInstall = false
     func withLock<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
 }
 
@@ -358,7 +402,30 @@ private final class LifecycleRunner: ProcessExecuting, @unchecked Sendable {
     func run(_ invocation: ProcessInvocation) async throws -> ProcessResult {
         let args = invocation.arguments
         if args.contains("uninstall"), let package = args.last {
-            _ = registry.withLock { registry.installedPackages.remove(package) }
+            registry.withLock {
+                _ = registry.installedPackages.remove(package)
+                registry.uninstalledPackages.append(package)
+                if package == "local.androiduse.ime" {
+                    registry.inputHelperRequiresUninstallBeforeInstall = false
+                }
+            }
+            return ProcessResult(exitCode: 0, stdout: Data("Success\n".utf8), timedOut: false)
+        }
+        if args.contains("install"), let apkPath = args.last, apkPath.hasSuffix("android-use-ime.apk") {
+            let requiresUninstall = registry.withLock { registry.inputHelperRequiresUninstallBeforeInstall }
+            if requiresUninstall {
+                let proc = try await ProcessRunner().run(
+                    ProcessInvocation(
+                        executableURL: URL(fileURLWithPath: "/bin/sh"),
+                        arguments: ["-c", "printf 'Performing Streamed Install\\n'; printf 'adb: failed to install: Failure [INSTALL_FAILED_VERSION_DOWNGRADE: Downgrade detected: Update version code 2 is older than current 3]\\n' >&2; exit 1"],
+                        environment: [:],
+                        timeout: 5,
+                        captureOutput: true
+                    )
+                )
+                return proc
+            }
+            _ = registry.withLock { registry.installedPackages.insert("local.androiduse.ime") }
             return ProcessResult(exitCode: 0, stdout: Data("Success\n".utf8), timedOut: false)
         }
         if args.contains("path"), args.contains("pm"), let package = args.last {

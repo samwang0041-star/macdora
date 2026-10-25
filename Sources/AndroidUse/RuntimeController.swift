@@ -1401,7 +1401,7 @@ final class RuntimeController: SystemPluginHostBridge {
         guard let result = try? await runADB(["shell", script], operation: operation, timeout: timeout) else {
             return false
         }
-        let combinedOutput = String(decoding: result.stdout, as: UTF8.self)
+        let combinedOutput = result.combinedOutputUTF8
         if combinedOutput.contains("AU_PLUGIN_HOOK_FAIL") {
             return false
         }
@@ -2890,12 +2890,12 @@ final class RuntimeController: SystemPluginHostBridge {
                 throw CancellationError()
             }
             if firstInstall?.exitCode != 0 || firstInstall?.timedOut == true {
-                let combinedError = firstInstall.map { String(decoding: $0.stdout, as: UTF8.self) } ?? ""
+                let combinedError = firstInstall?.combinedOutputUTF8 ?? ""
                 let isSignatureOrDowngradeConflict =
                     combinedError.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE") ||
                     combinedError.contains("INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES") ||
                     combinedError.contains("INSTALL_FAILED_VERSION_DOWNGRADE")
-                if isSignatureOrDowngradeConflict {
+                if isSignatureOrDowngradeConflict || firstInstall?.exitCode != 0 {
                     _ = try? await self.runADB(["uninstall", "local.androiduse.ime"], operation: "重置本地输入组件", timeout: 10)
                     try Task.checkCancellation()
                     guard self.isOperationCurrent(gen), self.adbServerProcess?.isRunning == true else {

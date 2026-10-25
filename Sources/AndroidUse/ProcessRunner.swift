@@ -32,7 +32,28 @@ struct ProcessInvocation: Equatable, Sendable {
 struct ProcessResult: Equatable, Sendable {
     let exitCode: Int32
     let stdout: Data
+    let stderr: Data
     let timedOut: Bool
+
+    init(
+        exitCode: Int32,
+        stdout: Data,
+        stderr: Data = Data(),
+        timedOut: Bool
+    ) {
+        self.exitCode = exitCode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.timedOut = timedOut
+    }
+
+    var combinedOutputUTF8: String {
+        let out = String(decoding: stdout, as: UTF8.self)
+        let err = String(decoding: stderr, as: UTF8.self)
+        if out.isEmpty { return err }
+        if err.isEmpty { return out }
+        return out + "\n" + err
+    }
 }
 
 enum ProcessRunnerError: LocalizedError, Equatable {
@@ -189,12 +210,19 @@ final class ProcessRunner: ProcessExecuting, OwnedProcessTerminating, @unchecked
         try Task.checkCancellation()
         let process = try makeProcess(invocation)
         let outputCapture = LimitedOutput(limit: invocation.captureOutput ? invocation.outputLimit : 0)
+        let errorCapture = LimitedOutput(limit: invocation.captureOutput ? invocation.outputLimit : 0)
         let drained = DispatchSemaphore(value: 0)
+        let errorDrained = DispatchSemaphore(value: 0)
 
         if let outputPipe = process.standardOutput as? Pipe {
             drain(outputPipe, into: outputCapture, completion: drained)
         } else {
             drained.signal()
+        }
+        if let errorPipe = process.standardError as? Pipe {
+            drain(errorPipe, into: errorCapture, completion: errorDrained)
+        } else {
+            errorDrained.signal()
         }
 
         let exited = DispatchSemaphore(value: 0)
@@ -226,6 +254,7 @@ final class ProcessRunner: ProcessExecuting, OwnedProcessTerminating, @unchecked
         }
 
         _ = drained.wait(timeout: .now() + 2)
+        _ = errorDrained.wait(timeout: .now() + 2)
         if wasCancelled || Task.isCancelled {
             throw CancellationError()
         }
@@ -233,6 +262,7 @@ final class ProcessRunner: ProcessExecuting, OwnedProcessTerminating, @unchecked
         return ProcessResult(
             exitCode: process.terminationStatus,
             stdout: outputCapture.data,
+            stderr: errorCapture.data,
             timedOut: timedOut
         )
     }
@@ -247,22 +277,37 @@ final class ProcessRunner: ProcessExecuting, OwnedProcessTerminating, @unchecked
         let outputCapture = LimitedOutput(
             limit: invocation.captureOutput ? invocation.outputLimit : 0
         )
+        let errorCapture = LimitedOutput(
+            limit: invocation.captureOutput ? invocation.outputLimit : 0
+        )
         let drained = DispatchSemaphore(value: 0)
+        let errorDrained = DispatchSemaphore(value: 0)
         if let outputPipe = process.standardOutput as? Pipe {
             drain(outputPipe, into: outputCapture, completion: drained)
         } else {
             drained.signal()
         }
+        if let errorPipe = process.standardError as? Pipe {
+            drain(errorPipe, into: errorCapture, completion: errorDrained)
+        } else {
+            errorDrained.signal()
+        }
         process.terminationHandler = { finished in
             DispatchQueue.global(qos: .utility).async {
                 _ = drained.wait(timeout: .now() + 2)
+                _ = errorDrained.wait(timeout: .now() + 2)
                 let reply = String(
                     decoding: outputCapture.data,
                     as: UTF8.self
                 )
+                let replyError = String(
+                    decoding: errorCapture.data,
+                    as: UTF8.self
+                )
                 onExit(ProcessExit(
                     status: finished.terminationStatus,
-                    reply: reply
+                    reply: reply,
+                    replyError: replyError
                 ))
             }
         }
@@ -298,7 +343,7 @@ final class ProcessRunner: ProcessExecuting, OwnedProcessTerminating, @unchecked
         process.currentDirectoryURL = invocation.workingDirectoryURL
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = invocation.captureOutput ? Pipe() : FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        process.standardError = invocation.captureOutput ? Pipe() : FileHandle.nullDevice
         return process
     }
 
