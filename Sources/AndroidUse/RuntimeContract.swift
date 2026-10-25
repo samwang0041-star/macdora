@@ -55,8 +55,13 @@ struct ContainerApp: Codable, Equatable, Identifiable, Sendable {
     static let internalPackages: Set<String> = [
         "local.androiduse.ime",
         "local.androiduse.probe",
-        "local.androiduse.camtest"
+        "local.androiduse.camtest",
+        "local.androiduse.plugin.gnss"
     ]
+
+    static func isInternalPackage(_ package: String) -> Bool {
+        internalPackages.contains(package) || package.hasPrefix("local.androiduse.")
+    }
 
     static func hasCuratedDisplayName(for package: String) -> Bool {
         switch package {

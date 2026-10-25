@@ -19,11 +19,18 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     private var hasPresentedFrame = false
     private var hasDecodedFrame = false
     private var terminating = false
+    private var isRestartingForUpdate = false
+    private var openingPackage: String?
     private var keyboardMenu: HostKeyboardMenu?
     private var uninstallConfirmationActive = false
     private var activePackage: String = DefaultApp.package
     private var presentationTimes: [Double] = []
     private var usingHardwareDecoder = true
+
+    private func resolvedAppMetadata(for package: String) -> ContainerApp {
+        runtime.cachedContainerApps().first(where: { $0.package == package })
+            ?? ContainerApp.metadata(for: package)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.applicationIconImage = MacdoraBrand.appIconImage(size: 512)
@@ -90,7 +97,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         }
         runtime.onDisplayTerminated = { [weak self] in
             guard let self, self.stream != nil, !self.terminating else { return }
-            let appTitle = ContainerApp.metadata(for: self.activePackage).title
+            let appTitle = self.resolvedAppMetadata(for: self.activePackage).title
             self.displayFailed("\(appTitle) 会话已结束，可在管理台重新打开。")
         }
 
@@ -263,7 +270,10 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func prepareForUpdateRestart() async {
+        isRestartingForUpdate = true
+        terminating = true
         operation?.cancel()
+        openingPackage = nil
         displayGeneration = UUID()
         presenceTimer?.invalidate()
         presenceTimer = nil
@@ -271,7 +281,9 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         telemetryTimer = nil
         stream?.stop()
         stream = nil
+        applicationWindow?.window?.orderOut(nil)
         _ = await runtime.stop()
+        manager.window?.orderOut(nil)
     }
 
     private func startTelemetryTimer() {
@@ -299,7 +311,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             p95Ms = intervals[p95Index]
         }
         let activePkg = runtime.activeDisplayPackage
-        let activeName = activePkg.map { ContainerApp.metadata(for: $0).title }
+        let activeName = activePkg.map { resolvedAppMetadata(for: $0).title }
         let sample = runtime.sampleTelemetry(
             presentedFPS: fps,
             frameIntervalP95Ms: p95Ms,
@@ -345,7 +357,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
 
     private func forceStopApp(package: String) {
         guard !runtime.state.isBusy, !terminating else { return }
-        let appMeta = ContainerApp.metadata(for: package)
+        let appMeta = resolvedAppMetadata(for: package)
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -366,8 +378,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
 
     private func uninstallApp(package: String) {
         guard !runtime.state.isBusy, !terminating, !uninstallConfirmationActive else { return }
-        let appTitle = runtime.cachedContainerApps().first(where: { $0.package == package })?.title
-            ?? ContainerApp.metadata(for: package).title
+        let appTitle = resolvedAppMetadata(for: package).title
         let confirmation = NSAlert()
         confirmation.alertStyle = .warning
         confirmation.messageText = "卸载 \(appTitle)？"
@@ -434,8 +445,8 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openApp(package: String, forceReconfigureDisplay: Bool = false) {
-        guard !runtime.state.isBusy, !terminating else { return }
-        let appMeta = ContainerApp.metadata(for: package)
+        guard runtime.state != .stopping, !terminating else { return }
+        let appMeta = resolvedAppMetadata(for: package)
         if !forceReconfigureDisplay,
            let applicationWindow,
            stream != nil,
@@ -444,16 +455,34 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             applicationWindow.presentWindow()
             return
         }
+        if !forceReconfigureDisplay,
+           openingPackage == package,
+           operation != nil {
+            applicationWindow?.presentWindow()
+            return
+        }
         activePackage = package
+        openingPackage = package
         presentationTimes.removeAll()
+        presenceTimer?.invalidate()
+        presenceTimer = nil
+        stream?.stop()
+        stream = nil
         let previousOperation = operation
         previousOperation?.cancel()
         displayGeneration = UUID()
         let generation = displayGeneration
+        let cachedApps = runtime.cachedContainerApps()
+        manager.updateApps(cachedApps, activePackage: package)
         showApplicationWindow(for: appMeta)
         applicationWindow?.loading("正在准备 \(appMeta.title)…")
         operation = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if self.displayGeneration == generation {
+                    self.openingPackage = nil
+                }
+            }
             do {
                 await previousOperation?.value
                 try Task.checkCancellation()
@@ -483,9 +512,17 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
                 try Task.checkCancellation()
-                let apps = await self.runtime.refreshContainerApps()
+                let currentCached = self.runtime.cachedContainerApps()
+                let apps: [ContainerApp]
+                if currentCached.contains(where: { $0.package == package && $0.isInstalled }) {
+                    apps = currentCached
+                } else {
+                    apps = await self.runtime.refreshContainerApps()
+                }
+                let refreshedMeta = self.resolvedAppMetadata(for: package)
+                self.applicationWindow?.configureForApp(refreshedMeta)
                 self.manager.updateApps(apps, activePackage: package)
-                self.applicationWindow?.loading("正在打开 \(appMeta.title)…")
+                self.applicationWindow?.loading("正在打开 \(refreshedMeta.title)…")
                 let endpoint = try await self.runtime.openDisplay(package: package)
                 guard self.displayGeneration == generation, !Task.isCancelled else { await self.runtime.closeDisplay(); return }
                 self.manager.updateApps(apps, activePackage: package)
@@ -619,7 +656,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         }
         stream.connect(port: endpoint.port, startApp: endpoint.package)
         startPresenceMonitor(generation: generation)
-        let appTitle = ContainerApp.metadata(for: endpoint.package).title
+        let appTitle = resolvedAppMetadata(for: endpoint.package).title
         Task { [weak self] in
             var deadline = DisplayStartupDeadline(at: CACurrentMediaTime())
             while !Task.isCancelled {
@@ -642,7 +679,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         presenceTimer?.invalidate()
         absentCount = 0
         let monitoredPackage = activePackage
-        let appTitle = ContainerApp.metadata(for: monitoredPackage).title
+        let appTitle = resolvedAppMetadata(for: monitoredPackage).title
         presenceTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.presenceQueryInProgress, self.displayGeneration == generation, self.stream != nil else { return }
@@ -695,27 +732,39 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     private func displayFailed(_ message: String) {
         displayGeneration = UUID()
         let generation = displayGeneration
+        openingPackage = nil
         presenceTimer?.invalidate(); presenceTimer = nil
         stream?.stop(); stream = nil
         presentationTimes.removeAll()
         applicationWindow?.failure(message)
-        manager.update(.failed(message))
+        if runtime.state == .ready || runtime.state == .running {
+            manager.show(detail: message)
+            manager.update(runtime.state)
+        } else {
+            manager.update(.failed(message))
+        }
         Task { [weak self] in
             guard let self, self.displayGeneration == generation else { return }
             await self.runtime.closeDisplay()
             self.manager.updateApps(self.runtime.cachedContainerApps(), activePackage: nil)
+            self.manager.update(self.runtime.state)
         }
     }
 
     private func closedApplicationWindow() {
-        displayGeneration = UUID(); operation?.cancel()
+        displayGeneration = UUID()
+        openingPackage = nil
+        let previousOperation = operation
+        previousOperation?.cancel()
         let generation = displayGeneration
         presenceTimer?.invalidate(); presenceTimer = nil
         stream?.stop(); stream = nil
         presentationTimes.removeAll()
         applicationWindow?.surface.sendInput = nil
-        Task { [weak self] in
-            guard let self, self.displayGeneration == generation else { return }
+        operation = Task { [weak self] in
+            guard let self else { return }
+            await previousOperation?.value
+            guard self.displayGeneration == generation else { return }
             await self.runtime.closeDisplay()
             if !self.runtime.containerPreferences.keepWarmInBackground {
                 _ = await self.runtime.stop()
@@ -947,7 +996,9 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if stream != nil,
-           (applicationWindow?.window?.isVisible == true || applicationWindow?.window?.isMiniaturized == true) {
+           applicationWindow?.window?.isVisible == true,
+           applicationWindow?.window?.isMiniaturized == false,
+           manager.window?.isVisible != true {
             applicationWindow?.presentWindow()
         } else {
             manager.presentWindow()
@@ -956,8 +1007,19 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if isRestartingForUpdate || runtime.state == .stopped {
+            terminating = true
+            operation?.cancel()
+            openingPackage = nil
+            displayGeneration = UUID()
+            presenceTimer?.invalidate(); presenceTimer = nil
+            telemetryTimer?.invalidate(); telemetryTimer = nil
+            stream?.stop(); stream = nil
+            return .terminateNow
+        }
         if terminating { return .terminateLater }
         terminating = true; operation?.cancel(); displayGeneration = UUID()
+        openingPackage = nil
         presenceTimer?.invalidate(); presenceTimer = nil
         telemetryTimer?.invalidate(); telemetryTimer = nil
         stream?.stop(); stream = nil

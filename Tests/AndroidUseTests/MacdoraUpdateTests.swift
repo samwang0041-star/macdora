@@ -402,4 +402,12 @@ final class MacdoraUpdateTests: XCTestCase {
         }
         return nil
     }
+
+    func testRelaunchShellScriptTerminatesHungProcessAndDoesNotForceNewInstance() {
+        let script = MacdoraUpdateService.relaunchShellScript(waitingForPID: 48014)
+        XCTAssertTrue(script.contains("kill -TERM \"$PID\""))
+        XCTAssertTrue(script.contains("kill -KILL \"$PID\""))
+        XCTAssertTrue(script.contains("/usr/bin/open \"$APP_PATH\""))
+        XCTAssertFalse(script.contains("open -n"), "Relaunch must not spawn a duplicate instance alongside an existing process")
+    }
 }

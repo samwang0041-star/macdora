@@ -302,7 +302,7 @@ final class RuntimeLifecycleTests: XCTestCase {
         defer { fixture.remove() }
         fixture.registry.installedPackages = [
             "local.androiduse.ime",
-            "com.ruaho.echat.icbc.sandbox",
+            "com.example.office",
             "com.tencent.mm"
         ]
         fixture.registry.inputHelperRequiresUninstallBeforeInstall = true
@@ -310,8 +310,8 @@ final class RuntimeLifecycleTests: XCTestCase {
         try await fixture.controller.prepare()
         try await fixture.controller.start()
 
-        let firstEndpoint = try await fixture.controller.openDisplay(package: "com.ruaho.echat.icbc.sandbox")
-        XCTAssertEqual(firstEndpoint.package, "com.ruaho.echat.icbc.sandbox")
+        let firstEndpoint = try await fixture.controller.openDisplay(package: "com.example.office")
+        XCTAssertEqual(firstEndpoint.package, "com.example.office")
         XCTAssertEqual(fixture.registry.uninstalledPackages, ["local.androiduse.ime"])
         XCTAssertTrue(fixture.registry.installedPackages.contains("local.androiduse.ime"))
 
@@ -321,6 +321,18 @@ final class RuntimeLifecycleTests: XCTestCase {
 
         let stopped = await fixture.controller.stop()
         XCTAssertTrue(stopped)
+    }
+
+    func testMergedCatalogExcludesInternalPluginHelperPackages() {
+        XCTAssertTrue(ContainerApp.isInternalPackage("local.androiduse.plugin.gnss"))
+        XCTAssertTrue(ContainerApp.isInternalPackage("local.androiduse.ime"))
+        let catalog = RuntimeController.mergedContainerCatalog(
+            installedPackages: ["local.androiduse.plugin.gnss", "local.androiduse.ime", "com.example.office"],
+            existing: []
+        )
+        XCTAssertFalse(catalog.contains(where: { $0.package == "local.androiduse.plugin.gnss" }))
+        XCTAssertFalse(catalog.contains(where: { $0.package == "local.androiduse.ime" }))
+        XCTAssertTrue(catalog.contains(where: { $0.package == "com.example.office" }))
     }
 }
 

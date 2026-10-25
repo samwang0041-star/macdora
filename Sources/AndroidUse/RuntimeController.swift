@@ -1157,6 +1157,7 @@ final class RuntimeController: SystemPluginHostBridge {
     private var startingTask: Task<Void, Error>?
     private var installingTask: Task<Void, Error>?
     private var openingTask: Task<DisplayEndpoint, Error>?
+    private var openingDisplayPackage: String?
     private var closingTask: Task<Void, Never>?
     private var stoppingTask: Task<Bool, Never>?
     private var runtimeCleanupTask: Task<Bool, Never>?
@@ -1635,7 +1636,7 @@ final class RuntimeController: SystemPluginHostBridge {
     func cachedContainerApps() -> [ContainerApp] {
         let catalogURL = paths.appSupportURL.appendingPathComponent("container-apps.json")
         if let data = try? Data(contentsOf: catalogURL),
-           let decoded = (try? JSONDecoder().decode([ContainerApp].self, from: data))?.filter({ !ContainerApp.internalPackages.contains($0.package) }),
+           let decoded = (try? JSONDecoder().decode([ContainerApp].self, from: data))?.filter({ !ContainerApp.isInternalPackage($0.package) }),
            !decoded.isEmpty {
             return Self.mergedContainerCatalog(
                 installedPackages: Set(decoded.filter(\.isInstalled).map(\.package)),
@@ -1681,9 +1682,10 @@ final class RuntimeController: SystemPluginHostBridge {
             guard trimmed.hasPrefix("package:") else { continue }
             let pkg = String(trimmed.dropFirst("package:".count))
             guard ContainerApp.isValidPackageIdentifier(pkg),
-                  !ContainerApp.internalPackages.contains(pkg) else { continue }
+                  !ContainerApp.isInternalPackage(pkg) else { continue }
             installed.insert(pkg)
         }
+        try Task.checkCancellation()
         let packagesToProbe = Array(installed.union(["com.android.settings"])).sorted()
         let probed = await probeGuestApplications(packages: packagesToProbe)
         let apps = Self.mergedContainerCatalog(
@@ -1841,7 +1843,7 @@ final class RuntimeController: SystemPluginHostBridge {
             return entry
         }
 
-        for pkg in installedPackages.sorted() where !seen.contains(pkg) && !ContainerApp.internalPackages.contains(pkg) {
+        for pkg in installedPackages.sorted() where !seen.contains(pkg) && !ContainerApp.isInternalPackage(pkg) {
             result.append(buildEntry(for: pkg, isInstalled: true))
             seen.insert(pkg)
         }
@@ -1854,14 +1856,24 @@ final class RuntimeController: SystemPluginHostBridge {
     func openDisplay(package: String = DefaultApp.package) async throws -> DisplayEndpoint {
         guard ContainerApp.isValidPackageIdentifier(package) else { throw RuntimeError.displayUnavailable }
         if let closingTask { await closingTask.value }
-        if let openingTask { return try await openingTask.value }
+        if let openingTask {
+            if !openingTask.isCancelled, openingDisplayPackage == package {
+                return try await openingTask.value
+            }
+            openingTask.cancel()
+            _ = try? await openingTask.value
+            if let closingTask { await closingTask.value }
+        }
+        openingDisplayPackage = package
         let task = Task { [self] in
             do {
                 let result = try await performOpenDisplay(package: package)
                 openingTask = nil
+                openingDisplayPackage = nil
                 return result
             } catch {
                 openingTask = nil
+                openingDisplayPackage = nil
                 throw error
             }
         }

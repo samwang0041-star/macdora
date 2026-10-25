@@ -253,8 +253,12 @@ final class ProcessRunner: ProcessExecuting, OwnedProcessTerminating, @unchecked
             }
         }
 
-        _ = drained.wait(timeout: .now() + 2)
-        _ = errorDrained.wait(timeout: .now() + 2)
+        if drained.wait(timeout: .now() + 0.15) == .timedOut {
+            try? (process.standardOutput as? Pipe)?.fileHandleForReading.close()
+        }
+        if errorDrained.wait(timeout: .now() + 0.15) == .timedOut {
+            try? (process.standardError as? Pipe)?.fileHandleForReading.close()
+        }
         if wasCancelled || Task.isCancelled {
             throw CancellationError()
         }
@@ -294,8 +298,12 @@ final class ProcessRunner: ProcessExecuting, OwnedProcessTerminating, @unchecked
         }
         process.terminationHandler = { finished in
             DispatchQueue.global(qos: .utility).async {
-                _ = drained.wait(timeout: .now() + 2)
-                _ = errorDrained.wait(timeout: .now() + 2)
+                if drained.wait(timeout: .now() + 0.15) == .timedOut {
+                    try? (finished.standardOutput as? Pipe)?.fileHandleForReading.close()
+                }
+                if errorDrained.wait(timeout: .now() + 0.15) == .timedOut {
+                    try? (finished.standardError as? Pipe)?.fileHandleForReading.close()
+                }
                 let reply = String(
                     decoding: outputCapture.data,
                     as: UTF8.self

@@ -2052,10 +2052,16 @@ final class SystemPluginManager {
                 consoleTransport: locationConsoleTransport
             )
             loc.hostBridge = hostBridge
+            var lastReportedEnabled = loc.isEnabled
+            var lastReportedHealth = loc.healthState
             loc.onTelemetryChanged = { [weak self, weak loc] telemetry in
                 guard let self, let loc, self.installedPlugins[manifest.id] === loc else { return }
                 self.onLocationTelemetryChanged?(manifest.id, telemetry)
-                self.notifyChanged()
+                if telemetry.isPluginEnabled != lastReportedEnabled || telemetry.healthState != lastReportedHealth {
+                    lastReportedEnabled = telemetry.isPluginEnabled
+                    lastReportedHealth = telemetry.healthState
+                    self.notifyChanged()
+                }
             }
             return loc
         } else {

@@ -1105,6 +1105,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     private var quickAppIcons: [String: TFAppIconView] = [:]
     private let quickHeaderLabel = NSTextField(labelWithString: "常用")
     private weak var activeRuntimeButton: TFRuntimeControlButton?
+    private weak var activeRuntimeFPSLabel: NSTextField?
     private var runtimeProgressTimer: Timer?
     private var runtimeBusyStartDate: Date?
     private var needsRuntimeDownload = false
@@ -1659,7 +1660,16 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
 
     func updateTelemetry(_ telemetry: ContainerTelemetry) {
         currentTelemetry = telemetry
-        if selectedSection == .monitor || selectedSection == .apps {
+        if let fpsLabel = activeRuntimeFPSLabel {
+            if telemetry.presentedFPS > 0.5 {
+                fpsLabel.stringValue = String(format: "%.0f FPS", telemetry.presentedFPS)
+                fpsLabel.isHidden = false
+            } else {
+                fpsLabel.stringValue = ""
+                fpsLabel.isHidden = true
+            }
+        }
+        if selectedSection == .monitor {
             rebuildPageContent()
         }
     }
@@ -1671,12 +1681,23 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         preferences: ContainerPreferences,
         readiness: [ReadinessCheckItem]
     ) {
+        let tabletModeChanged = self.currentPreferences.tabletMode != preferences.tabletMode
+        let settingsChanged =
+            self.cameraEnabled != cameraEnabled ||
+            self.canChangeCamera != canChangeCamera ||
+            self.rootPath != rootPath ||
+            self.currentPreferences != preferences
+        let readinessChanged = self.currentReadiness != readiness
         self.cameraEnabled = cameraEnabled
         self.canChangeCamera = canChangeCamera
         self.rootPath = rootPath
         self.currentPreferences = preferences
         self.currentReadiness = readiness
-        if selectedSection == .settings || selectedSection == .serving || selectedSection == .apps {
+        if selectedSection == .settings && settingsChanged {
+            rebuildPageContent()
+        } else if selectedSection == .serving && (settingsChanged || readinessChanged) {
+            rebuildPageContent()
+        } else if selectedSection == .apps && tabletModeChanged {
             rebuildPageContent()
         }
     }
@@ -2235,12 +2256,12 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         rightControls.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(rightControls)
 
-        if currentTelemetry.presentedFPS > 0.5 {
-            let fpsLbl = NSTextField(labelWithString: String(format: "%.0f FPS", currentTelemetry.presentedFPS))
-            fpsLbl.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-            fpsLbl.textColor = TFTheme.ink3
-            rightControls.addArrangedSubview(fpsLbl)
-        }
+        let fpsLbl = NSTextField(labelWithString: currentTelemetry.presentedFPS > 0.5 ? String(format: "%.0f FPS", currentTelemetry.presentedFPS) : "")
+        fpsLbl.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        fpsLbl.textColor = TFTheme.ink3
+        fpsLbl.isHidden = currentTelemetry.presentedFPS <= 0.5
+        activeRuntimeFPSLabel = fpsLbl
+        rightControls.addArrangedSubview(fpsLbl)
 
         let androidModeSwitch = TFSegmentedControl(
             options: [
@@ -2383,7 +2404,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             switch selectedCategory {
             case .all: matchesCategory = true
             case .installed: matchesCategory = app.isInstalled
-            case .enterprise: matchesCategory = app.category.contains("办公")
+            case .enterprise: matchesCategory = app.category.contains("办公") || app.title.contains("办公")
             case .lifestyle: matchesCategory = app.category.contains("生活") || app.category.contains("市场") || app.category.contains("社交")
             case .system: matchesCategory = app.isSystem
             }
@@ -3593,6 +3614,7 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
 
     func performExplicitClose() {
         allowExplicitClose = true
+        defer { allowExplicitClose = false }
         window?.close()
     }
 
@@ -3602,7 +3624,6 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
         onClose = nil
         performExplicitClose()
         onClose = closeHandler
-        window?.windowController = nil
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -3611,6 +3632,7 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
             return true
         }
         sender.miniaturize(nil)
+        onManagement?()
         return false
     }
 

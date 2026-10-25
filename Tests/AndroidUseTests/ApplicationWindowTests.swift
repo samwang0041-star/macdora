@@ -334,4 +334,18 @@ final class ApplicationWindowTests: XCTestCase {
         let readyBtn = try XCTUnwrap(collectRuntimeButtons(in: rootView).first)
         XCTAssertEqual(readyBtn.mode, .stop)
     }
+
+    @MainActor
+    func testExplicitAndRuntimeClosePreserveWindowControllerAndResetCloseGuard() throws {
+        _ = NSApplication.shared
+        let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        let window = try XCTUnwrap(controller.window)
+        var managementPresented = 0
+        controller.onManagement = { managementPresented += 1 }
+
+        controller.performRuntimeOperationClose()
+        XCTAssertTrue(window.windowController === controller, "Reused ApplicationWindow must keep its NSWindowController attached")
+        XCTAssertFalse(controller.windowShouldClose(window), "allowExplicitClose must reset after performExplicitClose")
+        XCTAssertEqual(managementPresented, 1, "Red close button miniaturize should surface ManagementWindow")
+    }
 }

@@ -977,22 +977,34 @@ struct MacdoraUpdateService: Sendable {
     }
 
     static func spawnDetachedRelaunch(for appURL: URL, waitingForPID pid: Int32) throws {
+        let script = relaunchShellScript(waitingForPID: pid)
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+        proc.arguments = ["-c", script, "macdora-relaunch", appURL.path]
+        proc.standardInput = FileHandle.nullDevice
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try proc.run()
+    }
+
+    static func relaunchShellScript(waitingForPID pid: Int32) -> String {
         let script = [
             "PID=\(pid)",
             "APP_PATH=\"$1\"",
             "i=0",
-            "while kill -0 \"$PID\" 2>/dev/null && [ $i -lt 100 ]; do",
+            "while kill -0 \"$PID\" 2>/dev/null && [ $i -lt 30 ]; do",
             "  sleep 0.1",
             "  i=$((i + 1))",
             "done",
-            "/usr/bin/open -n \"$APP_PATH\""
+            "if kill -0 \"$PID\" 2>/dev/null; then",
+            "  kill -TERM \"$PID\" 2>/dev/null || true",
+            "  sleep 0.2",
+            "  kill -KILL \"$PID\" 2>/dev/null || true",
+            "  sleep 0.1",
+            "fi",
+            "/usr/bin/open \"$APP_PATH\""
         ].joined(separator: "\n")
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-        proc.arguments = ["-c", script, "macdora-relaunch", appURL.path]
-        proc.standardOutput = Pipe()
-        proc.standardError = Pipe()
-        try proc.run()
+        return script
     }
 }
 
@@ -1160,7 +1172,12 @@ final class MacdoraUpdateController {
             } else {
                 let pid = ProcessInfo.processInfo.processIdentifier
                 try MacdoraUpdateService.spawnDetachedRelaunch(for: targetAppURL, waitingForPID: pid)
-                NSApplication.shared.terminate(nil)
+                DispatchQueue.main.async {
+                    NSApplication.shared.terminate(nil)
+                }
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.2) {
+                    Darwin.exit(0)
+                }
             }
         } catch let error as MacdoraUpdateError {
             state = .failed(message: error.userMessage, retryOffer: staged.offer)
