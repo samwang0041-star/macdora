@@ -6,7 +6,7 @@ CONFIGURATION="${ANDROID_USE_BUILD_CONFIGURATION:-release}"
 APP="$PROJECT_ROOT/artifacts/Macdora.app"
 LEGACY_APP="$PROJECT_ROOT/artifacts/Android Use.app"
 MACDORA_VERSION="$(tr -d '[:space:]' < "$PROJECT_ROOT/VERSION" 2>/dev/null || echo '0.01')"
-MACDORA_BUILD="${MACDORA_BUILD_NUMBER:-3}"
+MACDORA_BUILD="${MACDORA_BUILD_NUMBER:-4}"
 MACDORA_REPO="${MACDORA_GITHUB_REPOSITORY:-samwang0041-star/macdora}"
 BUNDLE_RUNTIME="${MACDORA_BUNDLE_RUNTIME:-0}"
 if [[ "$BUNDLE_RUNTIME" != "0" && "$BUNDLE_RUNTIME" != "1" ]]; then
@@ -41,9 +41,15 @@ bash "$PROJECT_ROOT/scripts/build-moltenvk.sh"
 bash "$PROJECT_ROOT/scripts/build-android-ime.sh"
 swift build -c "$CONFIGURATION"
 BIN_DIR="$(swift build -c "$CONFIGURATION" --show-bin-path)"
+# A ticket from the previous build does not apply to the newly assembled code.
+rm -f "$APP/Contents/CodeResources"
 rm -rf "$APP/Contents/Resources"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/Notices"
 cp "$BIN_DIR/AndroidUse" "$APP/Contents/MacOS/AndroidUse"
+if [[ "$CONFIGURATION" == "release" ]]; then
+  # Keep local source/object paths and debug symbols out of the distribution.
+  xcrun strip -S -x "$APP/Contents/MacOS/AndroidUse"
+fi
 cp "$PROJECT_ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$PROJECT_ROOT/.build/scrcpy-ordered/scrcpy-server" "$APP/Contents/Resources/scrcpy-server-v5.0.1"
 cp "$PROJECT_ROOT/Vendor/scrcpy-5.0.1/LICENSE" "$APP/Contents/Resources/Notices/scrcpy-LICENSE.txt"
@@ -259,6 +265,116 @@ if [[ -z "$SIGN_ID" ]]; then
 fi
 # Only remove extended attributes from our newly assembled local artifact.
 xattr -cr "$APP"
-codesign --force --options runtime --timestamp=none --entitlements "$PROJECT_ROOT/Resources/AndroidUse.entitlements" --sign "$SIGN_ID" "$APP"
-codesign --verify --strict --verbose=2 "$APP"
+if [[ "$SIGN_ID" == "-" ]]; then
+  TIMESTAMP_ARGUMENT="--timestamp=none"
+else
+  TIMESTAMP_ARGUMENT="--timestamp"
+fi
+
+# Sign nested Mach-O helpers from the deepest path outwards. The main executable
+# and app bundle are signed after the runtime manifest has its final distributions.
+python3 - "$APP" "$SIGN_ID" "$TIMESTAMP_ARGUMENT" "$PROJECT_ROOT/Resources/AndroidUse.entitlements" <<'PY'
+import hashlib,json,plistlib,re,subprocess,sys
+from pathlib import Path
+app=Path(sys.argv[1]);identity=sys.argv[2];timestamp=sys.argv[3]
+entitlements=Path(sys.argv[4])
+development=identity=='-'
+magic={
+ b'\xfe\xed\xfa\xce',b'\xce\xfa\xed\xfe',
+ b'\xfe\xed\xfa\xcf',b'\xcf\xfa\xed\xfe',
+ b'\xca\xfe\xba\xbe',
+}
+def is_macho(path):
+ try:
+  with path.open('rb') as stream:return stream.read(4) in magic
+ except OSError:return False
+main_dir=app/'Contents/MacOS'
+if main_dir.is_symlink() or not main_dir.is_dir():
+ raise SystemExit('Invalid app executable directory')
+main_executables=sorted(path for path in main_dir.rglob('*') if path.is_file() and not path.is_symlink() and is_macho(path))
+nested=sorted(
+ (path for path in app.rglob('*') if path.is_file() and not path.is_symlink() and is_macho(path) and main_dir not in path.parents),
+ key=lambda path:len(path.relative_to(app).parts),reverse=True)
+if not main_executables or not nested:
+ raise SystemExit('Expected app executable and nested Mach-O helpers')
+for path in nested:
+ subprocess.run(['/usr/bin/codesign','--force','--options','runtime',timestamp,
+                 '--sign',identity,str(path)],check=True)
+primary_executable=main_dir/plistlib.loads((app/'Contents/Info.plist').read_bytes())['CFBundleExecutable']
+if primary_executable not in main_executables:
+ raise SystemExit('Primary app executable is missing or not Mach-O')
+for path in main_executables:
+ if path==primary_executable:continue
+ subprocess.run(['/usr/bin/codesign','--force','--options','runtime',timestamp,
+                 '--entitlements',str(entitlements),'--sign',identity,str(path)],check=True)
+
+manifest_path=app/'Contents/Resources/runtime-manifest.json'
+manifest=json.loads(manifest_path.read_text())
+seed=app/'Contents/Resources/RuntimeSeed'
+camera=seed/'libmaccamera_frame_sync.dylib'
+gpu=seed/'libMacdoraMoltenVK.dylib'
+graphics=manifest.get('graphicsDriver')
+if not isinstance(graphics,dict):
+ raise SystemExit('runtime manifest graphicsDriver provenance missing')
+provenance_hash=graphics.get('librarySHA256')
+if not isinstance(provenance_hash,str) or re.fullmatch(r'[0-9a-f]{64}',provenance_hash) is None:
+ raise SystemExit('runtime manifest original graphicsDriver SHA-256 missing')
+manifest['cameraSyncHelperSHA256']=hashlib.file_digest(camera.open('rb'),'sha256').hexdigest()
+graphics['distributionLibrarySHA256']=hashlib.file_digest(gpu.open('rb'),'sha256').hexdigest()
+manifest_path.write_text(json.dumps(manifest,indent=2)+'\n')
+
+# Sign the app exactly once after all nested signatures and sealed metadata are final.
+subprocess.run(['/usr/bin/codesign','--force','--options','runtime',timestamp,
+                '--entitlements',str(entitlements),'--sign',identity,str(app)],check=True)
+
+def team_id(info):
+ values=[line.split('=',1)[1].strip() for line in info.splitlines()
+         if line.startswith('TeamIdentifier=')]
+ return values[0] if len(values)==1 and re.fullmatch(r'[A-Z0-9]{10}',values[0]) else None
+
+def verify_machos():
+ infos={}
+ for path in sorted(nested+main_executables+[app]):
+  result=subprocess.run(['/usr/bin/codesign','--display','--verbose=4',str(path)],
+                        capture_output=True,text=True,check=True)
+  info=result.stdout+result.stderr
+  relative=path.relative_to(app) if path!=app else Path(app.name)
+  flags=re.search(r'\bflags=0x([0-9a-fA-F]+)',info)
+  if not flags or not (int(flags.group(1),16)&0x10000):
+   raise SystemExit('Mach-O missing hardened runtime: '+str(relative))
+  if 'Signature=adhoc' in info:
+   if not development:
+    raise SystemExit('Formal build contains ad-hoc Mach-O: '+str(relative))
+   if 'Timestamp=' in info:
+    raise SystemExit('Development Mach-O unexpectedly has a secure timestamp: '+str(relative))
+  else:
+   if development:
+    raise SystemExit('Development build unexpectedly has identity-signed Mach-O: '+str(relative))
+   if 'Authority=Developer ID Application:' not in info:
+    raise SystemExit('Mach-O is not signed by Developer ID Application: '+str(relative))
+   if 'Timestamp=' not in info:
+    raise SystemExit('Developer ID Mach-O is missing a secure timestamp: '+str(relative))
+   if team_id(info) is None:
+    raise SystemExit('Developer ID Mach-O is missing TeamIdentifier: '+str(relative))
+  infos[path]=info
+ teams={value for info in infos.values() if (value:=team_id(info)) is not None}
+ if not development and len(teams)!=1:
+  raise SystemExit('Mach-O TeamIdentifier values do not match')
+ team=next(iter(teams)) if teams else None
+ verify=['/usr/bin/codesign','--verify','--strict','--verbose=2']
+ if not development and team:
+  verify+=['-R',f'=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = "{team}"']
+ for path in infos:
+  subprocess.run(verify+[str(path)],check=True)
+ return teams
+
+teams=verify_machos()
+if not development and len(teams)!=1:
+ raise SystemExit('Developer ID signing Team verification failed')
+final_manifest=json.loads(manifest_path.read_text())
+if (final_manifest.get('cameraSyncHelperSHA256')!=hashlib.file_digest(camera.open('rb'),'sha256').hexdigest()
+    or final_manifest['graphicsDriver'].get('distributionLibrarySHA256')!=hashlib.file_digest(gpu.open('rb'),'sha256').hexdigest()
+    or final_manifest['graphicsDriver'].get('librarySHA256')!=provenance_hash):
+ raise SystemExit('Signed distribution hashes or original provenance do not match')
+PY
 printf 'Built and signed: %s\n' "$APP"

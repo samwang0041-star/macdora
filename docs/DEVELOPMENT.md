@@ -15,11 +15,13 @@ swift test
 ANDROID_USE_SIGN_IDENTITY=- bash scripts/build-macos.sh
 ```
 
-输出位于 `artifacts/Macdora.app`。上面的 `-` 只用于本地 ad-hoc 签名；正式发布包使用维护者自己的 Developer ID 身份。
+输出位于 `artifacts/Macdora.app`。上面的 `-` 只用于本地 ad-hoc 签名，使用 `--timestamp=none`，产物只能用于开发，发布脚本会拒绝它。正式包省略 `ANDROID_USE_SIGN_IDENTITY`，或传入本机唯一的 Developer ID Application 身份；脚本会从最内层 Mach-O 开始签名，最后签 app，并对所有 Mach-O 使用 hardened runtime 和安全时间戳。不要把证书名称、Team ID 或私钥写入仓库。
 
 构建脚本从固定官方地址取得 scrcpy 与 Android SDK 构建输入，校验 SHA-256 后存入忽略的 `.cache/`。MoltenVK 及相关源码在 `.build/` 内独立编译，上游来源、输入补丁与许可证随仓库提供。构建不依赖另一款已安装的 Android 运行产品。
 
 默认只打应用本体和小型组件。运行时所需的 Android 镜像、模拟器与 ADB 由客户端首次按需下载；只为离线开发准备完整包时使用 `MACDORA_BUNDLE_RUNTIME=1`，该全量包不用于正式 Release。
+
+正式构建会移除分发主程序的调试符号；开发目录图标回退仅在 Debug 构建启用。摄像头组件使用相对安装标识，安装包不包含维护者的本机构建路径。
 
 ## 测试与截图
 
@@ -34,13 +36,29 @@ swift test
 版本以根目录 `VERSION` 为准。客户端读取 `samwang0041-star/macdora` 的公开 GitHub Releases，匿名检查版本并下载 ZIP 和 SHA-256 清单，不需要 GitHub Key。
 
 ```sh
-bash scripts/build-macos.sh
-bash scripts/release-github.sh
-# 在获得明确发布授权、完成测试与签名验证之后：
+# 正式签名构建（需要 Developer ID Application 身份）
+MACDORA_BUILD_NUMBER=4 bash scripts/build-macos.sh
+
+# 先用本机 notarytool Keychain profile 提交、等待、staple，并生成验收日志
+MACDORA_NOTARY_PROFILE='<keychain-profile>' bash scripts/notarize-macos.sh
+
+# 仅获得明确发布授权后；发布门直接验证 Stapled 票据和 Gatekeeper
 MACDORA_CONFIRM_RELEASE=1 bash scripts/release-github.sh --publish
 ```
 
-发布者通过本机 `gh` 的凭据或 CI secrets 认证。凭据不会进入应用包或源码。源码和 Release 位于同一公开仓库；客户端与发布端的认证需求分别处理。
+`notarize-macos.sh` 只从环境变量读取 `MACDORA_NOTARY_PROFILE`，不保存 Apple ID、密码或 profile 名称。它先验证所有 Mach-O 的 Developer ID 证书、Team、安全时间戳和 hardened runtime，再用 `ditto` 创建提交 ZIP；`notarytool submit --output-format json` 只调用一次，超时后使用返回的 submission UUID 查询，不重复提交。只有状态为 `Accepted` 才允许 `stapler`，然后在 app 内钉附票据、重新创建分发 ZIP。JSON、日志和 ZIP 都写入被忽略的 `artifacts/notarization/`。
+
+`submit` 返回 UUID 后，若在时限内尚未完成，脚本会保留 UUID 和 JSON 并退出。保持原构建不变，通过同一个 UUID 继续查询和完成钉附，避免重复上传：
+
+```sh
+MACDORA_NOTARY_PROFILE='<keychain-profile>' bash scripts/notarize-macos.sh --resume '<submission-uuid>'
+```
+
+发布脚本在任何 GitHub 写操作之前会再次验证 Developer ID、Team、安全时间戳、hardened runtime、嵌套签名、签名后更新过的 RuntimeSeed 哈希、已钉附票据、Gatekeeper 和 `syspolicy_check distribution`。正式发布还要求 `MACDORA_CONFIRM_RELEASE=1` 和固定公开仓库 `samwang0041-star/macdora`。本地同名 ZIP 会通过临时文件原子替换，便于先 package 再 publish；已存在的 GitHub Release 会被拒绝，请升版本，不要覆盖已发布资产。未公证的开发包可以本地打包，但 `--publish` 会拒绝。
+
+`runtime-manifest.json` 在签名完成后记录分发副本的 `cameraSyncHelperSHA256`。MoltenVK 的 `graphicsDriver.librarySHA256` 继续保留源码构建 provenance，`graphicsDriver.distributionLibrarySHA256` 单独记录签名后分发副本，二者不能混用。
+
+发布者通过本机 `gh` 的凭据或 CI secrets 认证。凭据不会进入应用包或源码。源码和 Release 位于同一公开仓库；客户端与发布端的认证需求分别处理。发布说明只会在上述公证和 Gatekeeper 门通过后声明“已完成 Apple 公证”。
 
 ## 插件
 

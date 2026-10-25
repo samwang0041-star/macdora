@@ -105,11 +105,13 @@ struct ContainerApp: Codable, Equatable, Identifiable, Sendable {
                 candidates.append(resourceURL.appendingPathComponent("AppIcons/\(fileName)"))
                 candidates.append(resourceURL.appendingPathComponent("RuntimeSeed/icons/\(fileName)"))
             }
+            #if DEBUG
             let repoRoot = URL(fileURLWithPath: #filePath)
                 .deletingLastPathComponent()
                 .deletingLastPathComponent()
                 .deletingLastPathComponent()
             candidates.append(repoRoot.appendingPathComponent("Resources/AppIcons/\(fileName)"))
+            #endif
         }
 
         for url in candidates where fileManager.isReadableFile(atPath: url.path) {

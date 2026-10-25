@@ -678,11 +678,15 @@ struct RuntimePreparation: @unchecked Sendable {
     }
 
     private func publishBundledAppIcons() throws {
+        #if DEBUG
         let repoIconsDir = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("Resources/AppIcons", isDirectory: true)
+        #else
+        let repoIconsDir: URL? = nil
+        #endif
         let candidateDirs = [
             seed.directoryURL?.appendingPathComponent("icons", isDirectory: true),
             Bundle.main.resourceURL?.appendingPathComponent("AppIcons", isDirectory: true),

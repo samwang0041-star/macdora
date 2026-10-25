@@ -82,7 +82,7 @@ Macdora 就从这里开始。它目前以 Android App 为切入口，使用原�
 
 目前支持 **Apple Silicon Mac / macOS 15 及以上**。应用和 Android 数据分别保存，更新 Macdora 不需要重新下载已经准备好的同版本环境。
 
-预览安装包使用 Developer ID 签名，尚未完成 Apple 公证；macOS 可能要求在“系统设置 → 隐私与安全性”中确认打开。
+从 **0.04** 起，正式发布包使用 Developer ID 签名并通过 Apple 公证，公证票随应用封装。首次打开时，macOS 仍可能显示常规的下载确认。
 
 ## 这仍然是一个早期预览
 
