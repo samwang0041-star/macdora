@@ -176,7 +176,7 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
         metal.device = device
         metal.pixelFormat = .bgra8Unorm
         metal.framebufferOnly = (bgraPipelineState != nil || nv12PipelineState != nil)
-        metal.maximumDrawableCount = ProcessInfo.processInfo.environment["ANDROID_USE_MAX_DRAWABLES"] == "3" ? 3 : 2
+        metal.maximumDrawableCount = ProcessInfo.processInfo.environment["ANDROID_USE_MAX_DRAWABLES"] == "2" ? 2 : 3
         metal.isOpaque = true
         metal.backgroundColor = NSColor.black.cgColor
         metal.colorspace = CGColorSpace(name: CGColorSpace.sRGB)

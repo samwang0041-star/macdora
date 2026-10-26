@@ -78,7 +78,7 @@ final class ProbeAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             let measurement = ProbeMeasurement(); self.measurement = measurement
             measurement.metadata = ["decoderPixelFormat": H264Decoder.outputPixelFormat,
                                     "windowLevel": "normal", "targetFPS": 60,
-                                    "maximumDrawables": ProcessInfo.processInfo.environment["ANDROID_USE_MAX_DRAWABLES"] == "3" ? 3 : 2]
+                                    "maximumDrawables": ProcessInfo.processInfo.environment["ANDROID_USE_MAX_DRAWABLES"] == "2" ? 2 : 3]
             measurement.metadata["presentationQueue"] = "coalesced-latest-frame"
             measurement.metadata["renderQueue"] = ProcessInfo.processInfo.environment["ANDROID_USE_RENDER_QUEUE"] == "main" ? "main" : "background"
             surface.onRenderPath = { [weak measurement] path in

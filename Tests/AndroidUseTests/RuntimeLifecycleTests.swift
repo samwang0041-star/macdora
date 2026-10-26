@@ -49,6 +49,8 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(tabletScript.contains("u:object_r:qemu_sf_lcd_density_prop:s0"))
         XCTAssertTrue(tabletScript.contains("7a03bac2-692f-3d17-a2cd-a1b0721ffd0e"))
         XCTAssertTrue(tabletScript.contains("8fa14cdd-754f-31cc-a554-c9e71929cce7"))
+        XCTAssertTrue(tabletScript.contains("sys.androiduse.winext_patch"))
+        XCTAssertTrue(tabletScript.contains("/system_ext/framework/androidx.window.extensions.jar"))
         XCTAssertTrue(tabletScript.contains("setprop ctl.restart zygote"))
         XCTAssertTrue(tabletScript.contains("disable_slirp_ipv6"))
         XCTAssertTrue(tabletScript.contains("ip6tables -w -I OUTPUT -d 2000::/3 -j REJECT"))
@@ -278,6 +280,8 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(env["MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS"], "0")
         let setupScripts = RuntimeSoftwareDefaults.guestSetupScript
         XCTAssertTrue(setupScripts.contains("cmd power set-fixed-performance-mode-enabled true"))
+        XCTAssertTrue(setupScripts.contains("settings put system min_refresh_rate 60.0"))
+        XCTAssertTrue(setupScripts.contains("settings put system peak_refresh_rate 60.0"))
         XCTAssertTrue(setupScripts.contains("setprop debug.sf.vsync_reactor_ignore_present_fences true"))
         XCTAssertTrue(setupScripts.contains("setprop debug.sf.latch_unsignaled 1"))
         let stopped = await fixture.controller.stop()

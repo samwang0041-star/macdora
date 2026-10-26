@@ -14,6 +14,7 @@ final class RuntimeControllerTests: XCTestCase {
         XCTAssertTrue(command.contains("video_codec=h264"))
         XCTAssertTrue(command.contains("video_bit_rate=24000000"))
         XCTAssertTrue(command.contains("max_fps=60"))
+        XCTAssertTrue(command.contains("video_codec_options=low-latency=1"))
         XCTAssertTrue(command.contains("new_display=1080x1920/420"))
         XCTAssertTrue(command.contains("send_device_meta=false"))
         XCTAssertTrue(command.contains("send_dummy_byte=false"))

@@ -1031,6 +1031,7 @@ enum RuntimePorts {
             + " app_process / com.genymobile.scrcpy.Server 5.0.1"
             + " tunnel_forward=true audio=false control=true"
             + " video_codec=h264 video_bit_rate=\(bitRate) max_fps=\(clampedFPS)"
+            + " video_codec_options=low-latency=1"
             + " new_display=\(displaySpec) vd_system_decorations=false"
             + " display_ime_policy=local clipboard_autosync=false"
             + " send_device_meta=false send_dummy_byte=false"

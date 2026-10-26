@@ -680,9 +680,14 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         absentCount = 0
         let monitoredPackage = activePackage
         let appTitle = resolvedAppMetadata(for: monitoredPackage).title
+        var tickCount = 0
         presenceTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.presenceQueryInProgress, self.displayGeneration == generation, self.stream != nil else { return }
+                tickCount &+= 1
+                if self.hasObservedTarget && self.absentCount == 0 && (tickCount % 5) != 0 {
+                    return
+                }
                 self.presenceQueryInProgress = true
                 let presence = await self.runtime.targetPresence(package: monitoredPackage)
                 self.presenceQueryInProgress = false

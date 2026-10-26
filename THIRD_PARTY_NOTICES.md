@@ -24,6 +24,8 @@ Android Emulator, platform-tools, and the AOSP arm64 system image are obtained f
 
 The official graphics stack also uses [ANGLE](https://chromium.googlesource.com/angle/angle/) and other dependencies covered by the notices in the emulator distribution. An [ANGLE BSD license copy](Vendor/MoltenVK-1.4.2/licenses/ANGLE-LICENSE) is retained for reference. It does not relicense code by other authors.
 
+In tablet mode, Macdora overlays an ActivityEmbedding split-attributes and draggable-divider compatibility patch (`Guest/WindowExtensionsPatch`, derived from AOSP `androidx.window.extensions` under Apache-2.0, copyright The Android Open Source Project) onto the guest's `androidx.window.extensions.jar` at runtime so legacy ActivityEmbedding applications support desktop split-pane resizing and multi-pane focus semantics.
+
 Macdora does not include third party business applications. Users select their own APK files, which remain subject to the corresponding application owners' terms.
 
 ## Product references
