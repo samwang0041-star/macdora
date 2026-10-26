@@ -170,11 +170,11 @@ public class SplitAttributes {
             this.mLayoutDirection = 3;
             this.mAnimationParams = new AnimationParams.Builder().build();
             this.mWindowAttributes = new WindowAttributes(2);
-            this.mSplitType = original.mSplitType;
-            this.mLayoutDirection = original.mLayoutDirection;
-            this.mAnimationParams = original.mAnimationParams;
-            this.mWindowAttributes = original.mWindowAttributes;
-            this.mDividerAttributes = original.mDividerAttributes;
+            this.mSplitType = original.getSplitType();
+            this.mLayoutDirection = original.getLayoutDirection();
+            this.mAnimationParams = original.getAnimationParams();
+            this.mWindowAttributes = original.getWindowAttributes();
+            this.mDividerAttributes = original.getDividerAttributes();
         }
 
         public Builder setSplitType(SplitType splitType) {
