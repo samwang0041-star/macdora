@@ -58,6 +58,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         manager.onUpdatePreferences = { [weak self] prefs in self?.updateContainerPreferences(prefs) }
         manager.onClearCache = { [weak self] in self?.clearContainerCache() }
         manager.onRevealData = { [weak self] in self?.revealData() }
+        manager.onAppearanceChanged = { [weak self] in self?.applicationWindow?.refreshTheme() }
         manager.onImportDeveloperPlugin = { [weak self] in self?.chooseDeveloperPluginPackage() }
         manager.onExportDeveloperPluginTemplate = { [weak self] in self?.exportDeveloperPluginTemplate() }
         manager.onRevealPluginsDirectory = { [weak self] in self?.revealPluginsDirectory() }

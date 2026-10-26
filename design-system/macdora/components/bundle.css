@@ -1,0 +1,33 @@
+.md-button {
+  min-height: 28px; padding: 0 var(--space-12); border: 1px solid var(--line);
+  border-radius: var(--radius-button); background: var(--card); color: var(--ink);
+  cursor: pointer; white-space: nowrap;
+}
+.md-button:not(:disabled):hover { background: var(--card2); }
+.md-button:not(:disabled):active { transform: translateY(1px); }
+.md-button:disabled { opacity: .45; cursor: default; transform: none; }
+.md-button--primary { border-color: var(--accent-fill); background: var(--accent-fill); color: var(--on-fill); }
+.md-button--primary:not(:disabled):hover { background: var(--accent-pressed); border-color: var(--accent-pressed); }
+.md-button--tinted { border-color: rgba(0,0,0,0); background: var(--accent-soft); color: var(--accent-ink); }
+.md-button--tinted:not(:disabled):hover { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent-ink); }
+.md-button--subtle { background: var(--card2); border-color: rgba(0,0,0,0); }
+.md-button--ghost, .md-button--danger { background: rgba(0,0,0,0); border-color: rgba(0,0,0,0); color: var(--ink2); }
+.md-button--ghost:not(:disabled):hover { background: var(--card2); }
+.md-button--danger:not(:disabled):hover { background: var(--danger-soft); color: var(--danger); }
+.md-button:focus-visible, .md-toggle input:focus-visible + .md-toggle-track,
+.md-segmented input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 3px; }
+.md-toggle { display: inline-flex; align-items: center; gap: var(--space-8); color: var(--ink2); cursor: pointer; }
+.md-toggle input, .md-segmented input, .md-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.md-toggle-track { width: 34px; height: 20px; border: 1px solid var(--ink3); border-radius: 10px; background: var(--card2); position: relative; }
+.md-toggle-track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 7px; background: var(--ink3); }
+.md-toggle input:checked + .md-toggle-track { background: var(--accent-fill); border-color: var(--accent-fill); }
+.md-toggle input:checked + .md-toggle-track::after { left: 16px; background: var(--on-fill); }
+.md-toggle input:disabled ~ span { opacity: .45; }
+.md-segmented { display: inline-flex; margin: 0; padding: 3px; gap: 2px; border: 1px solid var(--line); border-radius: var(--radius-button); background: var(--card2); }
+.md-segmented label { position: relative; cursor: pointer; }
+.md-segmented span { display: block; padding: 6px var(--space-12); border-radius: 5px; color: var(--ink2); }
+.md-segmented input:checked + span { background: var(--card); color: var(--ink); box-shadow: var(--shadow-card); }
+@media (prefers-reduced-motion: reduce) { .md-button:not(:disabled):active { transform: none; } }
+@media (pointer: coarse) { .md-button { min-height: 44px; } .md-segmented span { padding-block: 12px; } .md-toggle { min-height: 44px; } }
+
+.md-segmented label:has(input:disabled) { cursor: default; opacity: .45; }

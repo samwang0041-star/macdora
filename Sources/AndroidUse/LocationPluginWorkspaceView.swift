@@ -177,7 +177,8 @@ final class DeveloperLocationWorkspaceView: NSView, MKMapViewDelegate, NSSearchF
         topRow.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(topRow)
 
-        searchField.placeholderString = "搜索地点、大厦或输入 纬度, 经度"
+        searchField.placeholderString = "搜索地点或输入纬度、经度"
+        searchField.setAccessibilityLabel("搜索地点或坐标")
         searchField.font = .systemFont(ofSize: 12.5)
         if let cell = searchField.cell as? NSSearchFieldCell {
             cell.sendsWholeSearchString = true
@@ -486,6 +487,7 @@ final class DeveloperLocationWorkspaceView: NSView, MKMapViewDelegate, NSSearchF
         row.translatesAutoresizingMaskIntoConstraints = false
 
         let lbl = NSTextField(labelWithString: message)
+        lbl.identifier = NSUserInterfaceItemIdentifier(isError ? "location-search-error" : "location-search-message")
         lbl.font = .systemFont(ofSize: 12.5, weight: .regular)
         lbl.textColor = isError ? TFTheme.danger : TFTheme.ink3
         lbl.lineBreakMode = .byTruncatingTail
@@ -535,6 +537,7 @@ final class DeveloperLocationWorkspaceView: NSView, MKMapViewDelegate, NSSearchF
             row.translatesAutoresizingMaskIntoConstraints = false
 
             let nameLbl = NSTextField(labelWithString: item.name)
+            nameLbl.identifier = NSUserInterfaceItemIdentifier("location-result-name")
             nameLbl.font = .systemFont(ofSize: 13, weight: .medium)
             nameLbl.textColor = TFTheme.ink
             nameLbl.lineBreakMode = .byTruncatingTail
@@ -543,6 +546,7 @@ final class DeveloperLocationWorkspaceView: NSView, MKMapViewDelegate, NSSearchF
             row.addSubview(nameLbl)
 
             let subLbl = NSTextField(labelWithString: "\(item.subtitle) · \(item.formattedLatLon)")
+            subLbl.identifier = NSUserInterfaceItemIdentifier("location-result-detail")
             subLbl.font = .systemFont(ofSize: 11.5, weight: .regular)
             subLbl.textColor = TFTheme.ink3
             subLbl.lineBreakMode = .byTruncatingTail
@@ -560,6 +564,7 @@ final class DeveloperLocationWorkspaceView: NSView, MKMapViewDelegate, NSSearchF
 
             if idx < capped.count - 1 {
                 let sep = TFCardView(frame: .zero)
+                sep.identifier = NSUserInterfaceItemIdentifier("location-result-separator")
                 sep.translatesAutoresizingMaskIntoConstraints = false
                 sep.cornerRadius = 0
                 sep.fillColor = TFTheme.line
@@ -687,6 +692,11 @@ final class DeveloperLocationWorkspaceView: NSView, MKMapViewDelegate, NSSearchF
     }
 
     func refreshTheme() {
+        searchField.textColor = TFTheme.ink
+        searchField.placeholderAttributedString = NSAttributedString(
+            string: "搜索地点或输入纬度、经度",
+            attributes: [.foregroundColor: TFTheme.ink3, .font: NSFont.systemFont(ofSize: 12.5)]
+        )
         controlCard.fillColor = TFTheme.card
         controlCard.strokeColor = TFTheme.line
         quickDriftLbl.textColor = TFTheme.ink2
@@ -694,6 +704,18 @@ final class DeveloperLocationWorkspaceView: NSView, MKMapViewDelegate, NSSearchF
         presetTitle.textColor = TFTheme.ink3
         searchResultsCard.fillColor = TFTheme.card
         searchResultsCard.strokeColor = TFTheme.line
+        for row in searchResultsStack.arrangedSubviews {
+            for view in row.subviews {
+                switch view.identifier?.rawValue {
+                case "location-result-name": (view as? NSTextField)?.textColor = TFTheme.ink
+                case "location-result-detail", "location-search-message": (view as? NSTextField)?.textColor = TFTheme.ink3
+                case "location-search-error": (view as? NSTextField)?.textColor = TFTheme.danger
+                case "location-result-separator": (view as? TFCardView)?.fillColor = TFTheme.line
+                default: break
+                }
+                (view as? TFButton)?.refreshColors()
+            }
+        }
         mapCard.fillColor = TFTheme.card
         mapCard.strokeColor = TFTheme.line
         floatingToolbar.fillColor = TFTheme.card.withAlphaComponent(0.92)
@@ -719,14 +741,14 @@ final class DeveloperLocationWorkspaceView: NSView, MKMapViewDelegate, NSSearchF
             latitudinalMeters: spanMeters,
             longitudinalMeters: spanMeters
         )
-        mapView.setRegion(region, animated: true)
+        mapView.setRegion(region, animated: !TFMotion.reducedMotion)
     }
 
     private func zoomMap(factor: Double) {
         var region = mapView.region
         region.span.latitudeDelta = max(0.0004, min(60.0, region.span.latitudeDelta * factor))
         region.span.longitudeDelta = max(0.0004, min(60.0, region.span.longitudeDelta * factor))
-        mapView.setRegion(region, animated: true)
+        mapView.setRegion(region, animated: !TFMotion.reducedMotion)
     }
 
     // MARK: - MKMapViewDelegate

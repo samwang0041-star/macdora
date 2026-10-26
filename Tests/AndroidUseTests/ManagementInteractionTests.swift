@@ -4,6 +4,38 @@ import XCTest
 
 @MainActor
 final class ManagementInteractionTests: XCTestCase {
+    func testIdlePagesKeepUncheckedAndUnmeasuredStatesExplicit() throws {
+        _ = NSApplication.shared
+        let manager = ManagementWindow()
+        let window = try XCTUnwrap(manager.window)
+        defer { window.orderOut(nil) }
+        let root = try XCTUnwrap(window.contentView)
+        func text() -> String {
+            descendants(root).compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: "\n")
+        }
+
+        manager.selectSection(.about)
+        XCTAssertFalse(text().contains("已是最新版本"), "An unchecked feed cannot establish that this version is current.")
+        manager.updateAppUpdateState(.upToDate(checkedAt: Date(), detail: "已是最新版本"))
+        XCTAssertTrue(text().contains("已是最新版本"))
+
+        manager.selectSection(.monitor)
+        XCTAssertTrue(text().contains("环境未启动"))
+        XCTAssertFalse(text().contains("按需刷新"), "A stopped environment has no frame activity to describe.")
+        XCTAssertFalse(text().contains("0.08 GB"), "Missing measurements must not become fabricated memory usage.")
+        XCTAssertEqual(descendants(root).compactMap { ($0 as? NSTextField)?.stringValue }.filter { $0 == "—" }.count, 3)
+
+        manager.selectSection(.serving)
+        XCTAssertTrue(text().contains("等待检查"))
+        XCTAssertFalse(text().contains("检查已通过"), "An empty result set cannot establish readiness.")
+
+        manager.update(.starting)
+        manager.selectSection(.apps)
+        let working = try XCTUnwrap(descendants(root).compactMap { $0 as? TFRuntimeControlButton }.first)
+        XCTAssertEqual(working.accessibilityLabel(), "正在启动…")
+        XCTAssertFalse(working.isEnabled, "Repeated start actions must stay blocked while startup is pending.")
+    }
+
     func testSearchKeepsItsEditorWhileTypingClearingAndRefreshingApps() throws {
         _ = NSApplication.shared
         let manager = ManagementWindow()
@@ -91,7 +123,7 @@ final class ManagementInteractionTests: XCTestCase {
         XCTAssertFalse(accessibilityLabels.contains("平板模式"))
         XCTAssertFalse(accessibilityLabels.contains("手机模式"))
         let text = controls.compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: "\n")
-        XCTAssertTrue(text.contains("切换显示比例与方向；设备身份和登录状态保持不变"))
+        XCTAssertTrue(text.contains("始终使用同一平板，仅调整显示方向"))
     }
 
     func testCategoryAndThemeChangesKeepSearchAndSelectionSynchronized() throws {

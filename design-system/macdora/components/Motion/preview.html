@@ -1,0 +1,9 @@
+<!-- @dsCard group="交互参考" height=260 subtitle="状态动效" -->
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>状态动效 · Macdora</title>
+<link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../bundle.css">
+<style>body{margin:0;background:var(--canvas);color:var(--ink);font-family:var(--font-sans)}.demo{padding:var(--space-24);display:grid;gap:var(--space-16)}h1,p{margin:0}h1{}p{color:var(--ink2);line-height:1.6}#controls{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-12)}.motion-target{padding:var(--space-16);border:1px solid var(--line);background:var(--card);border-radius:var(--radius-card);}#status{min-height:1.5em}</style></head>
+<body><main class="demo"><h1 class="section-title">状态动效</h1><p class="body">短反馈由用户触发；遵守系统与文档的减少动态效果偏好。</p><div id="controls"></div><div id="motion-target" class="motion-target body">当前页面已就绪</div><p class="body" id="status" role="status" aria-live="polite">网页交互参考，不执行产品操作。</p></main>
+<script src="../bundle.js"></script><script>(()=>{const status=document.getElementById("status");const row=document.getElementById("controls"); let reduced=false;
+const target=document.getElementById("motion-target");
+row.append(MacdoraUI.Button({label:"播放入场",variant:"tinted",onClick:()=>{MacdoraUI.Motion.reveal(target,reduced);status.textContent=(reduced||matchMedia("(prefers-reduced-motion: reduce)").matches)?"减少动态效果：直接显示最终状态。":"已播放一次 200ms 入场。";}}),MacdoraUI.Toggle({label:"减少动态效果",onChange:value=>{reduced=value;if(value)MacdoraUI.Motion.reveal(target,true);}}));})();</script></body></html>
