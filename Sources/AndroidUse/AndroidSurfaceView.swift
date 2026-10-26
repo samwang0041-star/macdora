@@ -123,6 +123,9 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
     var onRenderDiagnostic: ((String) -> Void)?
     var onFirstFrame: (() -> Void)?
     var onInput: ((Double) -> Void)?
+    var displaySyncEnabled: Bool { metal.displaySyncEnabled }
+    private let configuredPresentationInterval = ProcessInfo.processInfo.environment["ANDROID_USE_PACED_PRESENTATION"] == "0" ? 0.0 : 1.0 / 120.0
+    var minimumPresentationInterval: Double { metal.displaySyncEnabled ? 0 : configuredPresentationInterval }
     private var firstFrame = true
     private var backgroundRenderQueue: FrameRenderQueue<BackgroundRenderPayload>?
     var inputEnabled = true { didSet { updateSecureInput() } }
@@ -177,6 +180,8 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
         metal.pixelFormat = .bgra8Unorm
         metal.framebufferOnly = (bgraPipelineState != nil || nv12PipelineState != nil)
         metal.maximumDrawableCount = ProcessInfo.processInfo.environment["ANDROID_USE_MAX_DRAWABLES"] == "2" ? 2 : 3
+        // The guest already paces frames. Avoid a second host display-sync wait.
+        metal.displaySyncEnabled = ProcessInfo.processInfo.environment["ANDROID_USE_DISPLAY_SYNC"] == "1"
         metal.isOpaque = true
         metal.backgroundColor = NSColor.black.cgColor
         metal.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
@@ -224,12 +229,15 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
                           NSWindow.didDeminiaturizeNotification, NSWindow.didChangeOcclusionStateNotification,
                           NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification].map { name in
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
-                if name == NSWindow.didResignKeyNotification || name == NSApplication.didResignActiveNotification { self?.discardComposition() }
-                self?.updateSecureInput()
-                if name == NSWindow.didDeminiaturizeNotification || name == NSWindow.didChangeOcclusionStateNotification,
-                   let self, (notification.object as? NSWindow) === self.window,
-                   (name == NSWindow.didDeminiaturizeNotification || self.window?.occlusionState.contains(.visible) == true),
-                   let frame = self.lastFrame {
+                guard let self else { return }
+                if name == NSWindow.didResignKeyNotification || name == NSApplication.didResignActiveNotification { self.discardComposition() }
+                self.updateSecureInput()
+                let ownWindow = (notification.object as? NSWindow) === self.window
+                let redraw = name == NSApplication.didBecomeActiveNotification
+                    || (ownWindow && (name == NSWindow.didBecomeKeyNotification
+                        || name == NSWindow.didDeminiaturizeNotification
+                        || (name == NSWindow.didChangeOcclusionStateNotification && self.window?.occlusionState.contains(.visible) == true)))
+                if redraw, let frame = self.lastFrame {
                     self.submitCachedRedraw(frame, session: self.currentSessionID)
                 }
             }
@@ -713,7 +721,7 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
                 }
             }
         }
-        command.present(drawable)
+        present(drawable, using: command)
         command.commit()
         recordRenderDiagnostic(diagnostic, main: true, nextDrawableSeconds: drawableWait, session: session)
     }
@@ -867,10 +875,19 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
             }
         }
         guard backgroundRenderQueue?.commitIfCurrent(session: session, {
-            command.present(drawable)
+            present(drawable, using: command)
             command.commit()
         }) == true else { return }
         recordRenderDiagnostic(diagnostic, main: false, nextDrawableSeconds: drawableWait, session: session)
+    }
+
+    private func present(_ drawable: CAMetalDrawable, using command: MTLCommandBuffer) {
+        // Bound arrival bursts without adding another full 60 Hz frame of buffering.
+        if minimumPresentationInterval > 0 {
+            command.present(drawable, afterMinimumDuration: minimumPresentationInterval)
+        } else {
+            command.present(drawable)
+        }
     }
 
     private func resolveGuestPoint(_ point: CGPoint, clamp: Bool = false) -> CGPoint? {

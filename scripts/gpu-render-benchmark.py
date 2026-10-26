@@ -5,7 +5,7 @@ Profiles A/B/C reproduce specific GPU feature combinations; A is not a native
 AndroMeld benchmark. Reuse/cleanup require verified ownership of this VM.
 The probe APK must be the same signed artifact across all cases.
 """
-import argparse, subprocess, os, time, json, hashlib, socket, threading
+import argparse, subprocess, os, time, json, hashlib, socket, threading, math
 from pathlib import Path
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('name')
@@ -13,7 +13,10 @@ p.add_argument('--profile', choices=['c', 'b', 'a', 'production', 'angle-safe'],
 p.add_argument('--format', choices=['nv12', 'bgra'], default='nv12')
 p.add_argument('--reuse', action='store_true')
 p.add_argument('--keep', action='store_true')
-p.add_argument('--codec', default='')
+p.add_argument('--codec', default='low-latency=1')
+p.add_argument('--display', choices=['1080x1920/420', '1920x1200/240'], default='1080x1920/420')
+p.add_argument('--display-sync', choices=['on', 'off'])
+p.add_argument('--connection-delay', type=float, default=0, help='Allow up to 10 seconds to focus the host before the measured connection starts')
 p.add_argument('--runtime-dir', type=Path, required=True)
 p.add_argument('--evaluation-dir', type=Path, required=True)
 p.add_argument('--probe-apk', type=Path, required=True)
@@ -23,6 +26,7 @@ p.add_argument('--adb-port', type=int, default=5051)
 p.add_argument('--emulator-port', type=int, default=5590)
 p.add_argument('--avd', default='android17-evaluation')
 a = p.parse_args()
+a.connection_delay = min(10, max(0, a.connection_delay)) if math.isfinite(a.connection_delay) else 0
 root = Path(__file__).resolve().parents[1]
 a.output_root = a.output_root.resolve()
 a.state_dir = a.state_dir.resolve()
@@ -106,7 +110,7 @@ try:
             raise RuntimeError('install failed: ' + install.stdout + install.stderr)
     call(adb + ['push', str(root / '.build/scrcpy-ordered/scrcpy-server'), '/data/local/tmp/android-use-scrcpy.jar'], check=True)
     scid = '00004a11'
-    servercmd = 'CLASSPATH=/data/local/tmp/android-use-scrcpy.jar app_process / com.genymobile.scrcpy.Server 5.0.1 tunnel_forward=true audio=false control=true video_codec=h264 video_bit_rate=24000000 max_fps=60 new_display=1080x1920/420 vd_system_decorations=false display_ime_policy=local clipboard_autosync=false send_device_meta=false send_dummy_byte=false send_frame_meta=true send_stream_meta=true keep_active=true log_level=info vd_destroy_content=true scid=' + scid
+    servercmd = 'CLASSPATH=/data/local/tmp/android-use-scrcpy.jar app_process / com.genymobile.scrcpy.Server 5.0.1 tunnel_forward=true audio=false control=true video_codec=h264 video_bit_rate=24000000 max_fps=60 new_display=' + a.display + ' vd_system_decorations=false display_ime_policy=local clipboard_autosync=false send_device_meta=false send_dummy_byte=false send_frame_meta=true send_stream_meta=true keep_active=true log_level=info vd_destroy_content=true scid=' + scid
     if a.codec:
         servercmd += ' video_codec_options=' + a.codec
     server = subprocess.Popen(adb + ['shell', servercmd], stdout=(out / 'server.log').open('w'), stderr=subprocess.STDOUT)
@@ -115,9 +119,11 @@ try:
     binary = root / '.build/AndroidUseProbe.app/Contents/MacOS/AndroidUse'
     hostenv = os.environ.copy()
     hostenv['ANDROID_USE_DECODE_FORMAT'] = a.format
-    host = subprocess.Popen([str(binary), '--probe', '--benchmark', '--port', '27184', '--app', 'local.androiduse.probe', '--report', str(out / 'performance.json'), '--exit-after-report'], env=hostenv, stdout=(out / 'host.log').open('w'), stderr=subprocess.STDOUT)
+    if a.display_sync is not None:
+        hostenv['ANDROID_USE_DISPLAY_SYNC'] = '1' if a.display_sync == 'on' else '0'
+    host = subprocess.Popen([str(binary), '--probe', '--benchmark', '--connection-delay', str(a.connection_delay), '--port', '27184', '--app', 'local.androiduse.probe', '--report', str(out / 'performance.json'), '--exit-after-report'], env=hostenv, stdout=(out / 'host.log').open('w'), stderr=subprocess.STDOUT)
     vmpid = vm.pid if vm else json.loads(state_file.read_text())['pid']
-    monitor = subprocess.Popen(['python3', str(root / 'scripts/measure-resources.py'), '--pid', str(host.pid), '--pid', str(vmpid), '--seconds', '38', '--output', str(out / 'resources.json')], stdout=(out / 'resources.log').open('w'), stderr=subprocess.STDOUT)
+    monitor = subprocess.Popen(['python3', str(root / 'scripts/measure-resources.py'), '--pid', str(host.pid), '--pid', str(vmpid), '--seconds', str(38 + math.ceil(a.connection_delay)), '--output', str(out / 'resources.json')], stdout=(out / 'resources.log').open('w'), stderr=subprocess.STDOUT)
     props = {k: shell('getprop ' + k).stdout.strip() for k in ['ro.hardware.egl', 'ro.hardware.vulkan', 'ro.hardware.gltransport', 'ro.boot.hardware.gltransport', 'ro.opengles.version', 'debug.hwui.renderer', 'debug.renderengine.backend']}
     (out / 'properties.json').write_text(json.dumps(props, indent=2) + '\n')
     (out / 'manifest.json').write_text(json.dumps({'profile': a.profile, 'format': a.format, 'gpuDriverSHA256': gpu_driver_sha256, 'probeAPK_SHA256': hashlib.sha256(a.probe_apk.read_bytes()).hexdigest(), 'hostSHA256': hashlib.sha256(binary.read_bytes()).hexdigest(), 'hostEnvironment': {k: v for k, v in hostenv.items() if k.startswith('ANDROID_USE_')}, 'serverSHA256': hashlib.sha256((root / '.build/scrcpy-ordered/scrcpy-server').read_bytes()).hexdigest(), 'emulatorCommand': owned['command'] if a.reuse else cmd, 'serverCommand': servercmd, 'vmPID': vmpid, 'hostPID': host.pid}, indent=2) + '\n')

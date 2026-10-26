@@ -26,6 +26,13 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     private var activePackage: String = DefaultApp.package
     private var presentationTimes: [Double] = []
     private var usingHardwareDecoder = true
+    private let dockPresentation = AppDockPresentation(mode: AppDockIconMode.parse(arguments: ProcessInfo.processInfo.arguments))
+
+    init(manager: ManagementWindow? = nil, applicationWindow: ApplicationWindow? = nil) {
+        self.manager = manager
+        self.applicationWindow = applicationWindow
+        super.init()
+    }
 
     private func resolvedAppMetadata(for package: String) -> ContainerApp {
         runtime.cachedContainerApps().first(where: { $0.package == package })
@@ -33,7 +40,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApplication.shared.applicationIconImage = MacdoraBrand.appIconImage(size: 512)
+        dockPresentation.update(app: nil)
         installMenus()
         manager = ManagementWindow()
         manager.onOpen = { [weak self] in self?.openApp(package: self?.activePackage ?? DefaultApp.package) }
@@ -239,6 +246,11 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         let servingItem = windows.addItem(withTitle: "诊断", action: #selector(servingCommand), keyEquivalent: "5"); servingItem.target = self
         let aboutWindowItem = windows.addItem(withTitle: "关于 \(MacdoraBrand.appName)", action: #selector(aboutCommand), keyEquivalent: "6"); aboutWindowItem.target = self
         windows.addItem(.separator())
+        windows.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windows.addItem(withTitle: "缩放", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        let fullScreen = windows.addItem(withTitle: "进入 / 退出全屏", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        fullScreen.keyEquivalentModifierMask = [.control, .command]
+        windows.addItem(.separator())
         let tabletToggleItem = windows.addItem(withTitle: "切换手机 / 平板模式", action: #selector(toggleTabletModeCommand), keyEquivalent: "T")
         tabletToggleItem.keyEquivalentModifierMask = [.command, .shift]
         tabletToggleItem.target = self
@@ -362,6 +374,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             do {
                 if self.runtime.activeDisplayPackage == package {
+                    self.dockPresentation.update(app: nil)
                     self.stream?.stop()
                     self.stream = nil
                     await self.runtime.closeDisplay()
@@ -402,6 +415,8 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         let previousOperation = operation
         previousOperation?.cancel()
         if activePackage == package || runtime.activeDisplayPackage == package {
+            dockPresentation.update(app: nil)
+            openingPackage = nil
             displayGeneration = UUID()
             presenceTimer?.invalidate()
             presenceTimer = nil
@@ -446,6 +461,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
 
     private func openApp(package: String, forceReconfigureDisplay: Bool = false) {
         guard runtime.state != .stopping, !terminating else { return }
+        manager.show(detail: nil)
         let appMeta = resolvedAppMetadata(for: package)
         if !forceReconfigureDisplay,
            let applicationWindow,
@@ -521,6 +537,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 }
                 let refreshedMeta = self.resolvedAppMetadata(for: package)
                 self.applicationWindow?.configureForApp(refreshedMeta)
+                self.dockPresentation.update(app: refreshedMeta)
                 self.manager.updateApps(apps, activePackage: package)
                 self.applicationWindow?.loading("正在打开 \(refreshedMeta.title)…")
                 let endpoint = try await self.runtime.openDisplay(package: package)
@@ -562,6 +579,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             preferredPixelSize: prefs.preferredPixelSize
         )
         applicationWindow?.configureForApp(app)
+        dockPresentation.update(app: app)
         applicationWindow?.presentWindow()
     }
 
@@ -757,6 +775,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func closedApplicationWindow() {
+        dockPresentation.update(app: nil)
         displayGeneration = UUID()
         openingPackage = nil
         let previousOperation = operation
@@ -1000,16 +1019,29 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if stream != nil,
-           applicationWindow?.window?.isVisible == true,
-           applicationWindow?.window?.isMiniaturized == false,
-           manager.window?.isVisible != true {
+        if let window = applicationWindow?.window,
+           window.isVisible || window.isMiniaturized || openingPackage != nil {
             applicationWindow?.presentWindow()
         } else {
             manager.presentWindow()
         }
         return true
     }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        if let window = applicationWindow?.window, window.isVisible || window.isMiniaturized || openingPackage != nil {
+            let restore = menu.addItem(withTitle: "返回 \(window.title)", action: #selector(restoreApplicationCommand), keyEquivalent: "")
+            restore.target = self
+            restore.image = window.miniwindowImage
+            menu.addItem(.separator())
+        }
+        let management = menu.addItem(withTitle: "打开 \(MacdoraBrand.appName)", action: #selector(managementCommand), keyEquivalent: "")
+        management.target = self
+        return menu
+    }
+
+    @objc private func restoreApplicationCommand() { applicationWindow?.presentWindow() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if isRestartingForUpdate || runtime.state == .stopped {

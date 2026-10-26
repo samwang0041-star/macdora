@@ -1702,7 +1702,8 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         }
     }
 
-    func show(detail: String) {
+    func show(detail: String?) {
+        guard bannerMessage != detail else { return }
         bannerMessage = detail
         rebuildPageContent()
     }
@@ -3900,6 +3901,9 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
 
     func configureForApp(_ app: ContainerApp) {
         window?.title = app.title
+        window?.miniwindowTitle = app.title
+        window?.miniwindowImage = TFAppIconView.resolveAppIconImage(for: app)
+            ?? NSWorkspace.shared.icon(for: .applicationBundle)
         toolbarTitleLabel.stringValue = app.title
     }
 

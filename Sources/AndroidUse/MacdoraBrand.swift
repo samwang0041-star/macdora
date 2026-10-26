@@ -202,6 +202,21 @@ enum MacdoraBrand {
         return image
     }
 
+    static func dockAppIconImage(_ icon: NSImage, size: CGFloat = 512) -> NSImage {
+        let image = NSImage(size: NSSize(width: size, height: size))
+        image.lockFocus()
+        defer { image.unlockFocus() }
+        let inset = size * 48 / 1024
+        let rect = NSRect(x: inset, y: inset, width: size - 2 * inset, height: size - 2 * inset)
+        if let context = NSGraphicsContext.current {
+            context.imageInterpolation = .high
+            context.cgContext.addPath(continuousSquirclePath(rect, cornerRadius: size * 232 / 1024))
+            context.cgContext.clip()
+            icon.draw(in: rect)
+        }
+        return image
+    }
+
     /// Creates a tapered capsule from point `a` (radius `rA`) to point `b` (radius `rB`) with exact tangent flanks.
     static func taperedCapsulePath(from a: CGPoint, radiusA rA: CGFloat, to b: CGPoint, radiusB rB: CGFloat) -> CGPath {
         let dx = b.x - a.x

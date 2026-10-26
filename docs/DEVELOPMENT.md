@@ -31,6 +31,25 @@ swift test
 
 真实网络下载和 Android 启动验收通过测试中的显式环境变量单独启用。公开截图使用全新环境或中性演示数据；原始设备日志、私人应用及认证信息不进入仓库。
 
+显示性能使用 `scripts/build-android-probe.sh`、`scripts/build-probe-host.sh` 与
+`scripts/gpu-render-benchmark.py` 在独立验收环境测量。保持同一 APK、分辨率、码率和运行环境，
+用 `--display 1920x1200/240` 覆盖平板场景，分别传入 `--display-sync on` / `off`
+比较宿主显示同步。报告记录实际同步开关、颜色渲染路径、唯一呈现帧率、帧间隔和输入到画面响应延迟；
+静态页面的低刷新率不能代替滚动或动画场景的帧率。颜色路径的优化必须通过 Metal 与 Core Image 的像素对照，
+未支持的视频元数据继续走色彩管理回退。
+宿主默认关闭额外的显示同步，并用最小 8.33 毫秒呈现间隔限制突发提交；Android 采集仍为 60 FPS。
+`ANDROID_USE_DISPLAY_SYNC=1` 可恢复同步，`ANDROID_USE_PACED_PRESENTATION=0` 可关闭节奏控制作对照。
+单独关闭同步可能增大帧间隔波动，因此验收必须同时检查帧间隔与输入延迟。
+性能采样时保持测试窗口在前台；失去激活状态后，系统可能返回无效的 drawable 呈现时间，
+应结合 `windowStateEvents` 判定测试条件，保留失败报告，不能用不完整采样推算稳定帧率。
+可用 `--connection-delay 10` 先准备窗口焦点，完整 32 秒测量从连接后开始，门槛与输入次数不变。
+
+默认 Dock 入口随当前前台 Android 应用显示其图标，点击可恢复最小化的窗口，
+右键菜单显示当前应用名称，并提供返回该应用和打开 Macdora 的入口。当前产品只有一个前台应用窗口，
+该选项不创建额外运行环境或独立应用进程。退出后可用
+`open -a Macdora --args --dock-icon macdora` 保留 Macdora 品牌图标；
+`--dock-icon app` 为默认方式。关闭当前应用会话或停止环境后恢复 Macdora 图标。
+
 ## 更新与发布
 
 版本以根目录 `VERSION` 为准。客户端读取 `samwang0041-star/macdora` 的公开 GitHub Releases，匿名检查版本并下载 ZIP 和 SHA-256 清单，不需要 GitHub Key。

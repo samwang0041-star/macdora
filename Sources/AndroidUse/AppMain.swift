@@ -81,6 +81,8 @@ final class ProbeAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                                     "maximumDrawables": ProcessInfo.processInfo.environment["ANDROID_USE_MAX_DRAWABLES"] == "2" ? 2 : 3]
             measurement.metadata["presentationQueue"] = "coalesced-latest-frame"
             measurement.metadata["renderQueue"] = ProcessInfo.processInfo.environment["ANDROID_USE_RENDER_QUEUE"] == "main" ? "main" : "background"
+            measurement.metadata["displaySyncEnabled"] = surface.displaySyncEnabled
+            measurement.metadata["minimumPresentationIntervalMs"] = surface.minimumPresentationInterval * 1000
             surface.onRenderPath = { [weak measurement] path in
                 measurement?.metadata["renderPath"] = path
                 measurement?.rendered(using: path)
@@ -118,7 +120,6 @@ final class ProbeAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         NSApplication.shared.activate(ignoringOtherApps: true)
         let packageIndex = args.firstIndex(of: "--app")
         let package = packageIndex.flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
-        measurement?.start(at: CACurrentMediaTime())
         captureWindowState()
         if let measurement {
             let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self, weak measurement] _ in
@@ -128,7 +129,20 @@ final class ProbeAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             measurementTimer = timer
             RunLoop.main.add(timer, forMode: .common)
         }
-        stream.connect(port: port, startApp: package)
+        let delayIndex = args.firstIndex(of: "--connection-delay")
+        let delay = delayIndex.flatMap { $0 + 1 < args.count ? Double(args[$0 + 1]) : nil } ?? 0
+        let connectionDelay = delay.isFinite ? min(10, max(0, delay)) : 0
+        measurement?.metadata["connectionDelaySeconds"] = connectionDelay
+        let connect = { [weak self, weak stream] in
+            guard let self, let stream else { return }
+            self.measurement?.start(at: CACurrentMediaTime())
+            stream.connect(port: port, startApp: package)
+        }
+        if connectionDelay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + connectionDelay, execute: connect)
+        } else {
+            connect()
+        }
     }
 
     private func captureWindowState() {

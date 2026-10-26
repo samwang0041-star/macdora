@@ -7,6 +7,37 @@ import XCTest
 
 final class ApplicationWindowTests: XCTestCase {
     @MainActor
+    func testApplicationActivationRedrawsStaticCachedFrameWithoutNewDecode() async throws {
+        _ = NSApplication.shared
+        NSApp.setActivationPolicy(.regular)
+        let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        defer { controller.surface.onRenderPath = nil; controller.performExplicitClose() }
+        controller.presentWindow()
+        let session = UUID()
+        controller.surface.beginSession(session)
+        var buffer: CVPixelBuffer?
+        let attributes: [CFString: Any] = [kCVPixelBufferMetalCompatibilityKey: true, kCVPixelBufferIOSurfacePropertiesKey: [:]]
+        XCTAssertEqual(CVPixelBufferCreate(nil, 64, 64, kCVPixelFormatType_32BGRA, attributes as CFDictionary, &buffer), kCVReturnSuccess)
+        let image = try XCTUnwrap(buffer)
+        CVPixelBufferLockBaseAddress(image, [])
+        memset(CVPixelBufferGetBaseAddress(image), 255, CVPixelBufferGetBytesPerRow(image) * 64)
+        CVPixelBufferUnlockBaseAddress(image, [])
+        var rendered = false
+        controller.surface.onRenderPath = { _ in rendered = true }
+        controller.surface.accept(DecodedFrame(buffer: image, pts: 0, marker: nil), session: session)
+        let initialDeadline = Date(timeIntervalSinceNow: 3)
+        while !rendered && Date() < initialDeadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(rendered)
+        try await Task.sleep(for: .milliseconds(100))
+        var redraws = 0
+        controller.surface.onRenderPath = { _ in redraws += 1 }
+        NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp)
+        let redrawDeadline = Date(timeIntervalSinceNow: 0.5)
+        while redraws == 0 && Date() < redrawDeadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertGreaterThan(redraws, 0, "Activation must refresh a static frame without waiting for decoder output.")
+    }
+
+    @MainActor
     func testStartupMinimizeRestorePresentsCachedFrameBeforeEnablingInput() async throws {
         _ = NSApplication.shared
         NSApplication.shared.setActivationPolicy(.regular)
