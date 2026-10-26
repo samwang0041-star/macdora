@@ -212,6 +212,7 @@ final class DeveloperLocationWorkspaceView: NSView, MKMapViewDelegate, NSSearchF
         quickDriftWrap.addArrangedSubview(quickDriftLbl)
 
         headerDriftSwitch = TFToggleSwitch(isOn: plugin.configuration.driftEnabled)
+        headerDriftSwitch.setAccessibilityLabel("位置漂移")
         headerDriftSwitch.onToggle = { [weak self] enabled in
             guard let self else { return }
             self.plugin.setDriftEnabled(enabled)
@@ -380,10 +381,12 @@ final class DeveloperLocationWorkspaceView: NSView, MKMapViewDelegate, NSSearchF
         barStack.addArrangedSubview(mapStyleButton)
 
         zoomInButton = TFButton(title: "", symbolName: "plus.magnifyingglass", variant: .subtle, size: .sm)
+        zoomInButton.setAccessibilityLabel("放大地图")
         zoomInButton.onClick = { [weak self] in self?.zoomMap(factor: 0.5) }
         barStack.addArrangedSubview(zoomInButton)
 
         zoomOutButton = TFButton(title: "", symbolName: "minus.magnifyingglass", variant: .subtle, size: .sm)
+        zoomOutButton.setAccessibilityLabel("缩小地图")
         zoomOutButton.onClick = { [weak self] in self?.zoomMap(factor: 2.0) }
         barStack.addArrangedSubview(zoomOutButton)
 

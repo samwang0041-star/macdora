@@ -403,6 +403,7 @@ final class TFButton: NSControl {
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
 
+        setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel(title)
         focusRingType = .exterior
@@ -457,6 +458,7 @@ final class TFButton: NSControl {
 
     override func accessibilityPerformPress() -> Bool {
         guard isEnabled else { return false }
+        if let action { NSApp.sendAction(action, to: target, from: self) }
         onClick?()
         return true
     }
@@ -532,10 +534,7 @@ final class TFButton: NSControl {
         let inside = bounds.contains(convert(event.locationInWindow, from: nil))
         isPressed = false
         if inside {
-            if let action, let target {
-                NSApp.sendAction(action, to: target, from: self)
-            }
-            onClick?()
+            _ = accessibilityPerformPress()
         }
     }
 }
@@ -785,6 +784,7 @@ final class TFSegmentedControl: NSView {
     private let stack = NSStackView()
     private var segmentCards: [String: TFCardView] = [:]
     private var segmentLabels: [String: NSTextField] = [:]
+    private var segmentButtons: [String: NSButton] = [:]
 
     init(options: [Option], selectedValue: String) {
         self.options = options
@@ -816,6 +816,7 @@ final class TFSegmentedControl: NSView {
             pill.addSubview(lbl)
 
             let btn = NSButton(title: "", target: self, action: #selector(segmentTapped(_:)))
+            btn.setAccessibilityLabel(opt.label)
             btn.tag = idx
             btn.isBordered = false
             btn.isTransparent = true
@@ -835,6 +836,7 @@ final class TFSegmentedControl: NSView {
 
             segmentCards[opt.value] = pill
             segmentLabels[opt.value] = lbl
+            segmentButtons[opt.value] = btn
             stack.addArrangedSubview(pill)
         }
 
@@ -867,6 +869,7 @@ final class TFSegmentedControl: NSView {
         track.strokeColor = TFTheme.line
         for opt in options {
             let active = opt.value == selectedValue
+            segmentButtons[opt.value]?.setAccessibilityValue(NSNumber(value: active))
             if let pill = segmentCards[opt.value] {
                 pill.fillColor = active ? TFTheme.card : .clear
                 pill.hasCardShadow = active
@@ -900,6 +903,9 @@ final class TFToggleSwitch: NSControl {
         self.isOn = isOn
         super.init(frame: NSRect(x: 0, y: 0, width: 38, height: 22))
         translatesAutoresizingMaskIntoConstraints = false
+        setAccessibilityElement(true)
+        setAccessibilityRole(.checkBox)
+        focusRingType = .exterior
 
         track.translatesAutoresizingMaskIntoConstraints = false
         track.cornerRadius = 11
@@ -932,6 +938,7 @@ final class TFToggleSwitch: NSControl {
     required init?(coder: NSCoder) { nil }
 
     func refreshState() {
+        setAccessibilityValue(NSNumber(value: isOn))
         track.fillColor = isOn ? TFTheme.accent : TFTheme.card2
         track.strokeColor = isOn ? nil : TFTheme.line
         thumbLeading.constant = isOn ? 18 : 2
@@ -943,8 +950,31 @@ final class TFToggleSwitch: NSControl {
         guard isEnabled else { return }
         let inside = bounds.contains(convert(event.locationInWindow, from: nil))
         guard inside else { return }
+        _ = accessibilityPerformPress()
+    }
+
+    override var acceptsFirstResponder: Bool { isEnabled }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
         isOn.toggle()
         onToggle?(isOn)
+        return true
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let hasShortcutModifier = !event.modifierFlags.intersection([.command, .control, .option]).isEmpty
+        if !hasShortcutModifier && [36, 49, 76].contains(event.keyCode) {
+            _ = accessibilityPerformPress()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func drawFocusRingMask() {
+        NSBezierPath(roundedRect: bounds, xRadius: 11, yRadius: 11).fill()
     }
 }
 
@@ -1073,6 +1103,14 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     private var selectedSection: ManagementSection = .apps
     private var selectedCategory: AppCategoryFilter = .all
     private var searchQuery: String = ""
+    private weak var installedAppsCard: NSView?
+    private weak var appsSearchRow: NSView?
+    private var retainedAppsSearchRow: NSView?
+    private var pageInsertionIndex: Int?
+    private var categoryLabels: [Int: NSTextField] = [:]
+    private var categoryIndicators: [Int: TFCardView] = [:]
+    private var categoryButtons: [Int: NSButton] = [:]
+    private weak var categoryBottomLine: TFCardView?
     private var currentState: RuntimeState = .stopped
     private var apps: [ContainerApp] = []
     private var activePackage: String?
@@ -1328,8 +1366,16 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
 
     private func addFullWidth(_ view: NSView, to stack: NSStackView) {
         view.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(view)
-        view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        if stack === pageStack, let index = pageInsertionIndex {
+            if !stack.arrangedSubviews.contains(where: { $0 === view }) {
+                stack.insertArrangedSubview(view, at: index)
+                view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            }
+            pageInsertionIndex = index + 1
+        } else {
+            stack.addArrangedSubview(view)
+            view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
     }
 
     private func makeNavRow(for section: ManagementSection) -> NSView {
@@ -1350,6 +1396,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         row.addSubview(lbl)
 
         let btn = NSButton(title: "", target: self, action: #selector(navRowTapped(_:)))
+        btn.setAccessibilityLabel(section.title)
         btn.tag = section.rawValue
         btn.isBordered = false
         btn.isTransparent = true
@@ -1408,6 +1455,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         row.addSubview(lbl)
 
         let btn = NSButton(title: "", target: self, action: action)
+        btn.setAccessibilityLabel(title)
         btn.isBordered = false
         btn.isTransparent = true
         btn.translatesAutoresizingMaskIntoConstraints = false
@@ -1448,6 +1496,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         quickHeaderLabel.textColor = TFTheme.ink3
         brandLockupView.isDark = TFTheme.isDark
         themeToggleButton.symbolName = TFTheme.isDark ? "sun.max" : "moon"
+        themeToggleButton.setAccessibilityLabel(TFTheme.isDark ? "切换到浅色外观" : "切换到深色外观")
         themeToggleButton.refreshColors()
         headerInstallButton.refreshColors()
         for ws in locationWorkspaceViews.values {
@@ -1653,7 +1702,9 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             quickAppIcons[app.package]?.configure(with: app)
         }
         refreshSidebarState()
-        if selectedSection == .apps || selectedSection == .monitor || selectedSection == .serving {
+        if selectedSection == .apps {
+            refreshInstalledAppsCard()
+        } else if selectedSection == .monitor || selectedSection == .serving {
             rebuildPageContent()
         }
     }
@@ -1717,7 +1768,21 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     // MARK: - Page Rendering
 
     private func rebuildPageContent() {
+        // Keep an active field and its editor attached while asynchronous state
+        // changes rebuild the surrounding cards. Recreating marked text would
+        // lose the input method's composition session.
+        if selectedSection == .apps, let row = appsSearchRow,
+           let field = row.subviews.compactMap({ $0 as? NSSearchField }).first,
+           let editor = field.currentEditor(), window?.firstResponder === editor {
+            retainedAppsSearchRow = row
+        }
+        pageInsertionIndex = 0
+        defer {
+            pageInsertionIndex = nil
+            retainedAppsSearchRow = nil
+        }
         for sub in pageStack.arrangedSubviews {
+            if sub === retainedAppsSearchRow { continue }
             pageStack.removeArrangedSubview(sub)
             sub.removeFromSuperview()
         }
@@ -2050,6 +2115,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             rowClickBtn.setContentHuggingPriority(.init(1), for: .horizontal)
             rowClickBtn.isEnabled = !isBusy
             rowClickBtn.toolTip = item.state.isEnabled ? "打开「\(item.name)」设置" : "请先启用插件"
+            rowClickBtn.setAccessibilityLabel("打开\(item.name)设置")
             rowClickBtn.translatesAutoresizingMaskIntoConstraints = false
             row.addSubview(rowClickBtn)
             NSLayoutConstraint.activate([
@@ -2222,8 +2288,21 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     private func buildAppsPage() {
         addFullWidth(makeCompactEngineRuntimeBar(), to: pageStack)
         addFullWidth(makeCategoryAndSearchRow(), to: pageStack)
-        addFullWidth(makeInstalledAppsCard(), to: pageStack)
+        let list = makeInstalledAppsCard()
+        installedAppsCard = list
+        addFullWidth(list, to: pageStack)
         addFullWidth(makeDropInstallZone(), to: pageStack)
+    }
+
+    private func refreshInstalledAppsCard() {
+        guard selectedSection == .apps, let previous = installedAppsCard,
+              let index = pageStack.arrangedSubviews.firstIndex(where: { $0 === previous }) else { return }
+        let list = makeInstalledAppsCard()
+        pageStack.removeArrangedSubview(previous)
+        previous.removeFromSuperview()
+        pageStack.insertArrangedSubview(list, at: index)
+        list.widthAnchor.constraint(equalTo: pageStack.widthAnchor).isActive = true
+        installedAppsCard = list
     }
 
     private func makeCompactEngineRuntimeBar() -> NSView {
@@ -2305,13 +2384,22 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     }
 
     private func makeCategoryAndSearchRow() -> NSView {
+        if let retainedAppsSearchRow {
+            refreshCategoryAppearance()
+            return retainedAppsSearchRow
+        }
+        categoryLabels.removeAll()
+        categoryIndicators.removeAll()
+        categoryButtons.removeAll()
         let wrap = NSView()
         wrap.translatesAutoresizingMaskIntoConstraints = false
+        appsSearchRow = wrap
 
         let bottomLine = TFCardView(frame: .zero)
         bottomLine.translatesAutoresizingMaskIntoConstraints = false
         bottomLine.cornerRadius = 0
         bottomLine.fillColor = TFTheme.line
+        categoryBottomLine = bottomLine
         wrap.addSubview(bottomLine)
 
         let tabStack = NSStackView()
@@ -2339,11 +2427,16 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             item.addSubview(indicator)
 
             let btn = NSButton(title: "", target: self, action: #selector(categoryTabClicked(_:)))
+            btn.setAccessibilityLabel(filter.label)
+            btn.setAccessibilityValue(NSNumber(value: active))
             btn.tag = idx
             btn.isBordered = false
             btn.isTransparent = true
             btn.translatesAutoresizingMaskIntoConstraints = false
             item.addSubview(btn)
+            categoryLabels[idx] = lbl
+            categoryIndicators[idx] = indicator
+            categoryButtons[idx] = btn
 
             NSLayoutConstraint.activate([
                 item.heightAnchor.constraint(equalToConstant: 36),
@@ -2368,6 +2461,9 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         searchField.font = .systemFont(ofSize: 12.5)
         searchField.controlSize = .small
         searchField.delegate = self
+        searchField.target = self
+        searchField.action = #selector(appSearchChanged(_:))
+        searchField.sendsSearchStringImmediately = true
         searchField.translatesAutoresizingMaskIntoConstraints = false
         wrap.addSubview(searchField)
 
@@ -2390,13 +2486,30 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         let all = AppCategoryFilter.allCases
         guard sender.tag >= 0, sender.tag < all.count else { return }
         selectedCategory = all[sender.tag]
-        rebuildPageContent()
+        refreshCategoryAppearance()
+        refreshInstalledAppsCard()
+    }
+
+    private func refreshCategoryAppearance() {
+        categoryBottomLine?.fillColor = TFTheme.line
+        for (index, filter) in AppCategoryFilter.allCases.enumerated() {
+            let active = filter == selectedCategory
+            categoryLabels[index]?.font = .systemFont(ofSize: 13, weight: active ? .medium : .regular)
+            categoryLabels[index]?.textColor = active ? TFTheme.ink : TFTheme.ink2
+            categoryIndicators[index]?.fillColor = active ? TFTheme.accent : .clear
+            categoryButtons[index]?.setAccessibilityValue(NSNumber(value: active))
+        }
     }
 
     func controlTextDidChange(_ obj: Notification) {
         guard let field = obj.object as? NSSearchField else { return }
+        appSearchChanged(field)
+    }
+
+    @objc private func appSearchChanged(_ field: NSSearchField) {
+        guard searchQuery != field.stringValue else { return }
         searchQuery = field.stringValue
-        rebuildPageContent()
+        refreshInstalledAppsCard()
     }
 
     private func filteredApps() -> [ContainerApp] {
@@ -2413,6 +2526,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard !q.isEmpty else { return true }
             return app.title.lowercased().contains(q)
+                || app.package.lowercased().contains(q)
                 || app.subtitle.lowercased().contains(q)
                 || app.category.lowercased().contains(q)
         }
@@ -3052,6 +3166,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     }
 
     private func makeSettingRow(title: String, detail: String, control: NSView, isLast: Bool = false) -> NSView {
+        control.setAccessibilityLabel(title)
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
 
