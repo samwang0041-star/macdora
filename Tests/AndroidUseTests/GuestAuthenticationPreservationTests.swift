@@ -3,70 +3,84 @@ import XCTest
 @testable import AndroidUse
 
 final class GuestAuthenticationPreservationTests: XCTestCase {
+    func testGuestIdentityIsTabletRegardlessOfDisplayLayout() {
+        let verticalScript = RuntimeSoftwareDefaults.guestDeviceIdentityScript()
+        XCTAssertTrue(verticalScript.contains("target_model=\"SM-F926U\""))
+        XCTAssertTrue(verticalScript.contains("target_chars=\"tablet\""))
+        XCTAssertTrue(verticalScript.contains("target_density=\"240\""))
+        XCTAssertTrue(verticalScript.contains(
+            "target_fingerprint=\"Samsung/SM-F926U/SM-F926U:12/V417IR/eng.nioh.20241225.154630:user/release-keys\""
+        ))
+        XCTAssertFalse(verticalScript.contains("target_model=\"Android SDK built for arm64\""))
+    }
+
+    func testSharedEnvironmentRecoveryDoesNotForceStopAnyApplication() throws {
+        let fixture = try GuestIdentityShellFixture(stalePID: true)
+        defer { fixture.remove() }
+        try fixture.runSetup()
+        fixture.assertNoApplicationForceStopped()
+        fixture.assertGuestIdentityIsTablet()
+    }
+
     func testColdBootPreservesApplicationAuthentication() throws {
-        for tabletMode in [false, true] {
-            let fixture = try GuestIdentityShellFixture(tabletMode: tabletMode, marker: nil)
-            defer { fixture.remove() }
-            try fixture.runSetup()
-            fixture.assertAuthenticationPreserved()
-            try fixture.runSetup()
-            fixture.assertAuthenticationPreserved()
-        }
+        let fixture = try GuestIdentityShellFixture(marker: nil)
+        defer { fixture.remove() }
+        try fixture.runSetup()
+        fixture.assertGuestIdentityIsTablet()
+        fixture.assertAuthenticationPreserved()
+        try fixture.runSetup()
+        fixture.assertGuestIdentityIsTablet()
+        fixture.assertAuthenticationPreserved()
     }
 
     func testReplacedZygotePreservesApplicationAuthentication() throws {
-        for tabletMode in [false, true] {
-            let fixture = try GuestIdentityShellFixture(tabletMode: tabletMode, stalePID: true)
-            defer { fixture.remove() }
-            try fixture.runSetup()
-            fixture.assertAuthenticationPreserved()
-        }
+        let fixture = try GuestIdentityShellFixture(stalePID: true)
+        defer { fixture.remove() }
+        try fixture.runSetup()
+        fixture.assertGuestIdentityIsTablet()
+        fixture.assertAuthenticationPreserved()
     }
 
     func testUnknownPrivateCacheFormatIsLeftToTheApplication() throws {
-        for tabletMode in [false, true] {
-            let fixture = try GuestIdentityShellFixture(tabletMode: tabletMode, cacheContents: Data([0, 0xff, 0x80, 0x0a]))
-            defer { fixture.remove() }
-            try fixture.runSetup()
-            fixture.assertAuthenticationPreserved()
-        }
+        let fixture = try GuestIdentityShellFixture(cacheContents: Data([0, 0xff, 0x80, 0x0a]))
+        defer { fixture.remove() }
+        try fixture.runSetup()
+        fixture.assertGuestIdentityIsTablet()
+        fixture.assertAuthenticationPreserved()
     }
 
     func testPendingIdentityRecoveryPreservesApplicationAuthentication() throws {
-        for tabletMode in [false, true] {
-            let fixture = try GuestIdentityShellFixture(tabletMode: tabletMode, marker: "pending")
-            defer { fixture.remove() }
-            try fixture.runSetup()
-            fixture.assertAuthenticationPreserved()
-        }
+        let fixture = try GuestIdentityShellFixture(marker: "pending")
+        defer { fixture.remove() }
+        try fixture.runSetup()
+        fixture.assertGuestIdentityIsTablet()
+        fixture.assertAuthenticationPreserved()
     }
 
     func testFailedIdentitySetupPreservesApplicationAuthentication() throws {
-        for tabletMode in [false, true] {
-            let fixture = try GuestIdentityShellFixture(tabletMode: tabletMode, stalePID: true, restartFails: true)
-            defer { fixture.remove() }
-            try fixture.runSetup(expectedStatus: 1)
-            fixture.assertAuthenticationPreserved()
-        }
+        let fixture = try GuestIdentityShellFixture(stalePID: true, restartFails: true)
+        defer { fixture.remove() }
+        try fixture.runSetup(expectedStatus: 1)
+        fixture.assertAuthenticationPreserved()
     }
 
-    func testDeviceModeChangeDoesNotDeleteApplicationAuthentication() throws {
-        for tabletMode in [false, true] {
-            let previousModel = GuestDeviceIdentity.forMode(tabletMode: !tabletMode).model
-            let fixture = try GuestIdentityShellFixture(tabletMode: tabletMode, marker: previousModel, cacheModel: previousModel)
-            defer { fixture.remove() }
-            try fixture.runSetup()
-            fixture.assertAuthenticationPreserved()
-        }
+    func testLegacyPhoneIdentityMigrationDoesNotDeleteApplicationAuthentication() throws {
+        let previousModel = GuestDeviceIdentity.phone.model
+        let fixture = try GuestIdentityShellFixture(marker: previousModel, cacheModel: previousModel)
+        defer { fixture.remove() }
+        try fixture.runSetup()
+        fixture.assertGuestIdentityIsTablet()
+        fixture.assertAuthenticationPreserved()
     }
 
     func testWarmReopenPreservesApplicationAuthentication() throws {
-        for tabletMode in [false, true] {
-            let fixture = try GuestIdentityShellFixture(tabletMode: tabletMode)
-            defer { fixture.remove() }
-            try fixture.runSetup()
-            fixture.assertAuthenticationPreserved()
-        }
+        let fixture = try GuestIdentityShellFixture()
+        defer { fixture.remove() }
+        try fixture.runSetup()
+        try fixture.runSetup()
+        fixture.assertGuestIdentityIsTablet()
+        fixture.assertAuthenticationPreserved()
+        fixture.assertNoZygoteRestart()
     }
 }
 
@@ -74,17 +88,15 @@ final class GuestAuthenticationPreservationTests: XCTestCase {
 /// Android command stubs. No emulator, real application data or account is used.
 private final class GuestIdentityShellFixture {
     let root: URL
-    private let tabletMode: Bool
     private let bin: URL
     private let properties: URL
     private let authenticationFiles: [(url: URL, contents: Data)]
+    private let identity = GuestDeviceIdentity.tablet
 
-    init(tabletMode: Bool, marker: String? = "current", stalePID: Bool = false, cacheModel: String? = nil, cacheContents: Data? = nil, restartFails: Bool = false) throws {
-        self.tabletMode = tabletMode
+    init(marker: String? = "current", stalePID: Bool = false, cacheModel: String? = nil, cacheContents: Data? = nil, restartFails: Bool = false) throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("macdora-guest-auth-\(UUID().uuidString)")
         bin = root.appendingPathComponent("bin")
         properties = root.appendingPathComponent("properties")
-        let identity = GuestDeviceIdentity.forMode(tabletMode: tabletMode)
         let authRoot = root.appendingPathComponent("data/data/com.tencent.mm/.auth_cache")
         authenticationFiles = [
             (authRoot.appendingPathComponent("7a03bac2-692f-3d17-a2cd-a1b0721ffd0e/0"), cacheContents ?? Data("\(cacheModel ?? identity.model),synthetic-device-record\n".utf8)),
@@ -134,11 +146,12 @@ private final class GuestIdentityShellFixture {
         """)
         try stub("dumpsys", "if [ \"$1\" = connectivity ]; then echo CONNECTED; fi")
         try stub("settings", "echo 1")
-        for name in ["am", "sleep", "ip6tables", "chown"] { try stub(name, "exit 0") }
+        try stub("am", "printf '%s\\n' \"$*\" >> \"$GUEST_TEST_EVENTS\"")
+        for name in ["sleep", "ip6tables", "chown"] { try stub(name, "exit 0") }
     }
 
     func runSetup(expectedStatus: Int32 = 0) throws {
-        let script = RuntimeSoftwareDefaults.guestDeviceIdentityScript(tabletMode: tabletMode)
+        let script = RuntimeSoftwareDefaults.guestDeviceIdentityScript()
         let prefix = "su 0 sh -c '\n"
         let suffix = "\n' || exit 1"
         guard script.hasPrefix(prefix) && script.hasSuffix(suffix) else {
@@ -157,6 +170,7 @@ private final class GuestIdentityShellFixture {
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = bin.path + ":/usr/bin:/bin"
         environment["GUEST_TEST_PROPERTIES"] = properties.path
+        environment["GUEST_TEST_EVENTS"] = root.appendingPathComponent("commands").path
         process.environment = environment
         let errors = Pipe()
         process.standardOutput = FileHandle.nullDevice
@@ -171,6 +185,42 @@ private final class GuestIdentityShellFixture {
         for entry in authenticationFiles {
             XCTAssertEqual(try? Data(contentsOf: entry.url), entry.contents, "Guest setup must leave the application's existing authentication files intact.", file: file, line: line)
         }
+    }
+
+    func assertGuestIdentityIsTablet(file: StaticString = #filePath, line: UInt = #line) {
+        let values = [
+            "ro.product.model": identity.model,
+            "ro.product.brand": identity.brand,
+            "ro.product.manufacturer": identity.manufacturer,
+            "ro.build.characteristics": identity.characteristics,
+            "qemu.sf.lcd_density": identity.density,
+            "ro.build.fingerprint": identity.fingerprint,
+            "sys.androiduse.zygote_model": identity.model
+        ]
+        for (key, expected) in values {
+            XCTAssertEqual(
+                try? String(contentsOf: properties.appendingPathComponent(key), encoding: .utf8),
+                expected,
+                "Guest identity property \(key) must remain Tablet.",
+                file: file,
+                line: line
+            )
+        }
+    }
+
+    func assertNoZygoteRestart(file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: root.appendingPathComponent("properties/ctl.restart").path),
+            "A warm setup with the same Tablet identity must not restart zygote.",
+            file: file,
+            line: line
+        )
+    }
+
+    func assertNoApplicationForceStopped(file: StaticString = #filePath, line: UInt = #line) {
+        let commands = (try? String(contentsOf: root.appendingPathComponent("commands"), encoding: .utf8)) ?? ""
+        XCTAssertFalse(commands.components(separatedBy: .newlines).contains { $0.hasPrefix("force-stop ") },
+                       "Shared environment preparation must not mark an unrelated application as stopped.", file: file, line: line)
     }
 
     func remove() { try? FileManager.default.removeItem(at: root) }

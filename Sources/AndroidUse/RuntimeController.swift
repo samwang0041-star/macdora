@@ -996,7 +996,7 @@ enum RuntimePorts {
         scid: UInt32,
         resolutionPreset: String = "1080p",
         targetFPS: Int = 60,
-        tabletMode: Bool = false
+        tabletMode: Bool = true
     ) -> String {
         let scidHex = String(format: "%08x", scid)
         let displaySpec: String
@@ -1016,13 +1016,13 @@ enum RuntimePorts {
         } else {
             switch resolutionPreset {
             case "720p":
-                displaySpec = "720x1280/280"
-                bitRate = 12_000_000
+                displaySpec = "800x1280/160"
+                bitRate = 14_000_000
             case "1440p":
-                displaySpec = "1440x2560/560"
-                bitRate = 32_000_000
+                displaySpec = "1600x2560/320"
+                bitRate = 36_000_000
             default:
-                displaySpec = "1080x1920/420"
+                displaySpec = "1200x1920/240"
                 bitRate = 24_000_000
             }
         }
@@ -2949,12 +2949,12 @@ final class RuntimeController: SystemPluginHostBridge {
         guard isOperationCurrent(operationGeneration), adbServerProcess?.isRunning == true else {
             throw CancellationError()
         }
-        let isTablet = containerPreferences.tabletMode
-        let ignoreOrientation = isTablet ? "true" : "false"
-        let compatAction = isTablet ? "enable" : "reset"
-        let d0Size = isTablet ? "1920x1200" : "1080x1920"
-        let d0Density = isTablet ? "240" : "420"
-        let identityScript = RuntimeSoftwareDefaults.guestDeviceIdentityScript(tabletMode: isTablet)
+        let isHorizontal = containerPreferences.tabletMode
+        let ignoreOrientation = "true"
+        let compatAction = "enable"
+        let d0Size = isHorizontal ? "1920x1200" : "1200x1920"
+        let d0Density = "240"
+        let identityScript = RuntimeSoftwareDefaults.guestDeviceIdentityScript()
         let script = """
         \(identityScript)
         \(RuntimeSoftwareDefaults.guestSetupScript)
@@ -3010,8 +3010,8 @@ final class RuntimeController: SystemPluginHostBridge {
     ) async {
         let gen = operationGeneration ?? generation
         guard isOperationCurrent(gen), adbServerProcess?.isRunning == true else { return }
-        let ignoreFlag = tabletMode ? "true" : "false"
-        let fixedRotation = tabletMode ? "enabled" : "default"
+        let ignoreFlag = "true"
+        let fixedRotation = "enabled"
         let script = """
         for d in $(dumpsys window displays 2>/dev/null | sed -n 's/.*mDisplayId=\\([0-9][0-9]*\\).*/\\1/p'); do
           if [ "$d" != "0" ]; then

@@ -127,6 +127,7 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
     private let configuredPresentationInterval = ProcessInfo.processInfo.environment["ANDROID_USE_PACED_PRESENTATION"] == "0" ? 0.0 : 1.0 / 120.0
     var minimumPresentationInterval: Double { metal.displaySyncEnabled ? 0 : configuredPresentationInterval }
     private var firstFrame = true
+    private var firstPresentationRetryUsed = false
     private var backgroundRenderQueue: FrameRenderQueue<BackgroundRenderPayload>?
     var inputEnabled = true { didSet { updateSecureInput() } }
     var clipboardSyncEnabled = true
@@ -134,8 +135,14 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
         didSet {
             metal.isHidden = !videoVisible
             updateSecureInput()
-            if videoVisible && !oldValue, let lastFrame {
-                submitCachedRedraw(lastFrame, session: currentSessionID)
+            if videoVisible && !oldValue {
+                // Commit visibility and geometry before the background queue
+                // submits a cached first frame for a static guest screen.
+                layoutSubtreeIfNeeded()
+                CATransaction.flush()
+                if let lastFrame {
+                    submitCachedRedraw(lastFrame, session: currentSessionID)
+                }
             }
         }
     }
@@ -367,7 +374,7 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
     func beginSession(_ identifier: UUID) {
         frameLock.lock(); sessionID = identifier; pendingFrame = nil; frameLock.unlock()
         backgroundRenderQueue?.beginSession(identifier)
-        firstFrame = true; lastFrame = nil; lastFrameSequence = 0; isTouching = false
+        firstFrame = true; firstPresentationRetryUsed = false; lastFrame = nil; lastFrameSequence = 0; isTouching = false
         awaitingPointerFocus = false; pointerSequence = 0; trustedInputLease = nil; requestedHostInputSource = nil; setInputFocus(nil)
     }
 
@@ -469,12 +476,31 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
 
     func didPresent(_ frame: DecodedFrame, at time: Double, session: UUID) {
         guard currentSessionID == session else { return }
-        guard time.isFinite, time > 0 else { onInvalidPresentation?(time); return }
+        guard time.isFinite, time > 0 else {
+            onInvalidPresentation?(time)
+            if time == 0 { retryFirstPresentation(session: session) }
+            return
+        }
         if firstFrame {
             firstFrame = false
             onFirstFrame?()
         }
         onPresented?(frame, time)
+    }
+
+    private func retryFirstPresentation(session: UUID) {
+        // A zero timestamp may describe a dropped drawable. Keep the readiness
+        // gate closed and retry its cached frame once; activation also redraws.
+        guard firstFrame, !firstPresentationRetryUsed, videoVisible,
+              NSApp.isActive, let window, window.isKeyWindow, window.isVisible,
+              !window.isMiniaturized, window.occlusionState.contains(.visible) else { return }
+        firstPresentationRetryUsed = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self, self.currentSessionID == session, self.firstFrame,
+                  self.videoVisible, NSApp.isActive, self.window?.isKeyWindow == true,
+                  let frame = self.lastFrame else { return }
+            self.submitCachedRedraw(frame, session: session)
+        }
     }
 
     private struct RenderSnapshot {

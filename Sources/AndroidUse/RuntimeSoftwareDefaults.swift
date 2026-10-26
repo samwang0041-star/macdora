@@ -35,12 +35,9 @@ struct GuestDeviceIdentity: Equatable, Sendable {
         fingerprint: "Android/sdk_phone64_arm64/emu64a:17/CE2A.260420.051.A3/16571990:userdebug/test-keys"
     )
 
-    static func forMode(tabletMode: Bool) -> GuestDeviceIdentity {
-        tabletMode ? .tablet : .phone
-    }
 }
 
-/// Product-owned guest defaults, reapplied on boot, app launch and device-mode changes.
+/// Product-owned guest defaults, reapplied on boot, app launch, and display layout changes.
 /// Keep these in the application so a stock image and an upgraded environment behave alike.
 enum RuntimeSoftwareDefaults {
     static let guestSetupScript = """
@@ -81,8 +78,8 @@ enum RuntimeSoftwareDefaults {
         return Data(bytes).base64EncodedString()
     }
 
-    static func guestDeviceIdentityScript(tabletMode: Bool) -> String {
-        let id = GuestDeviceIdentity.forMode(tabletMode: tabletMode)
+    static func guestDeviceIdentityScript() -> String {
+        let id = GuestDeviceIdentity.tablet
         let charsB64 = propertyRecordBase64(id.characteristics)
         let densityB64 = propertyRecordBase64(id.density)
         let fingerprintB64 = propertyRecordBase64(id.fingerprint)
@@ -200,10 +197,9 @@ enum RuntimeSoftwareDefaults {
         [ "$(getprop ro.build.characteristics)" = "$target_chars" ] || exit 1
         [ "$(getprop qemu.sf.lcd_density)" = "$target_density" ] || exit 1
         [ "$(getprop ro.build.fingerprint)" = "$target_fingerprint" ] || exit 1
-        # Application authentication belongs to the application. A missing
-        # boot-scoped Zygote marker or a device-mode change must not erase it.
+        # Application authentication belongs to the application. A missing or
+        # stale boot-scoped Zygote marker must not erase it.
         if [ "$cur_zygote_model" != "$target_model" ]; then
-          am force-stop com.tencent.mm >/dev/null 2>&1 || true
           if [ -f /system_ext/framework/androidx.window.extensions.jar ] && [ "$(getprop sys.androiduse.winext_patch)" != "v2" ]; then
             for p in /system_ext/framework/androidx.window.extensions.jar \\
                      /system_ext/framework/oat/arm64/androidx.window.extensions.odex \\

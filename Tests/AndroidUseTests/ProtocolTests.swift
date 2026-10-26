@@ -41,15 +41,34 @@ final class ProtocolTests: XCTestCase {
 
     func testTabletModeCommandLineAndPreferences() throws {
         var prefs = ContainerPreferences.default
-        XCTAssertFalse(prefs.tabletMode)
-        XCTAssertEqual(prefs.preferredPixelSize, CGSize(width: 1080, height: 1920))
+        XCTAssertTrue(prefs.tabletMode)
+        XCTAssertEqual(prefs.preferredPixelSize, CGSize(width: 1920, height: 1200))
+        prefs.tabletMode = false
+        XCTAssertEqual(prefs.preferredPixelSize, CGSize(width: 1200, height: 1920))
         let phoneCmd = RuntimePorts.commandLine(scid: 0x12345678, resolutionPreset: "1080p", targetFPS: 60, tabletMode: false)
-        XCTAssertTrue(phoneCmd.contains("new_display=1080x1920/420"))
+        XCTAssertTrue(phoneCmd.contains("new_display=1200x1920/240"))
 
         prefs.tabletMode = true
         XCTAssertEqual(prefs.preferredPixelSize, CGSize(width: 1920, height: 1200))
         let tabletCmd = RuntimePorts.commandLine(scid: 0x12345678, resolutionPreset: "1080p", targetFPS: 60, tabletMode: true)
         XCTAssertTrue(tabletCmd.contains("new_display=1920x1200/240"))
+    }
+
+    func testBothDisplayLayoutsRetainTabletLogicalScreenSizeAtEveryResolution() throws {
+        for preset in ["720p", "1080p", "1440p"] {
+            for horizontal in [false, true] {
+                let command = RuntimePorts.commandLine(scid: 1, resolutionPreset: preset, tabletMode: horizontal)
+                let argument = try XCTUnwrap(command.split(separator: " ").first { $0.hasPrefix("new_display=") })
+                let spec = argument.dropFirst("new_display=".count).split(separator: "/")
+                let axes = spec[0].split(separator: "x")
+                let width = try XCTUnwrap(Double(axes[0]))
+                let height = try XCTUnwrap(Double(axes[1]))
+                let density = try XCTUnwrap(Double(spec[1]))
+                XCTAssertEqual(min(width, height) * 160 / density, 800, accuracy: 0.01,
+                               "Changing orientation must retain the same tablet resource configuration.")
+                XCTAssertEqual(width > height, horizontal)
+            }
+        }
     }
 
     @MainActor

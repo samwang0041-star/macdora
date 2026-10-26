@@ -2345,8 +2345,8 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
 
         let androidModeSwitch = TFSegmentedControl(
             options: [
-                .init(value: "phone", label: "手机模式"),
-                .init(value: "tablet", label: "平板模式")
+                .init(value: "phone", label: "竖屏"),
+                .init(value: "tablet", label: "横屏")
             ],
             selectedValue: currentPreferences.tabletMode ? "tablet" : "phone"
         )
@@ -2820,7 +2820,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         let memVal = memGB >= 0.05 ? String(format: "%.2f GB", memGB) : "0.08 GB"
         let memSub = "按需动态分配内存"
 
-        let modeVal = currentPreferences.tabletMode ? "Android 平板" : "Android 手机"
+        let modeVal = currentPreferences.tabletMode ? "横屏布局" : "竖屏布局"
         let modeSub = "\(currentPreferences.resolutionDisplayLabel) · \(currentPreferences.targetFPS)Hz"
 
         row2.addArrangedSubview(makeMetricCard(label: "内存使用", value: memVal, detail: memSub))
@@ -2970,8 +2970,8 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         // Section 1: Display & Aspect Ratio
         let modeSeg = TFSegmentedControl(
             options: [
-                .init(value: "phone", label: "手机模式"),
-                .init(value: "tablet", label: "平板模式")
+                .init(value: "phone", label: "竖屏布局"),
+                .init(value: "tablet", label: "横屏布局")
             ],
             selectedValue: currentPreferences.tabletMode ? "tablet" : "phone"
         )
@@ -3016,11 +3016,11 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         }
 
         addFullWidth(makeSettingsSection(
-            title: "设备形态与显示",
+            title: "窗口布局与显示",
             rows: [
                 makeSettingRow(
-                    title: "Android 设备形态",
-                    detail: "平板模式模拟 Android 平板（支持微信平板与手机同时登录、分栏宽屏显示）",
+                    title: "窗口布局",
+                    detail: "切换显示比例与方向；设备身份和登录状态保持不变",
                     control: modeSeg
                 ),
                 makeSettingRow(
@@ -3682,8 +3682,8 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
 
     private static let toolbarHeight: CGFloat = 38
     private var allowExplicitClose = false
-    private var isTabletMode = false
-    private var lockedAspectRatio: CGFloat = 1080.0 / 1920.0
+    private var isHorizontalLayout = true
+    private var lockedAspectRatio: CGFloat
 
     private let overlay = TFCardView(frame: .zero)
     private let spinner = NSProgressIndicator()
@@ -3700,9 +3700,14 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
     private var inputBannerTask: Task<Void, Never>?
 
     init(device: MTLDevice) {
-        surface = AndroidSurfaceView(frame: NSRect(x: 0, y: 0, width: 430, height: 764), device: device)
+        let initialPixels = ContainerPreferences.default.preferredPixelSize
+        let initialRect = NSRect(x: 0, y: 0, width: initialPixels.width / 2, height: initialPixels.height / 2)
+        let initialSurface = AndroidSurfaceView(frame: initialRect, device: device)
+        initialSurface.pixelSize = initialPixels
+        surface = initialSurface
+        lockedAspectRatio = initialPixels.width / initialPixels.height
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 430, height: 764),
+            contentRect: initialRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -3789,9 +3794,9 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
     }
 
     func applyDisplayMode(tabletMode: Bool, preferredPixelSize: CGSize) {
-        let modeChanged = (isTabletMode != tabletMode)
-        isTabletMode = tabletMode
-        modeSwitchButton?.title = tabletMode ? "平板模式" : "手机模式"
+        let modeChanged = (isHorizontalLayout != tabletMode)
+        isHorizontalLayout = tabletMode
+        modeSwitchButton?.title = tabletMode ? "切换竖屏" : "切换横屏"
         modeSwitchButton?.symbolName = tabletMode ? "ipad.landscape" : "iphone"
         if preferredPixelSize.width > 0, preferredPixelSize.height > 0 {
             surface.pixelSize = preferredPixelSize
@@ -3902,7 +3907,7 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
         rightStack.translatesAutoresizingMaskIntoConstraints = false
         topBar.addSubview(rightStack)
 
-        modeSwitchButton = TFButton(title: "手机模式", symbolName: "iphone", variant: .subtle, size: .sm)
+        modeSwitchButton = TFButton(title: "切换竖屏", symbolName: "ipad.landscape", variant: .subtle, size: .sm)
         modeSwitchButton.onClick = { [weak self] in self?.onToggleTabletMode?() }
         rightStack.addArrangedSubview(modeSwitchButton)
 
@@ -4047,8 +4052,9 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
 
     func awaitFirstPresentation() {
         overlay.fillColor = .clear
-        surface.videoVisible = true
+        overlay.displayIfNeeded()
         surface.inputEnabled = false
+        surface.videoVisible = true
     }
 
     func ready() {

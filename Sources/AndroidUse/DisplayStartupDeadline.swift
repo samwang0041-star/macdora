@@ -8,12 +8,13 @@ struct DisplayStartupDeadline {
 
     init(at time: Double) { started = time; checked = time }
 
-    mutating func expired(at time: Double, decoded: Bool, targetVisible: Bool, presentable: Bool) -> Bool {
+    mutating func expired(at time: Double, decoded: Bool, targetVisible: Bool, presentable: Bool, applicationActive: Bool = true) -> Bool {
         let elapsed = max(0, time - checked)
         checked = time
         if !decoded || !targetVisible { return time - started >= 35 }
-        if wasPresentable && presentable { visibleWait += elapsed }
-        wasPresentable = presentable
+        let presentationExpected = presentable && applicationActive
+        if wasPresentable && presentationExpected { visibleWait += elapsed }
+        wasPresentable = presentationExpected
         return visibleWait >= 35
     }
 }

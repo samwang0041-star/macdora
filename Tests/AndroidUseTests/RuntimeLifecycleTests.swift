@@ -3,7 +3,23 @@ import XCTest
 
 @MainActor
 final class RuntimeLifecycleTests: XCTestCase {
-    func testSoftwareDisplayDefaultsSurviveFreshBootModeChangesAndReopenOnEitherImage() async throws {
+    func testDisplayLayoutPreferenceDefaultsToHorizontalAndPreservesLegacyVertical() throws {
+        let legacyVertical = Data(#"{"resolutionPreset":"1080p","targetFPS":60,"keepWarmInBackground":true,"clipboardSyncEnabled":true,"directIMEEnabled":true,"cameraEnabled":true,"tabletMode":false}"#.utf8)
+        let decodedVertical = try JSONDecoder().decode(ContainerPreferences.self, from: legacyVertical)
+        XCTAssertFalse(decodedVertical.tabletMode)
+        XCTAssertEqual(decodedVertical.preferredPixelSize, CGSize(width: 1200, height: 1920))
+        XCTAssertEqual(decodedVertical.resolutionDisplayLabel, "1200 × 1920 · 竖屏布局")
+
+        let missing = try JSONDecoder().decode(
+            ContainerPreferences.self,
+            from: Data(#"{"resolutionPreset":"1080p"}"#.utf8)
+        )
+        XCTAssertTrue(missing.tabletMode)
+        XCTAssertEqual(missing.preferredPixelSize, CGSize(width: 1920, height: 1200))
+        XCTAssertEqual(missing.resolutionDisplayLabel, "1920 × 1200 · 横屏布局")
+    }
+
+    func testSoftwareDisplayDefaultsSurviveFreshBootLayoutChangesAndReopenOnEitherImage() async throws {
         for api in [35, 37] {
             let fixture = try LifecycleFixture(androidAPI: api)
             defer { fixture.remove() }
@@ -18,10 +34,16 @@ final class RuntimeLifecycleTests: XCTestCase {
                 fixture.registry.secureContentVisible = false
                 await fixture.controller.applyGuestDeviceFormFactor(tabletMode: tabletMode)
                 XCTAssertTrue(fixture.registry.secureContentVisible, "Mode changes must reapply display defaults.")
+                fixture.registry.assertLatestGuestEnvironmentUsesTabletIdentity(for: tabletMode)
                 _ = try await fixture.controller.openDisplay()
                 XCTAssertEqual(fixture.registry.displayDefaultsAtLaunch.last, true, "Opening an app must preserve defaults before starting its display.")
                 await fixture.controller.closeDisplay()
             }
+            XCTAssertEqual(
+                fixture.registry.zygoteRestartCommands,
+                1,
+                "API \(api) must restart zygote for the initial Tablet identity migration only."
+            )
             _ = await fixture.controller.stop()
             fixture.registry.secureContentVisible = false
             try await fixture.controller.start()
@@ -38,7 +60,7 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(String(decoding: tabletBytes[4..<12], as: UTF8.self), "SM-F926U")
         XCTAssertTrue(tabletBytes[12..<96].allSatisfy { $0 == 0 })
 
-        let tabletScript = RuntimeSoftwareDefaults.guestDeviceIdentityScript(tabletMode: true)
+        let tabletScript = RuntimeSoftwareDefaults.guestDeviceIdentityScript()
         XCTAssertTrue(tabletScript.contains("target_model=\"SM-F926U\""))
         XCTAssertTrue(tabletScript.contains("target_chars=\"tablet\""))
         XCTAssertTrue(tabletScript.contains("target_density=\"240\""))
@@ -54,24 +76,16 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(tabletScript.contains("ip6tables -w -I OUTPUT -d 2000::/3 -j REJECT"))
         XCTAssertTrue(tabletScript.contains("/proc/sys/net/ipv6/conf/$iface/disable_ipv6"))
 
-        let phoneScript = RuntimeSoftwareDefaults.guestDeviceIdentityScript(tabletMode: false)
-        XCTAssertTrue(phoneScript.contains("target_model=\"Android SDK built for arm64\""))
-        XCTAssertTrue(phoneScript.contains("target_chars=\"default\""))
-        XCTAssertTrue(phoneScript.contains("target_density=\"420\""))
-
-        for script in [phoneScript, tabletScript] {
-            XCTAssertFalse(script.contains(".auth_cache"))
-            XCTAssertFalse(script.contains("/data/data/"), "Generic guest setup must not inspect or mutate application-private data.")
-        }
+        XCTAssertFalse(tabletScript.contains(".auth_cache"))
+        XCTAssertFalse(tabletScript.contains("/data/data/"), "Generic guest setup must not inspect or mutate application-private data.")
+        XCTAssertFalse(tabletScript.contains("am force-stop"), "Shared environment setup must not force-stop individual applications.")
 
         // Zygote model state must be marked pending before restart and committed only after readiness.
-        let stopIndex = try XCTUnwrap(tabletScript.range(of: "am force-stop com.tencent.mm")?.lowerBound)
         let pendingIndex = try XCTUnwrap(tabletScript.range(of: "setprop sys.androiduse.zygote_model \"pending\"")?.lowerBound)
         let patchFnIndex = try XCTUnwrap(tabletScript.range(of: "patch_prop() {")?.lowerBound)
         let restartIndex = try XCTUnwrap(tabletScript.range(of: "setprop ctl.restart zygote")?.lowerBound)
         let readyCheckIndex = try XCTUnwrap(tabletScript.range(of: "[ \"$ready\" = \"1\" ] || exit 1")?.lowerBound)
         let commitIndex = try XCTUnwrap(tabletScript.range(of: "setprop sys.androiduse.zygote_model \"$target_model\" >/dev/null 2>&1 || exit 1")?.lowerBound)
-        XCTAssertLessThan(stopIndex, restartIndex)
         XCTAssertLessThan(pendingIndex, patchFnIndex)
         XCTAssertLessThan(pendingIndex, restartIndex)
         XCTAssertLessThan(restartIndex, readyCheckIndex)
@@ -391,6 +405,9 @@ private final class LifecycleRegistry: @unchecked Sendable {
     var emulatorEnvironments: [[String: String]] = []
     var secureContentVisible = false
     var displayDefaultsAtLaunch: [Bool] = []
+    var guestEnvironmentScripts: [String] = []
+    var zygoteRestartCommands = 0
+    var guestZygoteModel: String?
     var installedPackages = Set<String>()
     var uninstalledPackages: [String] = []
     var failNextCatalogRefresh = false
@@ -411,6 +428,7 @@ private final class LifecycleRunner: ProcessExecuting, @unchecked Sendable {
                 registry.adb = handle
             case .emulator:
                 registry.emulator = handle
+                registry.guestZygoteModel = nil
                 registry.emulatorArguments.append(invocation.arguments)
                 registry.emulatorEnvironments.append(invocation.environment)
             case .display:
@@ -477,6 +495,17 @@ private final class LifecycleRunner: ProcessExecuting, @unchecked Sendable {
                 return ProcessResult(exitCode: 1, stdout: Data(), timedOut: false)
             }
             registry.withLock {
+                if script.contains("patch_prop()"),
+                   let targetLine = script.split(separator: "\n").first(where: {
+                       $0.hasPrefix("target_model=\"")
+                   }),
+                   let target = targetLine.split(separator: "\"").dropFirst().first {
+                    if registry.guestZygoteModel != String(target) {
+                        registry.zygoteRestartCommands += 1
+                        registry.guestZygoteModel = String(target)
+                    }
+                    registry.guestEnvironmentScripts.append(script)
+                }
                 for line in script.split(separator: "\n") {
                     if line.contains("settings put secure disable_secure_windows 1") { registry.secureContentVisible = true }
                     if line.contains("settings delete secure disable_secure_windows") { registry.secureContentVisible = false }
@@ -505,6 +534,44 @@ private final class LifecycleRunner: ProcessExecuting, @unchecked Sendable {
         else if args.last == "/proc/net/unix" { reply = "@scrcpy_00000021\n" }
         else { reply = "Success\n" }
         return ProcessResult(exitCode: 0, stdout: Data(reply.utf8), timedOut: false)
+    }
+}
+
+private extension LifecycleRegistry {
+    func assertLatestGuestEnvironmentUsesTabletIdentity(
+        for tabletMode: Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let script = withLock { guestEnvironmentScripts.last }
+        guard let script else {
+            XCTFail("Expected a guest environment configuration script.", file: file, line: line)
+            return
+        }
+        XCTAssertTrue(script.contains("target_model=\"SM-F926U\""), file: file, line: line)
+        XCTAssertTrue(script.contains("target_chars=\"tablet\""), file: file, line: line)
+        XCTAssertTrue(script.contains("target_density=\"240\""), file: file, line: line)
+        XCTAssertFalse(script.contains("target_model=\"Android SDK built for arm64\""), file: file, line: line)
+        XCTAssertTrue(
+            script.contains("wm set-ignore-orientation-request true"),
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(
+            script.contains("wm size \(tabletMode ? "1920x1200" : "1200x1920") -d 0"),
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(
+            script.contains("wm density 240 -d 0"),
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(
+            script.contains("am compat enable --no-kill FORCE_RESIZE_APP"),
+            file: file,
+            line: line
+        )
     }
 }
 

@@ -251,7 +251,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         let fullScreen = windows.addItem(withTitle: "进入 / 退出全屏", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         fullScreen.keyEquivalentModifierMask = [.control, .command]
         windows.addItem(.separator())
-        let tabletToggleItem = windows.addItem(withTitle: "切换手机 / 平板模式", action: #selector(toggleTabletModeCommand), keyEquivalent: "T")
+        let tabletToggleItem = windows.addItem(withTitle: "切换横屏 / 竖屏布局", action: #selector(toggleTabletModeCommand), keyEquivalent: "T")
         tabletToggleItem.keyEquivalentModifierMask = [.command, .shift]
         tabletToggleItem.target = self
         NSApplication.shared.windowsMenu = windows
@@ -667,9 +667,9 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             guard let self, self.displayGeneration == generation else { return }
             self.hasPresentedFrame = true
             if self.hasObservedTarget { self.applicationWindow?.ready() }
-            let isTablet = self.runtime.containerPreferences.tabletMode
+            let isHorizontal = self.runtime.containerPreferences.tabletMode
             Task { @MainActor [weak self] in
-                await self?.runtime.configureVirtualDisplayOrientation(tabletMode: isTablet)
+                await self?.runtime.configureVirtualDisplayOrientation(tabletMode: isHorizontal)
             }
         }
         stream.connect(port: endpoint.port, startApp: endpoint.package)
@@ -685,7 +685,8 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 let presentable = window?.isVisible == true && window?.isMiniaturized == false
                     && window?.occlusionState.contains(.visible) == true
                 if deadline.expired(at: CACurrentMediaTime(), decoded: self.hasDecodedFrame,
-                                    targetVisible: self.hasObservedTarget, presentable: presentable) {
+                                    targetVisible: self.hasObservedTarget, presentable: presentable,
+                                    applicationActive: NSApp.isActive && window?.isKeyWindow == true) {
                     self.displayFailed("\(appTitle) 暂时没有产生可显示的画面。请重新打开；若仍失败，请停止容器后重试。")
                     return
                 }

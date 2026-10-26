@@ -256,6 +256,8 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
     var clipboardSyncEnabled: Bool
     var directIMEEnabled: Bool
     var cameraEnabled: Bool
+    /// Legacy persistence name retained for compatibility. This now controls
+    /// only the display layout; the guest hardware identity is always tablet.
     var tabletMode: Bool
 
     init(
@@ -265,7 +267,7 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         clipboardSyncEnabled: Bool = true,
         directIMEEnabled: Bool = true,
         cameraEnabled: Bool = true,
-        tabletMode: Bool = false
+        tabletMode: Bool = true
     ) {
         self.resolutionPreset = resolutionPreset
         self.targetFPS = targetFPS
@@ -294,7 +296,7 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         clipboardSyncEnabled = try container.decodeIfPresent(Bool.self, forKey: .clipboardSyncEnabled) ?? true
         directIMEEnabled = try container.decodeIfPresent(Bool.self, forKey: .directIMEEnabled) ?? true
         cameraEnabled = try container.decodeIfPresent(Bool.self, forKey: .cameraEnabled) ?? true
-        tabletMode = try container.decodeIfPresent(Bool.self, forKey: .tabletMode) ?? false
+        tabletMode = try container.decodeIfPresent(Bool.self, forKey: .tabletMode) ?? true
     }
 
     static let `default` = ContainerPreferences(
@@ -304,21 +306,21 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         clipboardSyncEnabled: true,
         directIMEEnabled: true,
         cameraEnabled: true,
-        tabletMode: false
+        tabletMode: true
     )
 
     var resolutionDisplayLabel: String {
         if tabletMode {
             switch resolutionPreset {
-            case "720p": return "1280 × 800 · 平板模式"
-            case "1440p": return "2560 × 1600 · 平板超清"
-            default: return "1920 × 1200 · 平板模式"
+            case "720p": return "1280 × 800 · 横屏布局"
+            case "1440p": return "2560 × 1600 · 横屏超清"
+            default: return "1920 × 1200 · 横屏布局"
             }
         }
         switch resolutionPreset {
-        case "720p": return "720 × 1280 · 手机模式"
-        case "1440p": return "1440 × 2560 · 手机超清"
-        default: return "1080 × 1920 · 手机模式"
+        case "720p": return "800 × 1280 · 竖屏布局"
+        case "1440p": return "1600 × 2560 · 竖屏超清"
+        default: return "1200 × 1920 · 竖屏布局"
         }
     }
 
@@ -331,9 +333,9 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
             }
         }
         switch resolutionPreset {
-        case "720p": return CGSize(width: 720, height: 1280)
-        case "1440p": return CGSize(width: 1440, height: 2560)
-        default: return CGSize(width: 1080, height: 1920)
+        case "720p": return CGSize(width: 800, height: 1280)
+        case "1440p": return CGSize(width: 1600, height: 2560)
+        default: return CGSize(width: 1200, height: 1920)
         }
     }
 }

@@ -4,6 +4,20 @@ import CoreMedia
 @testable import AndroidUse
 
 final class DisplayFailureTests: XCTestCase {
+    func testPresentationDeadlinePausesWhileHostApplicationIsInactive() {
+        var deadline = DisplayStartupDeadline(at: 0)
+        XCTAssertFalse(deadline.expired(at: 1, decoded: true, targetVisible: true, presentable: true, applicationActive: false))
+        XCTAssertFalse(deadline.expired(at: 120, decoded: true, targetVisible: true, presentable: true, applicationActive: false))
+        XCTAssertFalse(deadline.expired(at: 121, decoded: true, targetVisible: true, presentable: true, applicationActive: true))
+        XCTAssertFalse(deadline.expired(at: 155, decoded: true, targetVisible: true, presentable: true, applicationActive: true))
+        XCTAssertTrue(deadline.expired(at: 156, decoded: true, targetVisible: true, presentable: true, applicationActive: true))
+    }
+
+    func testMissingDecodeStillTimesOutWhileHostApplicationIsInactive() {
+        var deadline = DisplayStartupDeadline(at: 0)
+        XCTAssertTrue(deadline.expired(at: 35, decoded: false, targetVisible: true, presentable: true, applicationActive: false))
+    }
+
     func testOneShotInputDoesNotDependOnWatchdogOrDuplicateWakeups() throws {
         var buffer: CVPixelBuffer?
         CVPixelBufferCreate(kCFAllocatorDefault, 2, 2, kCVPixelFormatType_32BGRA, nil, &buffer)

@@ -227,6 +227,12 @@ public final class MainActivity extends Activity
         listParams.topMargin = dp(4);
         body.addView(listView, listParams);
 
+        Button persistenceButton = new Button(this);
+        persistenceButton.setText("检查数据保留 / Persistence");
+        persistenceButton.setAllCaps(false);
+        persistenceButton.setOnClickListener(view -> startActivity(new Intent(this, PersistenceActivity.class)));
+        body.addView(persistenceButton, matchWidthWrap());
+
         setContentView(root);
     }
 

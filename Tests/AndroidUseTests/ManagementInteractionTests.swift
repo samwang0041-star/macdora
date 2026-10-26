@@ -69,6 +69,31 @@ final class ManagementInteractionTests: XCTestCase {
         }
     }
 
+    func testDisplayLayoutLabelsStaySeparateFromGuestIdentity() throws {
+        _ = NSApplication.shared
+        let manager = ManagementWindow()
+        let window = try XCTUnwrap(manager.window)
+        defer { window.orderOut(nil) }
+        manager.updatePreferences(
+            cameraEnabled: true,
+            canChangeCamera: true,
+            rootPath: "/tmp/macdora",
+            preferences: .default,
+            readiness: []
+        )
+        manager.selectSection(.settings)
+        manager.presentWindow()
+
+        let controls = descendants(try XCTUnwrap(window.contentView))
+        let accessibilityLabels = controls.compactMap { $0.accessibilityLabel() }
+        XCTAssertTrue(accessibilityLabels.contains("横屏布局"))
+        XCTAssertTrue(accessibilityLabels.contains("竖屏布局"))
+        XCTAssertFalse(accessibilityLabels.contains("平板模式"))
+        XCTAssertFalse(accessibilityLabels.contains("手机模式"))
+        let text = controls.compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: "\n")
+        XCTAssertTrue(text.contains("切换显示比例与方向；设备身份和登录状态保持不变"))
+    }
+
     func testCategoryAndThemeChangesKeepSearchAndSelectionSynchronized() throws {
         _ = NSApplication.shared
         let manager = ManagementWindow()

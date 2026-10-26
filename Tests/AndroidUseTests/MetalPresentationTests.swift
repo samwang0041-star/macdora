@@ -6,7 +6,7 @@ import Metal
 
 final class MetalPresentationTests: XCTestCase {
     @MainActor
-    func testFirstFrameRequiresValidPresentationFromCurrentSession() throws {
+    func testFirstFrameRejectsMissingOrInvalidPresentationTimestamps() throws {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let view = AndroidSurfaceView(frame: NSRect(x: 0, y: 0, width: 32, height: 32), device: device)
         let session = UUID()
@@ -26,6 +26,16 @@ final class MetalPresentationTests: XCTestCase {
         view.didPresent(frame, at: 0, session: session)
         XCTAssertEqual(first, 0)
         XCTAssertEqual(invalid, 1)
+        view.videoVisible = true
+        view.didPresent(frame, at: 0, session: UUID())
+        XCTAssertEqual(first, 0, "A stale session cannot make the new application ready.")
+        view.didPresent(frame, at: .nan, session: session)
+        view.didPresent(frame, at: -1, session: session)
+        XCTAssertEqual(first, 0)
+        view.didPresent(frame, at: 0, session: session)
+        XCTAssertEqual(first, 0, "A dropped drawable must not enable input before a real presentation.")
+        XCTAssertEqual(presented, 0, "A missing timestamp cannot become a performance sample.")
+        XCTAssertEqual(invalid, 4)
         view.didPresent(frame, at: 101, session: session)
         view.didPresent(frame, at: 102, session: session)
         XCTAssertEqual(first, 1)

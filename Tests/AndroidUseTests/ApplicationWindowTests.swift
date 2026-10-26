@@ -7,6 +7,69 @@ import XCTest
 
 final class ApplicationWindowTests: XCTestCase {
     @MainActor
+    func testApplicationWindowStartsWithDefaultTabletAspect() throws {
+        _ = NSApplication.shared
+        let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        defer { controller.performExplicitClose() }
+        let expected = ContainerPreferences.default.preferredPixelSize
+        XCTAssertEqual(controller.surface.pixelSize, expected)
+        XCTAssertEqual(try XCTUnwrap(controller.window).contentAspectRatio, expected)
+    }
+
+    @MainActor
+    func testAwaitingFirstPresentationMakesLoadingLayerTransparentImmediately() throws {
+        _ = NSApplication.shared
+        let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        defer { controller.performExplicitClose() }
+        controller.loading("Waiting for application")
+        controller.presentWindow()
+        let root = try XCTUnwrap(controller.window?.contentView)
+        let overlay = try XCTUnwrap(root.subviews.compactMap { $0 as? TFCardView }.first {
+            $0.subviews.contains { $0 is NSProgressIndicator }
+        })
+        overlay.displayIfNeeded()
+        XCTAssertGreaterThan(try XCTUnwrap(overlay.layer?.backgroundColor).alpha, 0.9)
+        controller.awaitFirstPresentation()
+        XCTAssertEqual(try XCTUnwrap(overlay.layer?.backgroundColor).alpha, 0, accuracy: 0.001,
+                       "The compositor must see the cleared loading layer before a cached Metal frame is queued.")
+        XCTAssertFalse(controller.surface.inputEnabled)
+    }
+
+    @MainActor
+    func testColdStartupPresentsFrameDecodedBeforeTargetBecomesVisible() async throws {
+        _ = NSApplication.shared
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        defer { controller.surface.onFirstFrame = nil; controller.performExplicitClose() }
+        controller.loading("Waiting for application")
+        controller.presentWindow()
+        let session = UUID()
+        controller.surface.beginSession(session)
+        var firstPresentations = 0
+        controller.surface.onFirstFrame = { firstPresentations += 1; controller.ready() }
+        var buffer: CVPixelBuffer?
+        let attributes: [CFString: Any] = [kCVPixelBufferMetalCompatibilityKey: true, kCVPixelBufferIOSurfacePropertiesKey: [:]]
+        XCTAssertEqual(CVPixelBufferCreate(nil, 1920, 1200, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes as CFDictionary, &buffer), kCVReturnSuccess)
+        let image = try XCTUnwrap(buffer)
+        CVPixelBufferLockBaseAddress(image, [])
+        memset(CVPixelBufferGetBaseAddressOfPlane(image, 0), 128, CVPixelBufferGetBytesPerRowOfPlane(image, 0) * 1200)
+        memset(CVPixelBufferGetBaseAddressOfPlane(image, 1), 128, CVPixelBufferGetBytesPerRowOfPlane(image, 1) * 600)
+        CVPixelBufferUnlockBaseAddress(image, [])
+        controller.surface.accept(DecodedFrame(buffer: image, pts: 0, marker: nil), session: session)
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(firstPresentations, 0)
+        XCTAssertFalse(controller.surface.inputEnabled)
+        controller.awaitFirstPresentation()
+        let deadline = Date(timeIntervalSinceNow: 2)
+        while firstPresentations == 0 && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(firstPresentations, 1, "A static first frame must recover without a later decode, user retry, or test-side transaction flush.")
+        XCTAssertTrue(controller.surface.inputEnabled)
+    }
+
+    @MainActor
     func testApplicationActivationRedrawsStaticCachedFrameWithoutNewDecode() async throws {
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.regular)
@@ -109,6 +172,24 @@ final class ApplicationWindowTests: XCTestCase {
         // A resize delegate is insufficient: AppKit can constrain a single axis
         // before/after it runs. The native aspect constraint must own this path.
         XCTAssertFalse(controller.responds(to: #selector(NSWindowDelegate.windowWillResize(_:to:))))
+    }
+
+    @MainActor
+    func testVerticalLayoutKeepsTabletGuestIdentityWhileChangingOnlyWindowChrome() throws {
+        _ = NSApplication.shared
+        let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        let window = try XCTUnwrap(controller.window)
+        defer { controller.performExplicitClose() }
+
+        controller.applyDisplayMode(
+            tabletMode: false,
+            preferredPixelSize: CGSize(width: 1080, height: 1920)
+        )
+        window.contentView?.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(GuestDeviceIdentity.tablet.model, "SM-F926U")
+        XCTAssertEqual(GuestDeviceIdentity.tablet.characteristics, "tablet")
+        XCTAssertEqual(window.contentAspectRatio.width / window.contentAspectRatio.height, 9.0 / 16.0, accuracy: 0.0001)
     }
 
     @MainActor

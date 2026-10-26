@@ -20,6 +20,10 @@
         android:theme="@style/ProbeTheme"
         android:usesCleartextTraffic="false">
         <activity
+            android:name=".PersistenceActivity"
+            android:exported="false"
+            android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize" />
+        <activity
             android:name=".InteractionActivity"
             android:exported="false"
             android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize" />
