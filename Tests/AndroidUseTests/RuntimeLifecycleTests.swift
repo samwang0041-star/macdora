@@ -30,7 +30,7 @@ final class RuntimeLifecycleTests: XCTestCase {
         }
     }
 
-    func testTabletModeAppliesMuMuDeviceIdentityAndWeChatAuthCacheReset() async throws {
+    func testDeviceIdentitySetupPreservesApplicationDataAndFailsClosed() async throws {
         let tabletB64 = RuntimeSoftwareDefaults.propertyRecordBase64("SM-F926U")
         let tabletBytes = try XCTUnwrap(Data(base64Encoded: tabletB64))
         XCTAssertEqual(tabletBytes.count, 96)
@@ -47,8 +47,6 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(tabletScript.contains("u:object_r:build_odm_prop:s0"))
         XCTAssertTrue(tabletScript.contains("u:object_r:fingerprint_prop:s0"))
         XCTAssertTrue(tabletScript.contains("u:object_r:qemu_sf_lcd_density_prop:s0"))
-        XCTAssertTrue(tabletScript.contains("7a03bac2-692f-3d17-a2cd-a1b0721ffd0e"))
-        XCTAssertTrue(tabletScript.contains("8fa14cdd-754f-31cc-a554-c9e71929cce7"))
         XCTAssertTrue(tabletScript.contains("sys.androiduse.winext_patch"))
         XCTAssertTrue(tabletScript.contains("/system_ext/framework/androidx.window.extensions.jar"))
         XCTAssertTrue(tabletScript.contains("setprop ctl.restart zygote"))
@@ -61,15 +59,19 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(phoneScript.contains("target_chars=\"default\""))
         XCTAssertTrue(phoneScript.contains("target_density=\"420\""))
 
-        // Force-stop must precede .auth_cache deletion, and Zygote model state must be marked pending before restart.
+        for script in [phoneScript, tabletScript] {
+            XCTAssertFalse(script.contains(".auth_cache"))
+            XCTAssertFalse(script.contains("/data/data/"), "Generic guest setup must not inspect or mutate application-private data.")
+        }
+
+        // Zygote model state must be marked pending before restart and committed only after readiness.
         let stopIndex = try XCTUnwrap(tabletScript.range(of: "am force-stop com.tencent.mm")?.lowerBound)
-        let rmIndex = try XCTUnwrap(tabletScript.range(of: "rm -rf /data/data/com.tencent.mm/.auth_cache/7a03bac2-692f-3d17-a2cd-a1b0721ffd0e")?.lowerBound)
         let pendingIndex = try XCTUnwrap(tabletScript.range(of: "setprop sys.androiduse.zygote_model \"pending\"")?.lowerBound)
         let patchFnIndex = try XCTUnwrap(tabletScript.range(of: "patch_prop() {")?.lowerBound)
         let restartIndex = try XCTUnwrap(tabletScript.range(of: "setprop ctl.restart zygote")?.lowerBound)
         let readyCheckIndex = try XCTUnwrap(tabletScript.range(of: "[ \"$ready\" = \"1\" ] || exit 1")?.lowerBound)
         let commitIndex = try XCTUnwrap(tabletScript.range(of: "setprop sys.androiduse.zygote_model \"$target_model\" >/dev/null 2>&1 || exit 1")?.lowerBound)
-        XCTAssertLessThan(stopIndex, rmIndex)
+        XCTAssertLessThan(stopIndex, restartIndex)
         XCTAssertLessThan(pendingIndex, patchFnIndex)
         XCTAssertLessThan(pendingIndex, restartIndex)
         XCTAssertLessThan(restartIndex, readyCheckIndex)

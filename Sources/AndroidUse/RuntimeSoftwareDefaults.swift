@@ -200,16 +200,10 @@ enum RuntimeSoftwareDefaults {
         [ "$(getprop ro.build.characteristics)" = "$target_chars" ] || exit 1
         [ "$(getprop qemu.sf.lcd_density)" = "$target_density" ] || exit 1
         [ "$(getprop ro.build.fingerprint)" = "$target_fingerprint" ] || exit 1
-        mm_model_cache="/data/data/com.tencent.mm/.auth_cache/7a03bac2-692f-3d17-a2cd-a1b0721ffd0e/0"
-        if [ -f "$mm_model_cache" ] && ! grep -q "^${target_model}," "$mm_model_cache" 2>/dev/null; then
-          am force-stop com.tencent.mm >/dev/null 2>&1 || true
-          rm -rf /data/data/com.tencent.mm/.auth_cache/7a03bac2-692f-3d17-a2cd-a1b0721ffd0e \\
-                 /data/data/com.tencent.mm/.auth_cache/8fa14cdd-754f-31cc-a554-c9e71929cce7 2>/dev/null || exit 1
-        fi
+        # Application authentication belongs to the application. A missing
+        # boot-scoped Zygote marker or a device-mode change must not erase it.
         if [ "$cur_zygote_model" != "$target_model" ]; then
           am force-stop com.tencent.mm >/dev/null 2>&1 || true
-          rm -rf /data/data/com.tencent.mm/.auth_cache/7a03bac2-692f-3d17-a2cd-a1b0721ffd0e \\
-                 /data/data/com.tencent.mm/.auth_cache/8fa14cdd-754f-31cc-a554-c9e71929cce7 2>/dev/null || exit 1
           if [ -f /system_ext/framework/androidx.window.extensions.jar ] && [ "$(getprop sys.androiduse.winext_patch)" != "v2" ]; then
             for p in /system_ext/framework/androidx.window.extensions.jar \\
                      /system_ext/framework/oat/arm64/androidx.window.extensions.odex \\
