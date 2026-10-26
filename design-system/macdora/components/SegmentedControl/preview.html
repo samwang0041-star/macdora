@@ -1,0 +1,7 @@
+<!-- @dsCard group="交互参考" height=200 subtitle="互斥选项" -->
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>互斥选项 · Macdora</title>
+<link rel="stylesheet" href="../../tokens.css"><link rel="stylesheet" href="../bundle.css">
+<style>body{margin:0;background:var(--canvas);color:var(--ink);font-family:var(--font-sans)}.demo{padding:var(--space-24);display:grid;gap:var(--space-16)}h1,p{margin:0}h1{}p{color:var(--ink2);line-height:1.6}#controls{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-12)}.motion-target{padding:var(--space-16);border:1px solid var(--line);background:var(--card);border-radius:var(--radius-card);}#status{min-height:1.5em}</style></head>
+<body><main class="demo"><h1 class="section-title">互斥选项</h1><p class="body">选项清楚可见，支持 Tab 与方向键。</p><div id="controls"></div><p class="body" id="status" role="status" aria-live="polite">网页交互参考，不执行产品操作。</p></main>
+<script src="../bundle.js"></script><script>(()=>{const status=document.getElementById("status");document.getElementById("controls").append(MacdoraUI.SegmentedControl({label:"显示方向",options:[{value:"landscape",label:"横屏"},{value:"portrait",label:"竖屏"}],value:"landscape",onChange:value=>status.textContent=(value==="landscape"?"横屏":"竖屏")+"布局示例；保持同一平板身份。"}));})();</script></body></html>

@@ -35,11 +35,11 @@ enum ManagementSection: Int, CaseIterable {
 
     var pageSubheading: String {
         switch self {
-        case .apps: return "独立窗口运行，账号与数据持久保存"
-        case .plugins: return "按需下载启用系统扩展能力"
-        case .monitor: return "实时帧率与系统资源占用"
-        case .settings: return "显示比例、输入体验与权限管理"
-        case .serving: return "核心组件与运行环境自检"
+        case .apps: return "在独立窗口中使用安卓应用"
+        case .plugins: return "按需添加扩展功能"
+        case .monitor: return "查看画面表现与资源使用"
+        case .settings: return "调整显示、输入与应用权限"
+        case .serving: return "检查运行环境，处理使用问题"
         case .about: return "版本与软件更新"
         }
     }
@@ -78,13 +78,17 @@ private enum AppCategoryFilter: String, CaseIterable {
 
 @MainActor
 enum TFTheme {
-    static var isDark: Bool = false
+    static var isDark: Bool = true
 
-    static var bg: NSColor { isDark ? hex(0x1C1C1E) : hex(0xF2F3F6) }
-    static var frostedSidebarTint: NSColor { isDark ? hex(0x1C1C1E, alpha: 0.78) : hex(0xF2F3F6, alpha: 0.80) }
-    static var canvas: NSColor { isDark ? hex(0x141416) : hex(0xFBFBFC) }
-    static var card: NSColor { isDark ? hex(0x1C1C1F) : hex(0xFFFFFF) }
-    static var card2: NSColor { isDark ? hex(0x242428) : hex(0xF4F5F7) }
+    static var bg: NSColor { isDark ? hex(0x10182B) : hex(0xF1F5FB) }
+    static var canvas: NSColor { isDark ? hex(0x101A2B) : hex(0xF2F6FC) }
+    static var card: NSColor { isDark ? hex(0x18263B) : hex(0xFFFFFF) }
+    static var card2: NSColor { isDark ? hex(0x22324B) : hex(0xEDF2F8) }
+    static var sidebarInk: NSColor { hex(0xF0F5FC) }
+    static var sidebarInk2: NSColor { hex(0xAABAD1) }
+    static var sidebarAccent: NSColor { hex(0x8CD4FF) }
+    static var sidebarSelection: NSColor { NSColor.white.withAlphaComponent(0.09) }
+    static var sidebarSelectionLine: NSColor { NSColor.white.withAlphaComponent(0.13) }
     static var surfaceHover: NSColor {
         isDark
             ? NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.065)
@@ -92,9 +96,8 @@ enum TFTheme {
     }
 
     static var ink: NSColor { isDark ? hex(0xF3F4F6) : hex(0x0F1419) }
-    static var ink2: NSColor { isDark ? hex(0xA1A1AA) : hex(0x4B5563) }
-    static var ink3: NSColor { isDark ? hex(0x71717A) : hex(0x8A93A2) }
-    static var ink4: NSColor { isDark ? hex(0x52525B) : hex(0xB6BDC9) }
+    static var ink2: NSColor { isDark ? hex(0xB5C2D7) : hex(0x4B5563) }
+    static var ink3: NSColor { isDark ? hex(0x98ABC5) : hex(0x5D6B80) }
 
     static var line: NSColor {
         isDark
@@ -107,25 +110,33 @@ enum TFTheme {
             : NSColor(srgbRed: 15.0 / 255.0, green: 23.0 / 255.0, blue: 42.0 / 255.0, alpha: 0.11)
     }
 
-    static var accent: NSColor { isDark ? hex(0x33AEFF) : hex(0x0F97FF) }
+    static var accent: NSColor { isDark ? hex(0x33AEFF) : hex(0x076DC4) }
+    // Filled controls keep white labels legible in both appearances.
+    static var accentFill: NSColor { hex(0x076DC4) }
+    static var accentPressed: NSColor { hex(0x055CAA) }
+    static var accentInk: NSColor { isDark ? hex(0x33AEFF) : hex(0x055CAA) }
+    static var positiveFill: NSColor { hex(0x147D55) }
+    static var positivePressed: NSColor { hex(0x106A48) }
+    static var dangerFill: NSColor { hex(0xC12E38) }
+    static var dangerPressed: NSColor { hex(0xA32530) }
     static var accentSoft: NSColor {
         isDark
             ? NSColor(srgbRed: 51.0 / 255.0, green: 174.0 / 255.0, blue: 1.0, alpha: 0.15)
             : NSColor(srgbRed: 15.0 / 255.0, green: 151.0 / 255.0, blue: 1.0, alpha: 0.10)
     }
-    static var positive: NSColor { isDark ? hex(0x34D399) : hex(0x10B981) }
+    static var positive: NSColor { isDark ? hex(0x34D399) : hex(0x147D55) }
     static var positiveSoft: NSColor {
         isDark
             ? NSColor(srgbRed: 52.0 / 255.0, green: 211.0 / 255.0, blue: 153.0 / 255.0, alpha: 0.15)
             : NSColor(srgbRed: 16.0 / 255.0, green: 185.0 / 255.0, blue: 129.0 / 255.0, alpha: 0.10)
     }
-    static var warn: NSColor { isDark ? hex(0xFBBF24) : hex(0xF59E0B) }
+    static var warn: NSColor { isDark ? hex(0xFBBF24) : hex(0x8D5E00) }
     static var warnSoft: NSColor {
         isDark
             ? NSColor(srgbRed: 251.0 / 255.0, green: 191.0 / 255.0, blue: 36.0 / 255.0, alpha: 0.15)
             : NSColor(srgbRed: 245.0 / 255.0, green: 158.0 / 255.0, blue: 11.0 / 255.0, alpha: 0.10)
     }
-    static var danger: NSColor { isDark ? hex(0xF87171) : hex(0xEF4444) }
+    static var danger: NSColor { isDark ? hex(0xF87171) : hex(0xC12E38) }
     static var dangerSoft: NSColor {
         isDark
             ? NSColor(srgbRed: 248.0 / 255.0, green: 113.0 / 255.0, blue: 113.0 / 255.0, alpha: 0.15)
@@ -358,6 +369,7 @@ final class TFAppIconView: NSView {
 final class TFButton: NSControl {
     enum Variant {
         case primary
+        case tinted
         case secondary
         case subtle
         case ghost
@@ -378,6 +390,7 @@ final class TFButton: NSControl {
     }
     var symbolName: String? { didSet { updateIcon(); invalidateIntrinsicContentSize() } }
     var variant: Variant { didSet { refreshColors() } }
+    var foregroundOverride: NSColor? { didSet { refreshColors() } }
     let controlSizeMode: Size
     var onClick: (() -> Void)?
 
@@ -386,9 +399,12 @@ final class TFButton: NSControl {
     private let iconView = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private var isPressed = false { didSet { refreshColors() } }
+    private var isHovered = false { didSet { refreshColors() } }
+    private var hoverTrackingArea: NSTrackingArea?
 
     override var isEnabled: Bool {
         didSet {
+            if !isEnabled { isPressed = false }
             alphaValue = isEnabled ? 1.0 : 0.45
             refreshColors()
         }
@@ -478,6 +494,22 @@ final class TFButton: NSControl {
         NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovered = true }
+    override func mouseExited(with event: NSEvent) { isHovered = false }
+
     private func updateIcon() {
         if let symbolName, let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
             let pt: CGFloat = controlSizeMode == .sm ? 11.5 : 13
@@ -492,35 +524,41 @@ final class TFButton: NSControl {
 
     func refreshColors() {
         let fg: NSColor
+        let highlighted = isEnabled && (isPressed || isHovered)
         switch variant {
         case .primary:
-            card.fillColor = isPressed ? TFTheme.hex(0x0080E6) : TFTheme.accent
+            card.fillColor = highlighted ? TFTheme.accentPressed : TFTheme.accentFill
             card.strokeColor = nil
-            card.hasCardShadow = true
+            card.hasCardShadow = false
             fg = .white
+        case .tinted:
+            card.fillColor = highlighted ? TFTheme.accent.withAlphaComponent(0.18) : TFTheme.accentSoft
+            card.strokeColor = nil
+            card.hasCardShadow = false
+            fg = TFTheme.accentInk
         case .secondary:
-            card.fillColor = isPressed ? TFTheme.card2 : TFTheme.card
+            card.fillColor = highlighted ? TFTheme.card2 : TFTheme.card
             card.strokeColor = TFTheme.line
             card.hasCardShadow = true
             fg = TFTheme.ink
         case .subtle:
-            card.fillColor = isPressed ? TFTheme.surfaceHover : TFTheme.card2
+            card.fillColor = highlighted ? TFTheme.surfaceHover : TFTheme.card2
             card.strokeColor = nil
             card.hasCardShadow = false
             fg = TFTheme.ink
         case .ghost:
-            card.fillColor = isPressed ? TFTheme.surfaceHover : .clear
+            card.fillColor = highlighted ? TFTheme.surfaceHover : .clear
             card.strokeColor = nil
             card.hasCardShadow = false
             fg = TFTheme.ink2
         case .danger:
-            card.fillColor = isPressed ? TFTheme.dangerSoft : TFTheme.card
-            card.strokeColor = TFTheme.danger.withAlphaComponent(0.32)
+            card.fillColor = highlighted ? TFTheme.dangerSoft : .clear
+            card.strokeColor = nil
             card.hasCardShadow = false
-            fg = TFTheme.danger
+            fg = highlighted ? TFTheme.danger : TFTheme.ink2
         }
-        label.textColor = fg
-        iconView.contentTintColor = fg
+        label.textColor = foregroundOverride ?? fg
+        iconView.contentTintColor = foregroundOverride ?? fg
         card.needsDisplay = true
     }
 
@@ -540,9 +578,9 @@ final class TFButton: NSControl {
 }
 
 /// Dedicated Android VM Start / Progress / Stop button for the main runtime bar:
-/// - `.start`: Green button (#10B981) with a white play arrow and "启动".
+/// - `.start`: Green button with a white play arrow and "启动".
 /// - `.progress`: In-button horizontal progress bar + live stage expectation text & percentage.
-/// - `.stop`: Red button (#EF4444) with a crisp white close icon (`xmark`) to shut down the Android VM.
+/// - `.stop`: Stop control with a white close icon (`xmark`).
 @MainActor
 final class TFRuntimeControlButton: NSControl {
     enum Mode: Equatable {
@@ -573,6 +611,7 @@ final class TFRuntimeControlButton: NSControl {
         setAccessibilityRole(.button)
 
         widthConstraint = widthAnchor.constraint(equalToConstant: 74)
+        focusRingType = .exterior
         NSLayoutConstraint.activate([
             widthConstraint,
             heightAnchor.constraint(equalToConstant: 28)
@@ -591,8 +630,15 @@ final class TFRuntimeControlButton: NSControl {
     }
 
     override func keyDown(with event: NSEvent) {
-        if [36, 49, 76].contains(event.keyCode), accessibilityPerformPress() { return }
+        let hasModifier = !event.modifierFlags.intersection([.command, .control, .option]).isEmpty
+        if !hasModifier && [36, 49, 76].contains(event.keyCode), accessibilityPerformPress() { return }
         super.keyDown(with: event)
+    }
+
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func drawFocusRingMask() {
+        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
     }
 
     private func updateLayoutForMode() {
@@ -600,7 +646,7 @@ final class TFRuntimeControlButton: NSControl {
         case .start:
             widthConstraint.constant = 74
             isEnabled = true
-            toolTip = "启动安卓虚拟机"
+            toolTip = "启动运行环境；打开应用时也会自动启动"
             setAccessibilityLabel("启动")
         case .download:
             widthConstraint.constant = 104
@@ -615,8 +661,8 @@ final class TFRuntimeControlButton: NSControl {
         case .stop:
             widthConstraint.constant = 36
             isEnabled = true
-            toolTip = "关闭安卓虚拟机"
-            setAccessibilityLabel("关闭安卓虚拟机")
+            toolTip = "停止运行环境，保留应用与数据"
+            setAccessibilityLabel("停止运行环境")
         }
         invalidateIntrinsicContentSize()
     }
@@ -638,7 +684,7 @@ final class TFRuntimeControlButton: NSControl {
         case .start, .download:
             ctx.saveGState()
             ctx.addPath(clipPath)
-            ctx.setFillColor(MacdoraBrand.rgba(isPressed ? 0x059669 : 0x10B981))
+            ctx.setFillColor((isPressed ? TFTheme.positivePressed : TFTheme.positiveFill).cgColor)
             ctx.fillPath()
             ctx.restoreGState()
 
@@ -733,7 +779,7 @@ final class TFRuntimeControlButton: NSControl {
         case .stop:
             ctx.saveGState()
             ctx.addPath(clipPath)
-            ctx.setFillColor(MacdoraBrand.rgba(isPressed ? 0xDC2626 : 0xEF4444))
+            ctx.setFillColor((isPressed ? TFTheme.dangerPressed : TFTheme.dangerFill).cgColor)
             ctx.fillPath()
             ctx.restoreGState()
 
@@ -1095,6 +1141,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     var onImportDeveloperPlugin: (() -> Void)?
     var onExportDeveloperPluginTemplate: (() -> Void)?
     var onRevealPluginsDirectory: (() -> Void)?
+    var onAppearanceChanged: (() -> Void)?
     var onCheckForUpdates: (() -> Void)?
     var onStartUpdateDownload: (() -> Void)?
     var onCancelUpdateDownload: (() -> Void)?
@@ -1130,10 +1177,13 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
 
     private let rootView = TFFlippedView(frame: NSRect(x: 0, y: 0, width: 1060, height: 700))
     private let sidebarBackdrop = NSVisualEffectView()
-    private let sidebarTintView = TFCardView(frame: .zero)
+    private let sidebarTintView = TFSidebarBackdropView(frame: .zero)
     private let contentCard = TFCardView(frame: .zero)
     private let titleBarLine = NSTextField(labelWithString: "应用")
+    private let pageSubtitle = NSTextField(labelWithString: "")
     private var headerInstallButton: TFButton!
+    private var headerImportButton: TFButton!
+    private var headerTemplateButton: TFButton!
     private var themeToggleButton: TFButton!
     private let brandLockupView = MacdoraBrandLockupView(frame: .zero)
 
@@ -1143,9 +1193,8 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     private var quickAppIcons: [String: TFAppIconView] = [:]
     private let quickHeaderLabel = NSTextField(labelWithString: "常用")
     private weak var activeRuntimeButton: TFRuntimeControlButton?
+    private weak var activeDeviceScene: TFDeviceSceneView?
     private weak var activeRuntimeFPSLabel: NSTextField?
-    private var runtimeProgressTimer: Timer?
-    private var runtimeBusyStartDate: Date?
     private var needsRuntimeDownload = false
     private var runtimeEnvironmentProgress: RuntimeEnvironmentDownloadProgress?
 
@@ -1222,6 +1271,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             TFTheme.isDark.toggle()
             self?.applyTheme()
             self?.rebuildPageContent()
+            self?.onAppearanceChanged?()
         }
         sidebarDragHeader.addSubview(themeToggleButton)
 
@@ -1267,9 +1317,15 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         titleBar.translatesAutoresizingMaskIntoConstraints = false
         contentCard.addSubview(titleBar)
 
-        titleBarLine.font = .systemFont(ofSize: 13, weight: .medium)
+        titleBarLine.font = .systemFont(ofSize: 21, weight: .semibold)
         titleBarLine.translatesAutoresizingMaskIntoConstraints = false
         titleBar.addSubview(titleBarLine)
+
+        pageSubtitle.font = .systemFont(ofSize: 12.5)
+        pageSubtitle.lineBreakMode = .byTruncatingTail
+        pageSubtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        pageSubtitle.translatesAutoresizingMaskIntoConstraints = false
+        titleBar.addSubview(pageSubtitle)
 
         let titleRightStack = NSStackView()
         titleRightStack.orientation = .horizontal
@@ -1278,9 +1334,17 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         titleRightStack.translatesAutoresizingMaskIntoConstraints = false
         titleBar.addSubview(titleRightStack)
 
-        headerInstallButton = TFButton(title: "安装应用", symbolName: "plus", variant: .subtle, size: .sm)
+        headerInstallButton = TFButton(title: "安装应用…", symbolName: "plus", variant: .primary, size: .sm)
         headerInstallButton.onClick = { [weak self] in self?.onInstall?() }
         titleRightStack.addArrangedSubview(headerInstallButton)
+
+        headerImportButton = TFButton(title: "导入插件…", symbolName: "square.and.arrow.down", variant: .secondary, size: .sm)
+        headerImportButton.onClick = { [weak self] in self?.onImportDeveloperPlugin?() }
+        titleRightStack.addArrangedSubview(headerImportButton)
+
+        headerTemplateButton = TFButton(title: "开发模板…", symbolName: "doc.badge.plus", variant: .ghost, size: .sm)
+        headerTemplateButton.onClick = { [weak self] in self?.onExportDeveloperPluginTemplate?() }
+        titleRightStack.addArrangedSubview(headerTemplateButton)
 
         // Scrollable main content area
         scrollView.drawsBackground = false
@@ -1299,7 +1363,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         pageStack.translatesAutoresizingMaskIntoConstraints = false
         documentContainer.addSubview(pageStack)
 
-        let preferredPageWidth = pageStack.widthAnchor.constraint(equalTo: documentContainer.widthAnchor, constant: -72)
+        let preferredPageWidth = pageStack.widthAnchor.constraint(equalTo: documentContainer.widthAnchor, constant: -64)
         preferredPageWidth.priority = .defaultHigh
 
         NSLayoutConstraint.activate([
@@ -1336,13 +1400,17 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             titleBar.leadingAnchor.constraint(equalTo: contentCard.leadingAnchor),
             titleBar.trailingAnchor.constraint(equalTo: contentCard.trailingAnchor),
             titleBar.topAnchor.constraint(equalTo: contentCard.topAnchor),
-            titleBar.heightAnchor.constraint(equalToConstant: 46),
+            titleBar.heightAnchor.constraint(equalToConstant: 88),
 
-            titleBarLine.leadingAnchor.constraint(equalTo: titleBar.leadingAnchor, constant: 24),
-            titleBarLine.centerYAnchor.constraint(equalTo: titleBar.centerYAnchor, constant: 1),
+            titleBarLine.leadingAnchor.constraint(equalTo: pageStack.leadingAnchor),
+            titleBarLine.topAnchor.constraint(equalTo: titleBar.topAnchor, constant: 24),
+            titleBarLine.trailingAnchor.constraint(lessThanOrEqualTo: titleRightStack.leadingAnchor, constant: -16),
+            pageSubtitle.leadingAnchor.constraint(equalTo: titleBarLine.leadingAnchor),
+            pageSubtitle.topAnchor.constraint(equalTo: titleBarLine.bottomAnchor, constant: 4),
+            pageSubtitle.trailingAnchor.constraint(lessThanOrEqualTo: titleRightStack.leadingAnchor, constant: -16),
 
-            titleRightStack.trailingAnchor.constraint(equalTo: titleBar.trailingAnchor, constant: -24),
-            titleRightStack.centerYAnchor.constraint(equalTo: titleBar.centerYAnchor, constant: 1),
+            titleRightStack.trailingAnchor.constraint(equalTo: pageStack.trailingAnchor),
+            titleRightStack.centerYAnchor.constraint(equalTo: titleBar.centerYAnchor, constant: 4),
 
             scrollView.leadingAnchor.constraint(equalTo: contentCard.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: contentCard.trailingAnchor),
@@ -1439,7 +1507,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             if let symbol, let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
                 icon.image = img.withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
             }
-            icon.contentTintColor = TFTheme.ink3
+            icon.contentTintColor = TFTheme.sidebarInk2
             NSLayoutConstraint.activate([
                 icon.widthAnchor.constraint(equalToConstant: 18),
                 icon.heightAnchor.constraint(equalToConstant: 18)
@@ -1450,7 +1518,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
 
         let lbl = NSTextField(labelWithString: title)
         lbl.font = .systemFont(ofSize: 13, weight: .regular)
-        lbl.textColor = TFTheme.ink2
+        lbl.textColor = TFTheme.sidebarInk2
         lbl.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(lbl)
 
@@ -1489,16 +1557,21 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     private func applyTheme() {
         window?.appearance = NSAppearance(named: TFTheme.isDark ? .darkAqua : .aqua)
         rootView.layer?.backgroundColor = TFTheme.bg.cgColor
-        sidebarTintView.fillColor = TFTheme.frostedSidebarTint
+        sidebarTintView.fillColor = .clear
+        sidebarTintView.needsDisplay = true
         contentCard.fillColor = TFTheme.canvas
         contentCard.strokeColor = TFTheme.seamLine
         titleBarLine.textColor = TFTheme.ink
-        quickHeaderLabel.textColor = TFTheme.ink3
-        brandLockupView.isDark = TFTheme.isDark
+        pageSubtitle.textColor = TFTheme.ink2
+        quickHeaderLabel.textColor = TFTheme.sidebarInk2
+        brandLockupView.isDark = true
         themeToggleButton.symbolName = TFTheme.isDark ? "sun.max" : "moon"
         themeToggleButton.setAccessibilityLabel(TFTheme.isDark ? "切换到浅色外观" : "切换到深色外观")
+        themeToggleButton.foregroundOverride = TFTheme.sidebarInk2
         themeToggleButton.refreshColors()
         headerInstallButton.refreshColors()
+        headerImportButton.refreshColors()
+        headerTemplateButton.refreshColors()
         for ws in locationWorkspaceViews.values {
             ws.refreshTheme()
         }
@@ -1507,14 +1580,19 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     }
 
     private func refreshSidebarState() {
-        titleBarLine.stringValue = selectedSection.title
-        headerInstallButton.isHidden = (selectedSection == .plugins || selectedSection == .about)
+        titleBarLine.stringValue = selectedSection.pageHeading
+        pageSubtitle.stringValue = selectedSection.pageSubheading
+        headerInstallButton.isHidden = selectedSection != .apps
+        let showsPluginActions = selectedSection == .plugins && activePluginDetailID == nil
+        headerImportButton.isHidden = !showsPluginActions
+        headerTemplateButton.isHidden = !showsPluginActions
         for sec in ManagementSection.allCases {
             let active = (sec == selectedSection)
-            navRowCards[sec]?.fillColor = active ? TFTheme.surfaceHover : .clear
-            navRowLabels[sec]?.textColor = active ? TFTheme.ink : TFTheme.ink2
+            navRowCards[sec]?.fillColor = active ? TFTheme.sidebarSelection : .clear
+            navRowCards[sec]?.strokeColor = active ? TFTheme.sidebarSelectionLine : nil
+            navRowLabels[sec]?.textColor = active ? TFTheme.sidebarInk : TFTheme.sidebarInk2
             navRowLabels[sec]?.font = .systemFont(ofSize: 13, weight: active ? .medium : .regular)
-            navRowIcons[sec]?.contentTintColor = active ? TFTheme.ink : TFTheme.ink3
+            navRowIcons[sec]?.contentTintColor = active ? TFTheme.sidebarAccent : TFTheme.sidebarInk2
         }
     }
 
@@ -1606,30 +1684,24 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     }
 
     func selectSection(_ section: ManagementSection) {
+        let changesSection = section != selectedSection
         if section != .plugins {
             activePluginDetailID = nil
         }
         selectedSection = section
         refreshSidebarState()
         rebuildPageContent()
+        if changesSection {
+            TFMotion.reveal(pageStack)
+            activeDeviceScene?.animateEntrance()
+        }
     }
 
     func update(_ state: RuntimeState) {
-        let wasBusy = currentState.isBusy
         currentState = state
         if case .preparing = state {} else { runtimeEnvironmentProgress = nil }
         if case .failed(let msg) = state {
             bannerMessage = msg
-        }
-        if state.isBusy {
-            if !wasBusy || runtimeBusyStartDate == nil {
-                runtimeBusyStartDate = Date()
-            }
-            startRuntimeProgressTimerIfNeeded()
-        } else {
-            runtimeProgressTimer?.invalidate()
-            runtimeProgressTimer = nil
-            runtimeBusyStartDate = nil
         }
         refreshSidebarState()
         if selectedSection == .plugins, activePluginDetailID != nil, bannerMessage == nil {
@@ -1649,23 +1721,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         activeRuntimeButton?.mode = currentRuntimeButtonMode()
     }
 
-    private func startRuntimeProgressTimerIfNeeded() {
-        guard runtimeProgressTimer == nil else { return }
-        runtimeProgressTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if !self.currentState.isBusy {
-                    self.runtimeProgressTimer?.invalidate()
-                    self.runtimeProgressTimer = nil
-                    return
-                }
-                self.activeRuntimeButton?.mode = self.currentRuntimeButtonMode()
-            }
-        }
-    }
-
     private func currentRuntimeButtonMode() -> TFRuntimeControlButton.Mode {
-        let elapsed = Date().timeIntervalSince(runtimeBusyStartDate ?? Date())
         switch currentState {
         case .stopped, .failed:
             return needsRuntimeDownload ? .download : .start
@@ -1675,21 +1731,9 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             }
             return .progress(fraction: 0, statusText: "正在准备环境", isStopping: false)
         case .starting:
-            let p = min(0.95, 0.38 + CGFloat((1.0 - exp(-elapsed / 2.8)) * 0.58))
-            let pct = Int(round(p * 100))
-            let stage: String
-            if p < 0.62 {
-                stage = "启动内核"
-            } else if p < 0.84 {
-                stage = "加载系统"
-            } else {
-                stage = "连接服务"
-            }
-            return .progress(fraction: p, statusText: "\(stage) \(pct)%", isStopping: false)
+            return .progress(fraction: 0, statusText: "正在启动…", isStopping: false)
         case .stopping:
-            let p = min(0.94, 0.32 + CGFloat((1.0 - exp(-elapsed / 1.4)) * 0.62))
-            let pct = Int(round(p * 100))
-            return .progress(fraction: p, statusText: "正在关闭 \(pct)%", isStopping: true)
+            return .progress(fraction: 0, statusText: "正在停止…", isStopping: true)
         case .ready, .running:
             return .stop
         }
@@ -1768,6 +1812,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     // MARK: - Page Rendering
 
     private func rebuildPageContent() {
+        refreshSidebarState()
         // Keep an active field and its editor attached while asynchronous state
         // changes rebuild the surrounding cards. Recreating marked text would
         // lose the input method's composition session.
@@ -1787,16 +1832,11 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             sub.removeFromSuperview()
         }
 
-        // Page Header
-        if !(selectedSection == .plugins && activePluginDetailID != nil) {
-            addFullWidth(makePageHeader(), to: pageStack)
-        }
-
         if let bannerMessage, !bannerMessage.isEmpty {
             addFullWidth(makeBannerRow(message: bannerMessage), to: pageStack)
         }
 
-        if selectedSection != .about {
+        if selectedSection == .apps {
             switch currentUpdateState {
             case .available, .downloading, .readyToInstall, .installing:
                 addFullWidth(makeCompactUpdateBannerCard(), to: pageStack)
@@ -1819,54 +1859,6 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         case .about:
             buildAboutPage()
         }
-    }
-
-    private func makePageHeader() -> NSView {
-        let wrap = NSView()
-        wrap.translatesAutoresizingMaskIntoConstraints = false
-
-        let h1 = NSTextField(labelWithString: selectedSection.pageHeading)
-        h1.font = .systemFont(ofSize: 21, weight: .semibold)
-        h1.textColor = TFTheme.ink
-        h1.translatesAutoresizingMaskIntoConstraints = false
-        wrap.addSubview(h1)
-
-        let sub = NSTextField(labelWithString: selectedSection.pageSubheading)
-        sub.font = .systemFont(ofSize: 13, weight: .regular)
-        sub.textColor = TFTheme.ink2
-        sub.translatesAutoresizingMaskIntoConstraints = false
-        wrap.addSubview(sub)
-
-        if selectedSection == .plugins && activePluginDetailID == nil {
-            let actions = NSStackView()
-            actions.orientation = .horizontal
-            actions.alignment = .centerY
-            actions.spacing = 8
-            actions.translatesAutoresizingMaskIntoConstraints = false
-            wrap.addSubview(actions)
-
-            let importBtn = TFButton(title: "导入插件…", symbolName: "square.and.arrow.down", variant: .secondary, size: .sm)
-            importBtn.onClick = { [weak self] in self?.onImportDeveloperPlugin?() }
-            actions.addArrangedSubview(importBtn)
-
-            let templateBtn = TFButton(title: "开发模板", symbolName: "doc.badge.plus", variant: .subtle, size: .sm)
-            templateBtn.onClick = { [weak self] in self?.onExportDeveloperPluginTemplate?() }
-            actions.addArrangedSubview(templateBtn)
-
-            NSLayoutConstraint.activate([
-                actions.trailingAnchor.constraint(equalTo: wrap.trailingAnchor),
-                actions.centerYAnchor.constraint(equalTo: wrap.centerYAnchor)
-            ])
-        }
-
-        NSLayoutConstraint.activate([
-            wrap.heightAnchor.constraint(equalToConstant: 48),
-            h1.leadingAnchor.constraint(equalTo: wrap.leadingAnchor),
-            h1.topAnchor.constraint(equalTo: wrap.topAnchor),
-            sub.leadingAnchor.constraint(equalTo: wrap.leadingAnchor),
-            sub.topAnchor.constraint(equalTo: h1.bottomAnchor, constant: 3)
-        ])
-        return wrap
     }
 
     private func makeBannerRow(message: String) -> NSView {
@@ -2313,21 +2305,29 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         bar.strokeColor = TFTheme.line
         bar.hasCardShadow = true
 
-        // BrandMark (26x26 Macdora Emblem)
-        let brandTile = MacdoraEmblemView(size: 26)
-        bar.addSubview(brandTile)
+        let scene = TFDeviceSceneView()
+        scene.translatesAutoresizingMaskIntoConstraints = false
+        scene.setActive(currentState == .ready || currentState == .running, busy: currentState.isBusy)
+        bar.addSubview(scene)
+        activeDeviceScene = scene
 
-        if needsRuntimeDownload {
-            let hint = NSTextField(labelWithString: "首次使用需下载环境，约 1.3 GB")
-            hint.font = .systemFont(ofSize: 12)
-            hint.textColor = TFTheme.ink3
-            hint.translatesAutoresizingMaskIntoConstraints = false
-            bar.addSubview(hint)
-            NSLayoutConstraint.activate([
-                hint.leadingAnchor.constraint(equalTo: brandTile.trailingAnchor, constant: 12),
-                hint.centerYAnchor.constraint(equalTo: bar.centerYAnchor)
-            ])
-        }
+        let summary = runtimePresentation
+        let title = NSTextField(labelWithString: summary.title)
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.textColor = TFTheme.ink
+        title.lineBreakMode = .byTruncatingTail
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        title.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(title)
+
+        let hint = NSTextField(labelWithString: summary.detail)
+        hint.font = .systemFont(ofSize: 12)
+        hint.textColor = TFTheme.ink3
+        hint.lineBreakMode = .byTruncatingTail
+        hint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        hint.toolTip = summary.detail
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(hint)
 
         let rightControls = NSStackView()
         rightControls.orientation = .horizontal
@@ -2335,6 +2335,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         rightControls.spacing = 10
         rightControls.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(rightControls)
+        rightControls.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let fpsLbl = NSTextField(labelWithString: currentTelemetry.presentedFPS > 0.5 ? String(format: "%.0f FPS", currentTelemetry.presentedFPS) : "")
         fpsLbl.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
@@ -2373,14 +2374,43 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         rightControls.addArrangedSubview(actionBtn)
 
         NSLayoutConstraint.activate([
-            bar.heightAnchor.constraint(equalToConstant: 48),
-            brandTile.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 14),
-            brandTile.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            bar.heightAnchor.constraint(equalToConstant: 104),
+            scene.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12),
+            scene.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            scene.widthAnchor.constraint(equalToConstant: 126),
+            scene.heightAnchor.constraint(equalToConstant: 92),
+            title.leadingAnchor.constraint(equalTo: scene.trailingAnchor, constant: 8),
+            title.topAnchor.constraint(equalTo: bar.topAnchor, constant: 32),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: rightControls.leadingAnchor, constant: -16),
+            hint.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            hint.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 5),
+            hint.trailingAnchor.constraint(lessThanOrEqualTo: rightControls.leadingAnchor, constant: -16),
 
             rightControls.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
             rightControls.centerYAnchor.constraint(equalTo: bar.centerYAnchor)
         ])
         return bar
+    }
+
+    private var runtimePresentation: (title: String, detail: String, tone: PillTone) {
+        switch currentState {
+        case .stopped:
+            return needsRuntimeDownload
+                ? ("准备开始", "首次使用需下载运行环境", .neutral)
+                : ("环境未启动", "打开应用时会自动启动", .neutral)
+        case .preparing:
+            return ("正在准备环境", "准备完成后会自动继续", .neutral)
+        case .starting:
+            return ("正在启动", "正在准备应用运行环境", .neutral)
+        case .ready:
+            return ("环境已就绪", "选择应用，在独立窗口中打开", .positive)
+        case .running:
+            return ("运行中", currentTelemetry.activeAppName.map { "当前应用：\($0)" } ?? "应用在独立窗口中运行", .positive)
+        case .stopping:
+            return ("正在停止", "正在安全关闭运行环境", .neutral)
+        case .failed:
+            return ("需要重新启动", "可重试启动，或前往诊断检查", .danger)
+        }
     }
 
     private func makeCategoryAndSearchRow() -> NSView {
@@ -2459,6 +2489,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         searchField.placeholderString = "搜索应用"
         searchField.stringValue = searchQuery
         searchField.font = .systemFont(ofSize: 12.5)
+        configureAppSearchField(searchField)
         searchField.controlSize = .small
         searchField.delegate = self
         searchField.target = self
@@ -2499,6 +2530,17 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             categoryIndicators[index]?.fillColor = active ? TFTheme.accent : .clear
             categoryButtons[index]?.setAccessibilityValue(NSNumber(value: active))
         }
+        if let searchField = appsSearchRow?.subviews.compactMap({ $0 as? NSSearchField }).first {
+            configureAppSearchField(searchField)
+        }
+    }
+
+    private func configureAppSearchField(_ field: NSSearchField) {
+        field.textColor = TFTheme.ink
+        field.placeholderAttributedString = NSAttributedString(
+            string: "搜索应用",
+            attributes: [.foregroundColor: TFTheme.ink3, .font: NSFont.systemFont(ofSize: 12.5)]
+        )
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -2551,7 +2593,9 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         if list.isEmpty {
             let emptyWrap = NSView()
             emptyWrap.translatesAutoresizingMaskIntoConstraints = false
-            let lbl = NSTextField(labelWithString: "暂无匹配的应用")
+            let hasQuery = !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let message = hasQuery ? "没有找到匹配的应用，试试其他名称" : (selectedCategory == .all ? "安装第一个应用，从本地选择 APK 即可" : "这个分类暂时没有应用")
+            let lbl = NSTextField(labelWithString: message)
             lbl.font = .systemFont(ofSize: 13, weight: .regular)
             lbl.textColor = TFTheme.ink3
             lbl.translatesAutoresizingMaskIntoConstraints = false
@@ -2588,6 +2632,9 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         let titleLbl = NSTextField(labelWithString: app.title)
         titleLbl.font = .systemFont(ofSize: 14.5, weight: .medium)
         titleLbl.textColor = TFTheme.ink
+        titleLbl.lineBreakMode = .byTruncatingTail
+        titleLbl.toolTip = app.title
+        titleLbl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleLbl.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(titleLbl)
 
@@ -2642,7 +2689,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
 
             let openBtn = TFButton(
                 title: app.isInstalled ? "打开" : "安装并打开",
-                variant: app.isSystem ? .secondary : .primary,
+                variant: app.isSystem ? .secondary : .tinted,
                 size: .sm
             )
             openBtn.identifier = NSUserInterfaceItemIdentifier("open-\(app.package)")
@@ -2675,6 +2722,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
 
             pill.leadingAnchor.constraint(equalTo: titleLbl.trailingAnchor, constant: 8),
             pill.centerYAnchor.constraint(equalTo: titleLbl.centerYAnchor),
+            pill.trailingAnchor.constraint(lessThanOrEqualTo: actions.leadingAnchor, constant: -12),
 
             subLbl.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 12),
             subLbl.topAnchor.constraint(equalTo: titleLbl.bottomAnchor, constant: 3),
@@ -2703,14 +2751,14 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         icon.contentTintColor = TFTheme.ink3
         drop.addSubview(icon)
 
-        let lbl = NSTextField(labelWithString: "将 APK 安装包拖入此处，或从本地选择文件安装")
+        let lbl = NSTextField(labelWithString: "拖入 APK，安装新应用")
         lbl.font = .systemFont(ofSize: 12.5, weight: .regular)
         lbl.textColor = TFTheme.ink2
         lbl.lineBreakMode = .byTruncatingTail
         lbl.translatesAutoresizingMaskIntoConstraints = false
         drop.addSubview(lbl)
 
-        let chooseBtn = TFButton(title: "选择文件", variant: .secondary, size: .sm)
+        let chooseBtn = TFButton(title: "选择文件…", variant: .ghost, size: .sm)
         chooseBtn.onClick = { [weak self] in self?.onInstall?() }
         drop.addSubview(chooseBtn)
 
@@ -2736,6 +2784,11 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     }
 
     private func makeMonitorStatusSummaryBar() -> NSView {
+        let summary = runtimePresentation
+        return makeStateSummary(title: summary.title, detail: summary.detail, tone: summary.tone)
+    }
+
+    private func makeStateSummary(title: String, detail: String, tone: PillTone) -> NSView {
         let bar = TFCardView(frame: .zero)
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.cornerRadius = 10
@@ -2746,40 +2799,40 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         let dot = TFCardView(frame: .zero)
         dot.translatesAutoresizingMaskIntoConstraints = false
         dot.cornerRadius = 4
-        let isActive = (currentState == .ready || currentState == .running)
-        dot.fillColor = isActive ? TFTheme.positive : TFTheme.ink4
+        switch tone {
+        case .positive: dot.fillColor = TFTheme.positive
+        case .warn: dot.fillColor = TFTheme.warn
+        case .danger: dot.fillColor = TFTheme.danger
+        case .neutral: dot.fillColor = TFTheme.ink3
+        }
         bar.addSubview(dot)
 
-        let statusLbl = NSTextField(labelWithString: isActive ? "运行正常" : "待命")
+        let statusLbl = NSTextField(labelWithString: title)
         statusLbl.font = .systemFont(ofSize: 13, weight: .medium)
         statusLbl.textColor = TFTheme.ink
         statusLbl.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(statusLbl)
 
-        let detailText: String
-        if let activeName = currentTelemetry.activeAppName {
-            detailText = "当前前台应用：\(activeName) · 硬件图形加速已启用"
-        } else if isActive {
-            detailText = "运行环境保持热备，打开应用即可立即呈现"
-        } else {
-            detailText = "未占用后台算力，打开任意应用时自动启动"
-        }
-        let detailLbl = NSTextField(labelWithString: detailText)
+        let detailLbl = NSTextField(labelWithString: detail)
         detailLbl.font = .systemFont(ofSize: 12.5, weight: .regular)
         detailLbl.textColor = TFTheme.ink3
+        detailLbl.lineBreakMode = .byTruncatingTail
+        detailLbl.toolTip = detail
         detailLbl.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(detailLbl)
 
         NSLayoutConstraint.activate([
-            bar.heightAnchor.constraint(equalToConstant: 42),
+            bar.heightAnchor.constraint(equalToConstant: 62),
             dot.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 14),
-            dot.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            dot.centerYAnchor.constraint(equalTo: statusLbl.centerYAnchor),
             dot.widthAnchor.constraint(equalToConstant: 8),
             dot.heightAnchor.constraint(equalToConstant: 8),
             statusLbl.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 10),
-            statusLbl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            detailLbl.leadingAnchor.constraint(equalTo: statusLbl.trailingAnchor, constant: 12),
-            detailLbl.centerYAnchor.constraint(equalTo: bar.centerYAnchor)
+            statusLbl.topAnchor.constraint(equalTo: bar.topAnchor, constant: 12),
+            statusLbl.trailingAnchor.constraint(lessThanOrEqualTo: bar.trailingAnchor, constant: -16),
+            detailLbl.leadingAnchor.constraint(equalTo: statusLbl.leadingAnchor),
+            detailLbl.topAnchor.constraint(equalTo: statusLbl.bottomAnchor, constant: 4),
+            detailLbl.trailingAnchor.constraint(lessThanOrEqualTo: bar.trailingAnchor, constant: -16)
         ])
         return bar
     }
@@ -2797,15 +2850,17 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         row1.spacing = 12
         row1.translatesAutoresizingMaskIntoConstraints = false
 
-        let fpsVal = currentTelemetry.presentedFPS > 0.5
+        let hasFrameSample = currentState == .running && currentTelemetry.presentedFPS > 0.5
+        let fpsVal = hasFrameSample
             ? String(format: "%.0f FPS", currentTelemetry.presentedFPS)
-            : "按需刷新"
-        let fpsSub = currentTelemetry.frameIntervalP95Ms > 0
-            ? String(format: "帧间隔 %.1f ms · 硬件解码", currentTelemetry.frameIntervalP95Ms)
-            : "画面静止时自动降低功耗"
+            : "—"
+        let fpsSub = hasFrameSample
+            ? (currentTelemetry.hardwareDecoder ? "硬件解码" : "软件解码")
+            : (currentState == .running ? "当前没有画面采样" : "打开应用后显示帧率")
 
-        let cpuVal = String(format: "%.1f%%", currentTelemetry.totalCPUPercent)
-        let cpuSub = "Apple Silicon 硬件虚拟化"
+        let hasProcessSample = !currentTelemetry.processes.isEmpty
+        let cpuVal = hasProcessSample ? String(format: "%.1f%%", currentTelemetry.totalCPUPercent) : "—"
+        let cpuSub = "Macdora 与运行环境合计"
 
         row1.addArrangedSubview(makeMetricCard(label: "画面帧率", value: fpsVal, detail: fpsSub))
         row1.addArrangedSubview(makeMetricCard(label: "处理器占用", value: cpuVal, detail: cpuSub))
@@ -2817,14 +2872,14 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         row2.translatesAutoresizingMaskIntoConstraints = false
 
         let memGB = currentTelemetry.totalRSSMiB / 1024.0
-        let memVal = memGB >= 0.05 ? String(format: "%.2f GB", memGB) : "0.08 GB"
-        let memSub = "按需动态分配内存"
+        let memVal = hasProcessSample ? String(format: "%.2f GB", memGB) : "—"
+        let memSub = "Macdora 与运行环境合计"
 
         let modeVal = currentPreferences.tabletMode ? "横屏布局" : "竖屏布局"
         let modeSub = "\(currentPreferences.resolutionDisplayLabel) · \(currentPreferences.targetFPS)Hz"
 
         row2.addArrangedSubview(makeMetricCard(label: "内存使用", value: memVal, detail: memSub))
-        row2.addArrangedSubview(makeMetricCard(label: "设备形态", value: modeVal, detail: modeSub))
+        row2.addArrangedSubview(makeMetricCard(label: "窗口布局", value: modeVal, detail: modeSub))
 
         addFullWidth(row1, to: grid)
         addFullWidth(row2, to: grid)
@@ -2854,6 +2909,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         let sub = NSTextField(labelWithString: detail)
         sub.font = .systemFont(ofSize: 12, weight: .regular)
         sub.textColor = TFTheme.ink3
+        sub.lineBreakMode = .byTruncatingTail
         sub.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(sub)
 
@@ -2864,7 +2920,8 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             val.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
             val.topAnchor.constraint(equalTo: lbl.bottomAnchor, constant: 4),
             sub.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-            sub.topAnchor.constraint(equalTo: val.bottomAnchor, constant: 4)
+            sub.topAnchor.constraint(equalTo: val.bottomAnchor, constant: 4),
+            sub.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -16)
         ])
         return card
     }
@@ -3020,7 +3077,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             rows: [
                 makeSettingRow(
                     title: "窗口布局",
-                    detail: "切换显示比例与方向；设备身份和登录状态保持不变",
+                    detail: "始终使用同一平板，仅调整显示方向",
                     control: modeSeg
                 ),
                 makeSettingRow(
@@ -3030,7 +3087,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                 ),
                 makeSettingRow(
                     title: "最高刷新率",
-                    detail: "调节应用窗口的画面帧率上限",
+                    detail: "设置应用窗口的帧率上限",
                     control: fpsSeg,
                     isLast: true
                 )
@@ -3076,22 +3133,22 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             rows: [
                 makeSettingRow(
                     title: "后台常驻",
-                    detail: "关闭应用窗口后保持环境热备，再次打开无需等待",
+                    detail: "关闭窗口后保持运行，下次打开更快",
                     control: keepWarmToggle
                 ),
                 makeSettingRow(
                     title: "原生中文输入",
-                    detail: "使用 Mac 输入法直接打字，密码输入自动启用系统级安全保护",
+                    detail: "使用 Mac 输入法输入中文",
                     control: imeToggle
                 ),
                 makeSettingRow(
                     title: "剪贴板共享",
-                    detail: "在 Mac 与应用之间直接复制和粘贴文字",
+                    detail: "在 Mac 与安卓应用之间复制粘贴文字",
                     control: clipToggle
                 ),
                 makeSettingRow(
                     title: "摄像头权限",
-                    detail: "允许应用使用 Mac 摄像头进行扫码、拍照与人脸识别",
+                    detail: canChangeCamera ? "使用 Mac 摄像头扫码或拍照" : "停止运行环境后可更改",
                     control: camToggle,
                     isLast: true
                 )
@@ -3105,10 +3162,11 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         storageActions.translatesAutoresizingMaskIntoConstraints = false
 
         let clearBtn = TFButton(title: "清理缓存", variant: .secondary, size: .sm)
+        clearBtn.toolTip = "仅清理临时安装文件，保留应用与数据"
         clearBtn.onClick = { [weak self] in self?.onClearCache?() }
         storageActions.addArrangedSubview(clearBtn)
 
-        let revealBtn = TFButton(title: "打开数据目录", variant: .subtle, size: .sm)
+        let revealBtn = TFButton(title: "在访达中查看", variant: .ghost, size: .sm)
         revealBtn.onClick = { [weak self] in self?.onRevealData?() }
         storageActions.addArrangedSubview(revealBtn)
 
@@ -3117,7 +3175,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             rows: [
                 makeSettingRow(
                     title: "本地数据空间",
-                    detail: String(format: "已使用 %.2f GB · 应用数据与登录状态独立保存", currentTelemetry.diskUsedGB),
+                    detail: currentTelemetry.diskUsedGB > 0 ? String(format: "已使用 %.2f GB", currentTelemetry.diskUsedGB) : "等待存储统计",
                     control: storageActions,
                     isLast: true
                 )
@@ -3180,6 +3238,8 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         dLbl.font = .systemFont(ofSize: 12, weight: .regular)
         dLbl.textColor = TFTheme.ink3
         dLbl.lineBreakMode = .byTruncatingTail
+        dLbl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        dLbl.toolTip = detail
         dLbl.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(dLbl)
 
@@ -3220,17 +3280,20 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         let reviewCount = currentReadiness.filter { $0.status == .review }.count
         let blockedCount = currentReadiness.filter { $0.status == .blocked }.count
 
-        let summaryRow = NSStackView()
-        summaryRow.orientation = .horizontal
-        summaryRow.distribution = .fillEqually
-        summaryRow.spacing = 10
-        summaryRow.translatesAutoresizingMaskIntoConstraints = false
-
-        summaryRow.addArrangedSubview(makeSummaryCell(label: "已就绪", value: readyCount, tone: .positive))
-        summaryRow.addArrangedSubview(makeSummaryCell(label: "可优化", value: reviewCount, tone: .warn))
-        summaryRow.addArrangedSubview(makeSummaryCell(label: "需处理", value: blockedCount, tone: .danger))
-        summaryRow.addArrangedSubview(makeSummaryCell(label: "检测项", value: currentReadiness.count, tone: .neutral))
-        addFullWidth(summaryRow, to: pageStack)
+        let summary: (String, String, PillTone)
+        if blockedCount > 0 {
+            summary = ("有 \(blockedCount) 项需要处理", "查看下方标记为异常的项目", .danger)
+        } else if currentReadiness.isEmpty {
+            summary = ("等待检查", "检查结果会显示在这里", .neutral)
+        } else if currentReadiness.contains(where: { $0.status == .checking }) {
+            summary = ("正在检查", "正在确认运行环境是否就绪", .neutral)
+        } else if reviewCount > 0 {
+            summary = ("有 \(reviewCount) 项建议调整", "查看下方提示，按需调整设置", .warn)
+        } else {
+            summary = ("运行条件已就绪", "\(readyCount) 项检查已通过", .positive)
+        }
+        addFullWidth(makeStateSummary(title: summary.0, detail: summary.1, tone: summary.2), to: pageStack)
+        guard !currentReadiness.isEmpty else { return }
 
         let card = TFCardView(frame: .zero)
         card.translatesAutoresizingMaskIntoConstraints = false
@@ -3278,6 +3341,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             let detailLbl = NSTextField(labelWithString: item.detail)
             detailLbl.font = .systemFont(ofSize: 12, weight: .regular)
             detailLbl.textColor = TFTheme.ink3
+            detailLbl.toolTip = item.detail
             detailLbl.lineBreakMode = .byTruncatingTail
             detailLbl.translatesAutoresizingMaskIntoConstraints = false
             row.addSubview(detailLbl)
@@ -3372,7 +3436,9 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
 
         let versionText: String
         switch currentUpdateState {
-        case .idle, .upToDate:
+        case .idle:
+            versionText = "版本 \(MacdoraVersion.current.displayString)"
+        case .upToDate:
             versionText = "版本 \(MacdoraVersion.current.displayString) · 已是最新版本"
         case .checking:
             versionText = "版本 \(MacdoraVersion.current.displayString) · 正在检查更新…"
@@ -3580,60 +3646,6 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         case neutral
     }
 
-    private func makeSummaryCell(label: String, value: Int, tone: PillTone) -> NSView {
-        let card = TFCardView(frame: .zero)
-        card.translatesAutoresizingMaskIntoConstraints = false
-        card.cornerRadius = 10
-        switch tone {
-        case .positive:
-            card.fillColor = TFTheme.positiveSoft
-            card.strokeColor = TFTheme.positive.withAlphaComponent(0.22)
-        case .warn:
-            card.fillColor = TFTheme.warnSoft
-            card.strokeColor = TFTheme.warn.withAlphaComponent(0.22)
-        case .danger:
-            card.fillColor = TFTheme.dangerSoft
-            card.strokeColor = TFTheme.danger.withAlphaComponent(0.22)
-        case .neutral:
-            card.fillColor = TFTheme.card
-            card.strokeColor = TFTheme.line
-        }
-
-        let valLbl = NSTextField(labelWithString: "\(value)")
-        valLbl.font = .monospacedDigitSystemFont(ofSize: 20, weight: .semibold)
-        let lbl = NSTextField(labelWithString: label)
-        lbl.font = .systemFont(ofSize: 12, weight: .medium)
-
-        switch tone {
-        case .positive:
-            valLbl.textColor = TFTheme.positive
-            lbl.textColor = TFTheme.positive
-        case .warn:
-            valLbl.textColor = TFTheme.warn
-            lbl.textColor = TFTheme.warn
-        case .danger:
-            valLbl.textColor = TFTheme.danger
-            lbl.textColor = TFTheme.danger
-        case .neutral:
-            valLbl.textColor = TFTheme.ink
-            lbl.textColor = TFTheme.ink2
-        }
-
-        valLbl.translatesAutoresizingMaskIntoConstraints = false
-        lbl.translatesAutoresizingMaskIntoConstraints = false
-        card.addSubview(valLbl)
-        card.addSubview(lbl)
-
-        NSLayoutConstraint.activate([
-            card.heightAnchor.constraint(equalToConstant: 64),
-            valLbl.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
-            valLbl.topAnchor.constraint(equalTo: card.topAnchor, constant: 10),
-            lbl.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
-            lbl.topAnchor.constraint(equalTo: valLbl.bottomAnchor, constant: 2)
-        ])
-        return card
-    }
-
     private func makeStatusPill(text: String, tone: PillTone) -> NSView {
         let pill = TFCardView(frame: .zero)
         pill.translatesAutoresizingMaskIntoConstraints = false
@@ -3693,6 +3705,8 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
     private let inputBanner = TFCardView(frame: .zero)
     private let inputBannerLabel = NSTextField(wrappingLabelWithString: "")
     private let toolbarTitleLabel = NSTextField(labelWithString: "应用")
+    private let topBar = TFCardView(frame: .zero)
+    private let topBarSep = TFCardView(frame: .zero)
     private let fpsBadgeCard = TFCardView(frame: .zero)
     private let fpsBadgeLabel = NSTextField(labelWithString: "60 FPS")
     private var modeSwitchButton: TFButton!
@@ -3719,12 +3733,14 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
         buildUI()
+        refreshTheme()
         syncToPixelSize(surface.pixelSize)
     }
 
     required init?(coder: NSCoder) { nil }
 
     func presentWindow() {
+        refreshTheme()
         if window?.isMiniaturized == true {
             window?.deminiaturize(nil)
         }
@@ -3864,7 +3880,7 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.black.cgColor
 
-        let topBar = TFCardView(frame: NSRect(x: 0, y: 0, width: 430, height: Self.toolbarHeight))
+        topBar.frame = NSRect(x: 0, y: 0, width: 430, height: Self.toolbarHeight)
         topBar.autoresizingMask = [.width]
         topBar.cornerRadius = 0
         topBar.fillColor = TFTheme.card
@@ -3873,7 +3889,6 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
         toolbar.layoutAttribute = .bottom
         window?.addTitlebarAccessoryViewController(toolbar)
 
-        let topBarSep = TFCardView(frame: .zero)
         topBarSep.translatesAutoresizingMaskIntoConstraints = false
         topBarSep.cornerRadius = 0
         topBarSep.fillColor = TFTheme.line
@@ -4027,6 +4042,27 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
         toolbarTitleLabel.stringValue = app.title
     }
 
+    func refreshTheme() {
+        window?.appearance = NSAppearance(named: TFTheme.isDark ? .darkAqua : .aqua)
+        window?.backgroundColor = TFTheme.card
+        topBar.fillColor = TFTheme.card
+        topBarSep.fillColor = TFTheme.line
+        toolbarTitleLabel.textColor = TFTheme.ink
+        statusLabel.textColor = TFTheme.ink2
+        fpsBadgeCard.fillColor = TFTheme.positiveSoft
+        fpsBadgeLabel.textColor = TFTheme.positive
+        // An awaiting first frame must remain transparent during an appearance change.
+        if overlay.fillColor.alphaComponent > 0 {
+            overlay.fillColor = TFTheme.canvas
+        }
+        func refreshButtons(in view: NSView) {
+            (view as? TFButton)?.refreshColors()
+            view.subviews.forEach { refreshButtons(in: $0) }
+        }
+        refreshButtons(in: topBar)
+        refreshButtons(in: overlay)
+    }
+
     func updateFPSBadge(_ fps: Double) {
         if fps >= 1.0 {
             fpsBadgeLabel.stringValue = String(format: "%.0f FPS", fps)
@@ -4037,6 +4073,7 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
     }
 
     func loading(_ message: String) {
+        refreshTheme()
         inputBannerTask?.cancel()
         inputBanner.isHidden = true
         surface.inputEnabled = false
@@ -4068,6 +4105,7 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
     }
 
     func failure(_ message: String) {
+        refreshTheme()
         inputBannerTask?.cancel()
         inputBanner.isHidden = true
         surface.inputEnabled = false

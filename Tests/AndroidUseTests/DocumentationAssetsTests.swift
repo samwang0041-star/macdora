@@ -39,20 +39,22 @@ final class DocumentationAssetsTests: XCTestCase {
         let notes = try icon("notes", symbol: "note.text", color: .systemOrange)
         let browser = try icon("browser", symbol: "globe", color: .systemBlue)
         manager.update(.ready)
-        manager.updateApps([
+        let demonstrationApps = [
             ContainerApp(package: "local.macdora.notes", name: "便笺", subtitle: "记录生活中的小想法", version: "1.0", category: "办公", iconSymbol: "note.text", accentHex: 0xF5B82E, isSystem: false, isInstalled: true, iconPath: notes),
             ContainerApp(package: "local.macdora.browser", name: "浏览器", subtitle: "在熟悉的窗口里浏览", version: "1.0", category: "生活", iconSymbol: "globe", accentHex: 0x27A8F5, isSystem: false, isInstalled: true, iconPath: browser),
             ContainerApp.metadata(for: DefaultApp.package, isInstalled: true)
-        ], activePackage: nil)
+        ]
+        manager.updateApps(demonstrationApps, activePackage: nil)
         let output = URL(fileURLWithPath: directory, isDirectory: true)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         manager.showWindow(nil)
-        func save(_ name: String) async throws {
-            window.contentView?.layoutSubtreeIfNeeded()
-            window.displayIfNeeded()
+        func save(_ name: String, in captureWindow: NSWindow? = nil) async throws {
+            let targetWindow = captureWindow ?? window
+            targetWindow.contentView?.layoutSubtreeIfNeeded()
+            targetWindow.displayIfNeeded()
             CATransaction.flush()
             try await Task.sleep(for: .milliseconds(150))
-            let root = try XCTUnwrap(window.contentView)
+            let root = try XCTUnwrap(targetWindow.contentView)
             let bitmap = try XCTUnwrap(root.bitmapImageRepForCachingDisplay(in: root.bounds))
             root.cacheDisplay(in: root.bounds, to: bitmap)
             try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent(name + ".png"))
@@ -66,5 +68,19 @@ final class DocumentationAssetsTests: XCTestCase {
         manager.update(.stopped)
         manager.selectSection(.plugins)
         try await save("plugins")
+
+        // Use a fresh window per appearance: cacheDisplay can reuse stale image backing
+        // stores after an appearance change and omit symbols from the exported bitmap.
+        TFTheme.isDark = true
+        let darkManager = ManagementWindow()
+        let darkWindow = try XCTUnwrap(darkManager.window)
+        defer { darkWindow.orderOut(nil) }
+        darkWindow.setContentSize(try XCTUnwrap(window.contentView).bounds.size)
+        darkManager.update(.ready)
+        darkManager.updateApps(demonstrationApps, activePackage: nil)
+        darkManager.showWindow(nil)
+        try await save("workspace-dark", in: darkWindow)
+        darkManager.selectSection(.plugins)
+        try await save("plugins-dark", in: darkWindow)
     }
 }

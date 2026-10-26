@@ -7,6 +7,36 @@ import XCTest
 
 final class ApplicationWindowTests: XCTestCase {
     @MainActor
+    func testAppearanceChangeKeepsPendingFrameTransparentAndLoadingTextLegible() throws {
+        _ = NSApplication.shared
+        let oldTheme = TFTheme.isDark
+        defer { TFTheme.isDark = oldTheme }
+        TFTheme.isDark = true
+        let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        defer { controller.performExplicitClose() }
+        controller.loading("等待测试画面")
+        let root = try XCTUnwrap(controller.window?.contentView)
+        let overlay = try XCTUnwrap(root.subviews.compactMap { $0 as? TFCardView }.first {
+            $0.subviews.contains { $0 is NSProgressIndicator }
+        })
+        let label = try XCTUnwrap(overlay.subviews.compactMap { $0 as? NSTextField }.first)
+        controller.awaitFirstPresentation()
+
+        TFTheme.isDark = false
+        controller.refreshTheme()
+        XCTAssertEqual(controller.window?.appearance?.name, .aqua)
+        XCTAssertEqual(label.textColor, TFTheme.ink2)
+        XCTAssertEqual(overlay.fillColor.alphaComponent, 0, "Changing appearance must not hide the pending first frame.")
+        XCTAssertTrue(controller.surface.videoVisible)
+        XCTAssertFalse(controller.surface.inputEnabled)
+
+        controller.failure("测试连接失败")
+        XCTAssertEqual(overlay.fillColor, TFTheme.canvas)
+        XCTAssertEqual(label.textColor, TFTheme.ink2)
+        XCTAssertFalse(controller.surface.inputEnabled)
+    }
+
+    @MainActor
     func testApplicationWindowStartsWithDefaultTabletAspect() throws {
         _ = NSApplication.shared
         let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
@@ -41,12 +71,21 @@ final class ApplicationWindowTests: XCTestCase {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
-        defer { controller.surface.onFirstFrame = nil; controller.performExplicitClose() }
+        defer {
+            controller.surface.onFirstFrame = nil
+            controller.surface.onRenderPath = nil
+            controller.surface.onInvalidPresentation = nil
+            controller.performExplicitClose()
+        }
         controller.loading("Waiting for application")
         controller.presentWindow()
         let session = UUID()
         controller.surface.beginSession(session)
         var firstPresentations = 0
+        var renderPaths: [String] = []
+        var invalidTimes: [Double] = []
+        controller.surface.onRenderPath = { renderPaths.append($0) }
+        controller.surface.onInvalidPresentation = { invalidTimes.append($0) }
         controller.surface.onFirstFrame = { firstPresentations += 1; controller.ready() }
         var buffer: CVPixelBuffer?
         let attributes: [CFString: Any] = [kCVPixelBufferMetalCompatibilityKey: true, kCVPixelBufferIOSurfacePropertiesKey: [:]]
@@ -63,9 +102,16 @@ final class ApplicationWindowTests: XCTestCase {
         controller.awaitFirstPresentation()
         let deadline = Date(timeIntervalSinceNow: 2)
         while firstPresentations == 0 && Date() < deadline {
+            // The command-line test host has no NSApplication.run() event loop.
+            // Process real activation/exposure events as the application normally does.
+            while let event = NSApp.nextEvent(matching: .any, until: Date(), inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+            }
+            NSApp.updateWindows()
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertEqual(firstPresentations, 1, "A static first frame must recover without a later decode, user retry, or test-side transaction flush.")
+        let state = "active=\(NSApp.isActive) key=\(controller.window?.isKeyWindow == true) visible=\(controller.window?.isVisible == true) onSpace=\(controller.window?.isOnActiveSpace == true) occlusion=\(String(describing: controller.window?.occlusionState.rawValue)) bounds=\(controller.surface.bounds) paths=\(renderPaths) invalid=\(invalidTimes)"
+        XCTAssertEqual(firstPresentations, 1, "A static first frame must recover without a later decode, user retry, or test-side transaction flush. \(state)")
         XCTAssertTrue(controller.surface.inputEnabled)
     }
 
@@ -107,7 +153,12 @@ final class ApplicationWindowTests: XCTestCase {
         NSApplication.shared.activate(ignoringOtherApps: true)
         let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
         let window = try XCTUnwrap(controller.window)
-        defer { controller.surface.onFirstFrame = nil; controller.performExplicitClose() }
+        defer {
+            controller.surface.onFirstFrame = nil
+            controller.surface.onRenderPath = nil
+            controller.surface.onInvalidPresentation = nil
+            controller.performExplicitClose()
+        }
         controller.loading("Waiting for frame")
         window.makeKeyAndOrderFront(nil)
         try await Task.sleep(for: .milliseconds(200))
@@ -118,9 +169,11 @@ final class ApplicationWindowTests: XCTestCase {
         controller.surface.beginSession(session)
         var firstPresentations = 0
         var renderPaths: [String] = []
-        var rejected: [Double] = []
+        var rejected: [(time: Double, firstPresentations: Int, inputEnabled: Bool)] = []
         controller.surface.onRenderPath = { renderPaths.append($0) }
-        controller.surface.onInvalidPresentation = { rejected.append($0) }
+        controller.surface.onInvalidPresentation = {
+            rejected.append(($0, firstPresentations, controller.surface.inputEnabled))
+        }
         controller.surface.onFirstFrame = {
             firstPresentations += 1
             controller.ready()
@@ -137,8 +190,7 @@ final class ApplicationWindowTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(150))
         XCTAssertEqual(firstPresentations, 0)
         XCTAssertFalse(controller.surface.inputEnabled)
-        window.deminiaturize(nil)
-        window.makeKeyAndOrderFront(nil)
+        controller.presentWindow()
         let deadline = Date(timeIntervalSinceNow: 3)
         while firstPresentations == 0 && Date() < deadline {
             while let event = NSApp.nextEvent(matching: .any, until: .distantPast, inMode: .default, dequeue: true) { NSApp.sendEvent(event) }
@@ -147,7 +199,9 @@ final class ApplicationWindowTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertTrue(renderPaths.contains("metal-bgra"))
-        XCTAssertTrue(rejected.isEmpty)
+        XCTAssertTrue(rejected.allSatisfy {
+            (!$0.time.isFinite || $0.time <= 0) && ($0.firstPresentations > 0 || !$0.inputEnabled)
+        }, "A dropped transition drawable must not enable input before a valid first presentation: \(rejected)")
         XCTAssertEqual(firstPresentations, 1, "Restoring the window must present its cached frame without a new decoder output.")
         XCTAssertTrue(controller.surface.inputEnabled)
         controller.failure("Stream ended")
@@ -434,7 +488,7 @@ final class ApplicationWindowTests: XCTestCase {
         rootView.layoutSubtreeIfNeeded()
         let startingBtn = try XCTUnwrap(collectRuntimeButtons(in: rootView).first)
         if case .progress(let fraction, let statusText, let isStopping) = startingBtn.mode {
-            XCTAssertGreaterThan(fraction, 0.3)
+            XCTAssertEqual(fraction, 0, "Startup has no measured completion fraction; only measured downloads show determinate progress")
             XCTAssertFalse(statusText.isEmpty)
             XCTAssertFalse(isStopping)
         } else {

@@ -1,0 +1,51 @@
+{
+  "v": 3,
+  "layout": "files",
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-10-26T14:09:52Z"
+  },
+  "title": "Macdora",
+  "namespace": "MacdoraUI",
+  "libraries": [],
+  "sections": {},
+  "groups": [
+    "Brand",
+    "Previews"
+  ],
+  "assetGroups": {
+    "Brand": {
+      "name": "Brand",
+      "tile": "m",
+      "order": [
+        "app-icon.png",
+        "wordmark-dark.png",
+        "wordmark-light.png"
+      ],
+      "files": {}
+    },
+    "Previews": {
+      "name": "Previews",
+      "tile": "l",
+      "order": [
+        "workspace-dark.png",
+        "workspace.png",
+        "plugins-dark.png",
+        "plugins.png",
+        "environment.png"
+      ],
+      "files": {}
+    }
+  },
+  "blobs": {},
+  "docs": {
+    "readme": "README.md",
+    "sections": []
+  },
+  "lastChange": {
+    "by": "Codex",
+    "at": "2026-10-26T14:09:52Z",
+    "via": "Codex local",
+    "note": "整理原生界面 tokens、交互预览与 CleanMyMac 5.7.2 的可核查设计研究。"
+  }
+}

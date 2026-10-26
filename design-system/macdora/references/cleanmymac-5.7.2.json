@@ -1,0 +1,614 @@
+{
+  "reference": "CleanMyMac 5.7.2",
+  "architecture": "arm64",
+  "source": "CleanMyMac_5.app/Contents/Frameworks/DesignSystem.framework/Versions/A/DesignSystem",
+  "method": "Public Swift getter -> passed initializer address -> integer/alpha input to color constructor. Adjacent initializer order is not used.",
+  "limitations": [
+    "NSColor color space and every runtime usage are unconfirmed.",
+    "This is a bounded palette subset, not the full design system."
+  ],
+  "colors": [
+    {
+      "name": "AccentPill.fillTop",
+      "rgbInput": "#dd4077",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x49a5c",
+      "initializer": "0x49a20",
+      "constructionCall": "0x49a44",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "AccentPill.fillBottom",
+      "rgbInput": "#b86768",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x49ab4",
+      "initializer": "0x49a78",
+      "constructionCall": "0x49a9c",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "AccentPill.badgeShadow",
+      "rgbInput": "#d217ef",
+      "alpha": 0.2,
+      "colorSpace": "unconfirmed",
+      "getter": "0x49c20",
+      "initializer": "0x49bd8",
+      "constructionCall": "0x49c08",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "AccentPill.dotShadow",
+      "rgbInput": "#dd3771",
+      "alpha": 0.2,
+      "colorSpace": "unconfirmed",
+      "getter": "0x49cc4",
+      "initializer": "0x49c3c",
+      "constructionCall": "0x49c6c",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "Button.ghostDarkHover",
+      "rgbInput": "#cdc5e0",
+      "alpha": 0.24,
+      "colorSpace": "unconfirmed",
+      "getter": "0x49e50",
+      "initializer": "0x49dc4",
+      "constructionCall": "0x49df8",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "Button.ghostDarkPressed",
+      "rgbInput": "#cdc5e0",
+      "alpha": 0.48,
+      "colorSpace": "unconfirmed",
+      "getter": "0x49ef8",
+      "initializer": "0x49e6c",
+      "constructionCall": "0x49ea0",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "gray1",
+      "rgbInput": "#d9d9d9",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4a5f0",
+      "initializer": "0x4a574",
+      "constructionCall": "0x4a598",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "pink1",
+      "rgbInput": "#cc31b2",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4b468",
+      "initializer": "0x4b42c",
+      "constructionCall": "0x4b450",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "pink1_20",
+      "rgbInput": "#cc31b2",
+      "alpha": 0.2,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4b50c",
+      "initializer": "0x4b484",
+      "constructionCall": "0x4b4b4",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "pink2",
+      "rgbInput": "#d760c3",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4b5a4",
+      "initializer": "0x4b528",
+      "constructionCall": "0x4b54c",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "pink3",
+      "rgbInput": "#9e268a",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4b63c",
+      "initializer": "0x4b5c0",
+      "constructionCall": "0x4b5e4",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "pink5_16",
+      "rgbInput": "#ff6bf5",
+      "alpha": 0.16,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4b6e4",
+      "initializer": "0x4b658",
+      "constructionCall": "0x4b68c",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "pink5_26",
+      "rgbInput": "#ff6bf5",
+      "alpha": 0.26,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4b78c",
+      "initializer": "0x4b700",
+      "constructionCall": "0x4b734",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "pink4_16",
+      "rgbInput": "#cdc5e0",
+      "alpha": 0.16,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4b834",
+      "initializer": "0x4b7a8",
+      "constructionCall": "0x4b7dc",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "pink4_24",
+      "rgbInput": "#cdc5e0",
+      "alpha": 0.24,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4b89c",
+      "initializer": "0x4b850",
+      "constructionCall": "0x4b884",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "pink4_48",
+      "rgbInput": "#cdc5e0",
+      "alpha": 0.48,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4b904",
+      "initializer": "0x4b8b8",
+      "constructionCall": "0x4b8ec",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "pink_40_dm_footer",
+      "rgbInput": "#e6e0f6",
+      "alpha": 0.4,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4b9a8",
+      "initializer": "0x4b920",
+      "constructionCall": "0x4b950",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "yellow1",
+      "rgbInput": "#ffd02c",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4ba40",
+      "initializer": "0x4b9c4",
+      "constructionCall": "0x4b9e8",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "yellow2",
+      "rgbInput": "#ffe071",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4bad8",
+      "initializer": "0x4ba5c",
+      "constructionCall": "0x4ba80",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "yellow3",
+      "rgbInput": "#ecc22c",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4bb70",
+      "initializer": "0x4baf4",
+      "constructionCall": "0x4bb18",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "yellow3_36",
+      "rgbInput": "#ecc22c",
+      "alpha": 0.36,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4bc18",
+      "initializer": "0x4bb8c",
+      "constructionCall": "0x4bbc0",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "yellow5",
+      "rgbInput": "#ffe140",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4bcb0",
+      "initializer": "0x4bc34",
+      "constructionCall": "0x4bc58",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "buttonPaid",
+      "rgbInput": "#ffd02c",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4bd48",
+      "initializer": "0x4bccc",
+      "constructionCall": "0x4bcf0",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "green1",
+      "rgbInput": "#6dff73",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4bde0",
+      "initializer": "0x4bd64",
+      "constructionCall": "0x4bd88",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "green4",
+      "rgbInput": "#03c503",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4be78",
+      "initializer": "0x4bdfc",
+      "constructionCall": "0x4be20",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "spaceLensLight0",
+      "rgbInput": "#d5dfff",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4bf10",
+      "initializer": "0x4be94",
+      "constructionCall": "0x4beb8",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "spaceLensLight0_15",
+      "rgbInput": "#d5dfff",
+      "alpha": 0.15,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4bfb0",
+      "initializer": "0x4bf2c",
+      "constructionCall": "0x4bf58",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "spaceLensLight0_20",
+      "rgbInput": "#d5dfff",
+      "alpha": 0.2,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4c054",
+      "initializer": "0x4bfcc",
+      "constructionCall": "0x4bffc",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "spaceLensLight0_30",
+      "rgbInput": "#d5dfff",
+      "alpha": 0.3,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4c0f4",
+      "initializer": "0x4c070",
+      "constructionCall": "0x4c09c",
+      "classification": "verified-static-initializer"
+    },
+    {
+      "name": "spaceLensPink",
+      "rgbInput": "#ff38de",
+      "alpha": 1.0,
+      "colorSpace": "unconfirmed",
+      "getter": "0x4c18c",
+      "initializer": "0x4c110",
+      "constructionCall": "0x4c134",
+      "classification": "verified-static-initializer"
+    }
+  ],
+  "fonts": [
+    {
+      "name": "regular44",
+      "sizePt": 44.0,
+      "weightSymbol": "_NSFontWeightLight",
+      "getter": "0x4cb18",
+      "initializer": "0x4caa8",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "regular44LetterSpacing2",
+      "sizePt": 44.0,
+      "weightSymbol": "_NSFontWeightLight",
+      "getter": "0x4cbd0",
+      "initializer": "0x4cb60",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "semibold40",
+      "sizePt": 40.0,
+      "weightSymbol": "_NSFontWeightMedium",
+      "getter": "0x4cc88",
+      "initializer": "0x4cc18",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "regular36",
+      "sizePt": 36.0,
+      "weightSymbol": "_NSFontWeightLight",
+      "getter": "0x4cd40",
+      "initializer": "0x4ccd0",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "medium32",
+      "sizePt": 32.0,
+      "weightSymbol": "_NSFontWeightRegular",
+      "getter": "0x4cdf8",
+      "initializer": "0x4cd88",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "regular32",
+      "sizePt": 32.0,
+      "weightSymbol": "_NSFontWeightLight",
+      "getter": "0x4ceb0",
+      "initializer": "0x4ce40",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "semibold32",
+      "sizePt": 32.0,
+      "weightSymbol": "_NSFontWeightMedium",
+      "getter": "0x4cf28",
+      "initializer": "0x4cef8",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "semibold24",
+      "sizePt": 24.0,
+      "weightSymbol": "_NSFontWeightMedium",
+      "getter": "0x4cfe0",
+      "initializer": "0x4cf70",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "regular24",
+      "sizePt": 24.0,
+      "weightSymbol": "_NSFontWeightLight",
+      "getter": "0x4d098",
+      "initializer": "0x4d028",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "semibold20",
+      "sizePt": 20.0,
+      "weightSymbol": "_NSFontWeightMedium",
+      "getter": "0x4d150",
+      "initializer": "0x4d0e0",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "regular18",
+      "sizePt": 18.0,
+      "weightSymbol": "_NSFontWeightLight",
+      "getter": "0x4d1c8",
+      "initializer": "0x4d198",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "semibold18",
+      "sizePt": 18.0,
+      "weightSymbol": "_NSFontWeightMedium",
+      "getter": "0x4d280",
+      "initializer": "0x4d210",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "bold16",
+      "sizePt": 16.0,
+      "weightSymbol": "_NSFontWeightSemibold",
+      "getter": "0x4d338",
+      "initializer": "0x4d2c8",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "semibold16",
+      "sizePt": 16.0,
+      "weightSymbol": "_NSFontWeightMedium",
+      "getter": "0x4d3f0",
+      "initializer": "0x4d380",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "medium16",
+      "sizePt": 16.0,
+      "weightSymbol": "_NSFontWeightRegular",
+      "getter": "0x4d4a8",
+      "initializer": "0x4d438",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "regular16",
+      "sizePt": 16.0,
+      "weightSymbol": "_NSFontWeightLight",
+      "getter": "0x4d520",
+      "initializer": "0x4d4f0",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "bold14",
+      "sizePt": 14.0,
+      "weightSymbol": "_NSFontWeightSemibold",
+      "getter": "0x4d5d8",
+      "initializer": "0x4d568",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "semibold14",
+      "sizePt": 14.0,
+      "weightSymbol": "_NSFontWeightMedium",
+      "getter": "0x4d650",
+      "initializer": "0x4d620",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "medium14",
+      "sizePt": 14.0,
+      "weightSymbol": "_NSFontWeightRegular",
+      "getter": "0x4d708",
+      "initializer": "0x4d698",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "regular14",
+      "sizePt": 14.0,
+      "weightSymbol": "_NSFontWeightLight",
+      "getter": "0x4d7c0",
+      "initializer": "0x4d750",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "semibold12",
+      "sizePt": 12.0,
+      "weightSymbol": "_NSFontWeightMedium",
+      "getter": "0x4d838",
+      "initializer": "0x4d808",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "regular12",
+      "sizePt": 12.0,
+      "weightSymbol": "_NSFontWeightLight",
+      "getter": "0x4d8b0",
+      "initializer": "0x4d880",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "semibold11",
+      "sizePt": 11.0,
+      "weightSymbol": "_NSFontWeightMedium",
+      "getter": "0x4d928",
+      "initializer": "0x4d8f8",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "regular11",
+      "sizePt": 11.0,
+      "weightSymbol": "_NSFontWeightLight",
+      "getter": "0x4d9e0",
+      "initializer": "0x4d970",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "semibold10",
+      "sizePt": 10.0,
+      "weightSymbol": "_NSFontWeightMedium",
+      "getter": "0x4da98",
+      "initializer": "0x4da28",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    },
+    {
+      "name": "regular10",
+      "sizePt": 10.0,
+      "weightSymbol": "_NSFontWeightLight",
+      "getter": "0x4db50",
+      "initializer": "0x4dae0",
+      "classification": "verified-static-initializer",
+      "lineHeight": "unconfirmed"
+    }
+  ],
+  "sourceSHA256": "4021049020aed0ad2edf742c2bd4fe7b9457033a8b3fe56e6ca7711674162f1a",
+  "inventory": {
+    "namedColorGetters": 71,
+    "verifiedColorInitializers": 30,
+    "namedFontStyleGetters": 26,
+    "verifiedFontInitializers": 26
+  },
+  "layoutAndMotion": [
+    {
+      "name": "SharedUI.BorderedMaterialView.DefaultUIConfig.cornerRadius",
+      "value": 16,
+      "unit": "pt",
+      "address": "0x23e4",
+      "classification": "verified-static-getter"
+    },
+    {
+      "name": "MainAppUI.RoundedWindow.cornerRadius",
+      "value": 8,
+      "unit": "pt",
+      "address": "0x3028",
+      "classification": "verified-static-default"
+    },
+    {
+      "name": "SharedUI.HUDViewController.animationAppearanceDuration",
+      "value": 0.2,
+      "unit": "s",
+      "address": "0x2214",
+      "classification": "verified-static-default"
+    },
+    {
+      "name": "SharedUI.HUDViewController.animationDisappearanceDuration",
+      "value": 0.2,
+      "unit": "s",
+      "address": "0x2214",
+      "classification": "verified-static-default"
+    },
+    {
+      "name": "SharedUI.OrbitingContainerView.orbitRadius",
+      "value": 10,
+      "unit": "pt",
+      "address": "0x23c4",
+      "classification": "verified-static-default"
+    },
+    {
+      "name": "SharedUI.OrbitingContainerView.orbitDuration",
+      "value": 2,
+      "unit": "s",
+      "address": "0x23cc",
+      "classification": "verified-static-default"
+    },
+    {
+      "name": "MainAppUI.CanvasViewController.backgroundChangeAnimationDuration",
+      "value": 0.5,
+      "unit": "s",
+      "address": "0x29c4",
+      "classification": "verified-static-default"
+    }
+  ],
+  "role": "Research reference only. Values are not consumed by Macdora production controls.",
+  "observedAt": "2026-10-26",
+  "unknowns": [
+    "41 of 71 named color getters were not decoded by the bounded initializer method.",
+    "Color space and full runtime use sites.",
+    "Global spacing scale, line heights and tracking values.",
+    "Full shadow parameters and per-transition runtime easing/interruption behavior."
+  ]
+}
