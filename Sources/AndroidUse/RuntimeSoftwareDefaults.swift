@@ -91,6 +91,21 @@ enum RuntimeSoftwareDefaults {
         return """
         su 0 sh -c '
         set -e
+        disable_slirp_ipv6() {
+          ip6tables -w -C INPUT -p ipv6-icmp --icmpv6-type 134 -j DROP >/dev/null 2>&1 || \\
+            ip6tables -w -I INPUT -p ipv6-icmp --icmpv6-type 134 -j DROP >/dev/null 2>&1 || true
+          ip6tables -w -C OUTPUT -d 2000::/3 -j REJECT >/dev/null 2>&1 || \\
+            ip6tables -w -I OUTPUT -d 2000::/3 -j REJECT >/dev/null 2>&1 || true
+          for iface in all default wlan0 eth0; do
+            if [ -w "/proc/sys/net/ipv6/conf/$iface/accept_ra" ]; then
+              echo 0 > "/proc/sys/net/ipv6/conf/$iface/accept_ra" 2>/dev/null || true
+            fi
+            if [ -w "/proc/sys/net/ipv6/conf/$iface/disable_ipv6" ]; then
+              echo 1 > "/proc/sys/net/ipv6/conf/$iface/disable_ipv6" 2>/dev/null || true
+            fi
+          done
+        }
+        disable_slirp_ipv6
         target_model="\(id.model)"
         target_brand="\(id.brand)"
         target_manufacturer="\(id.manufacturer)"
@@ -216,6 +231,7 @@ enum RuntimeSoftwareDefaults {
             setprop sys.androiduse.zygote_pid "$live_zygote_pid" >/dev/null 2>&1 || true
           fi
         fi
+        disable_slirp_ipv6
         chown shell:shell /data/local/tmp/android-use-scrcpy.jar 2>/dev/null || true
         ' || exit 1
         """

@@ -50,6 +50,9 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(tabletScript.contains("7a03bac2-692f-3d17-a2cd-a1b0721ffd0e"))
         XCTAssertTrue(tabletScript.contains("8fa14cdd-754f-31cc-a554-c9e71929cce7"))
         XCTAssertTrue(tabletScript.contains("setprop ctl.restart zygote"))
+        XCTAssertTrue(tabletScript.contains("disable_slirp_ipv6"))
+        XCTAssertTrue(tabletScript.contains("ip6tables -w -I OUTPUT -d 2000::/3 -j REJECT"))
+        XCTAssertTrue(tabletScript.contains("/proc/sys/net/ipv6/conf/$iface/disable_ipv6"))
 
         let phoneScript = RuntimeSoftwareDefaults.guestDeviceIdentityScript(tabletMode: false)
         XCTAssertTrue(phoneScript.contains("target_model=\"Android SDK built for arm64\""))
