@@ -13,6 +13,7 @@ struct SystemPluginEntrypoints: Codable, Equatable, Sendable {
     var tickIntervalMs: Int?
     var presetsFile: String?
     var configFile: String?
+    var hostService: String?
 
     init(
         onEnable: String? = nil,
@@ -23,7 +24,8 @@ struct SystemPluginEntrypoints: Codable, Equatable, Sendable {
         onTick: String? = nil,
         tickIntervalMs: Int? = nil,
         presetsFile: String? = nil,
-        configFile: String? = nil
+        configFile: String? = nil,
+        hostService: String? = nil
     ) {
         self.onEnable = onEnable
         self.onDisable = onDisable
@@ -34,10 +36,11 @@ struct SystemPluginEntrypoints: Codable, Equatable, Sendable {
         self.tickIntervalMs = tickIntervalMs
         self.presetsFile = presetsFile
         self.configFile = configFile
+        self.hostService = hostService
     }
 
     var allRelativePaths: [String] {
-        [onEnable, onDisable, onRuntimeReady, onAppLaunch, onLocationUpdate, onTick, presetsFile, configFile]
+        [onEnable, onDisable, onRuntimeReady, onAppLaunch, onLocationUpdate, onTick, presetsFile, configFile, hostService]
             .compactMap { $0 }
     }
 
@@ -49,10 +52,11 @@ struct SystemPluginEntrypoints: Codable, Equatable, Sendable {
 
 struct SystemPluginManifest: Codable, Equatable, Identifiable, Sendable {
     static let supportedSchemaVersion = 1
-    static let currentHostVersion = "0.1.0"
+    static let currentHostVersion = "0.2.0"
     static let supportedDriverTypes: Set<String> = [
         "hardware_gnss_location",
-        "external_script"
+        "external_script",
+        "host_service"
     ]
     static let supportedCapabilities: Set<String> = [
         "hardware.gnss",
@@ -60,7 +64,8 @@ struct SystemPluginManifest: Codable, Equatable, Identifiable, Sendable {
         "guest.location.bridge",
         "ui.map.workspace",
         "guest.shell",
-        "lifecycle.hooks"
+        "lifecycle.hooks",
+        "host.service"
     ]
     static let exclusiveCapabilities: Set<String> = [
         "hardware.gnss",
@@ -277,7 +282,7 @@ struct SystemPluginCatalogItem: Equatable, Identifiable, Sendable {
     var downloadSourceDescription: String
 
     var hasDedicatedWorkspace: Bool {
-        SystemPluginManifest.supportedDriverTypes.contains(driverType)
+        driverType == "hardware_gnss_location" || driverType == "external_script"
     }
 
     static let developerLocationID = "builtin.developer.location"
@@ -319,6 +324,7 @@ protocol SystemPluginHostBridge: AnyObject {
     var currentActivePackage: String? { get }
     var emulatorConsolePort: UInt16 { get }
     var emulatorAuthTokenURLs: [URL] { get }
+    var hostServiceEnvironment: [String: String] { get }
     func executeGuestShell(_ script: String, operation: String, timeout: TimeInterval) async -> Bool
     func sendEmulatorGeoFix(
         longitude: Double,
@@ -329,6 +335,10 @@ protocol SystemPluginHostBridge: AnyObject {
     ) async -> Bool
     func notifyPluginBanner(_ message: String)
     func notifyPluginStateDidChange()
+}
+
+extension SystemPluginHostBridge {
+    var hostServiceEnvironment: [String: String] { [:] }
 }
 
 @MainActor

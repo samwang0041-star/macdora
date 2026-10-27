@@ -15,6 +15,7 @@ final class MockPluginHostBridge: SystemPluginHostBridge {
     var fallbackGeoFixes: [(lon: Double, lat: Double, alt: Double, sats: Int, vel: Double)] = []
     var banners: [String] = []
     var stateChangeNotifications: Int = 0
+    var hostServiceEnvironment: [String: String] = [:]
     var guestScriptHookFilter: ((String) async -> Bool)?
     private var guestScriptCountWaiters: [(minimumCount: Int, continuation: CheckedContinuation<Void, Never>)] = []
 
@@ -594,6 +595,75 @@ struct SystemPluginFrameworkTests {
             rejectedIncompatibleHost = true
         }
         #expect(rejectedIncompatibleHost)
+    }
+
+    @Test("Schema v1 keeps old driver entrypoints compatible and reserves shell for host_service")
+    func hostServiceManifestCompatibility() throws {
+        let oldEntrypoints = SystemPluginEntrypoints(
+            onEnable: "hooks/on-enable.sh",
+            onDisable: "hooks/on-disable.sh"
+        )
+        let encoded = try JSONEncoder().encode(oldEntrypoints)
+        let decoded = try JSONDecoder().decode(SystemPluginEntrypoints.self, from: encoded)
+        #expect(decoded == oldEntrypoints)
+        #expect(decoded.hostService == nil)
+        #expect(!decoded.allRelativePaths.contains { $0.contains("hostService") })
+        #expect(SystemPluginManifest.supportedSchemaVersion == 1)
+        #expect(SystemPluginManifest.currentHostVersion == "0.2.0")
+        #expect(SystemPluginManifest.supportedDriverTypes.contains("host_service"))
+        #expect(SystemPluginManifest.supportedCapabilities.contains("host.service"))
+
+        let legacyJSON = """
+        {
+          "schemaVersion": 1,
+          "id": "dev.legacy.manifest",
+          "name": "Legacy",
+          "subtitle": "legacy",
+          "version": "1.0.0",
+          "author": "test",
+          "category": "test",
+          "iconSymbol": "puzzlepiece",
+          "accentHex": 0,
+          "minHostVersion": "0.1.0",
+          "capabilities": ["guest.shell"],
+          "driverType": "external_script",
+          "entrypoints": {
+            "onEnable": "hooks/on-enable.sh",
+            "onDisable": "hooks/on-disable.sh"
+          }
+        }
+        """
+        let legacyManifest = try JSONDecoder().decode(
+            SystemPluginManifest.self,
+            from: Data(legacyJSON.utf8)
+        )
+        #expect(legacyManifest.entrypoints.hostService == nil)
+
+        let hostServiceFields = SystemPluginEntrypoints(hostService: "bin/service")
+        #expect(hostServiceFields.allRelativePaths == ["bin/service"])
+        #expect(!hostServiceFields.hasGuestShellHooks)
+
+        let catalogItem = SystemPluginCatalogItem(
+            id: "dev.host.catalog",
+            name: "Host",
+            subtitle: "",
+            version: "1.0.0",
+            availableUpdateVersion: nil,
+            author: "",
+            category: "",
+            iconSymbol: "",
+            accentHex: 0,
+            isOfficialPreset: false,
+            packageSizeLabel: "",
+            capabilities: ["host.service"],
+            driverType: "host_service",
+            state: .installed(isEnabled: false),
+            healthState: .inactive,
+            statusDetail: "",
+            lastErrorDetail: nil,
+            downloadSourceDescription: ""
+        )
+        #expect(!catalogItem.hasDedicatedWorkspace)
     }
 
     @Test("Real GitHub live repository download installs, verifies Ed25519 signature, and drives hardware GNSS location", .enabled(if: ProcessInfo.processInfo.environment["MACDORA_LIVE_PLUGIN_QA"] == "1", "Set MACDORA_LIVE_PLUGIN_QA=1 for release acceptance."))
