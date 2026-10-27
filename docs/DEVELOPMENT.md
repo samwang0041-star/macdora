@@ -83,6 +83,8 @@ MACDORA_NOTARY_PROFILE='<keychain-profile>' bash scripts/notarize-macos.sh --res
 
 `runtime-manifest.json` 在签名完成后记录分发副本的 `cameraSyncHelperSHA256`。MoltenVK 的 `graphicsDriver.librarySHA256` 继续保留源码构建 provenance，`graphicsDriver.distributionLibrarySHA256` 单独记录签名后分发副本，二者不能混用。
 
+发布前执行 `python3 -B -m unittest discover -s scripts/tests` 验证安装包范围门禁。`release-github.sh` 会拒绝包含已安装插件、私有控制状态、第三方 APK 的应用包，并要求随主程序发布的插件清单仅含显式列出的 `builtin.*` 条目。个人业务插件保持单独安装和分发，默认不进入主程序安装包、公开插件清单或 Release 资产。
+
 发布者通过本机 `gh` 的凭据或 CI secrets 认证。凭据不会进入应用包或源码。源码和 Release 位于同一公开仓库；客户端与发布端的认证需求分别处理。发布说明只会在上述公证和 Gatekeeper 门通过后声明“已完成 Apple 公证”。
 
 ## 插件

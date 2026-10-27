@@ -72,6 +72,11 @@ for relative in ['RuntimeSeed/emulator','RuntimeSeed/platform-tools','RuntimeSee
 if any((resources/'RuntimeSeed').glob('.image.*')):
     raise SystemExit('Refusing to package incomplete Android image build artifacts.')
 PY
+PAYLOAD_ARGUMENTS=(--app "$APP_BUNDLE")
+if [[ -f "$PROJECT_ROOT/plugins/registry.json" ]]; then
+  PAYLOAD_ARGUMENTS+=(--registry "$PROJECT_ROOT/plugins/registry.json")
+fi
+python3 "$PROJECT_ROOT/scripts/verify-release-payload.py" "${PAYLOAD_ARGUMENTS[@]}"
 codesign --verify --strict --verbose=2 "$APP_BUNDLE"
 
 if [[ "$PUBLISH" == "1" ]]; then
@@ -218,7 +223,7 @@ echo "Generated SHA-256 manifest: $SHA256_PATH"
 
 if [[ "$PUBLISH" == "1" ]]; then
   # Release assets live beside the source; the app consumes them anonymously.
-  NOTES="Macdora ${TAG} · 早期预览（Build ${BUNDLE_BUILD}）。支持 macOS 15 及以上的 Apple Silicon Mac。轻量安装包不附带 Android 环境或第三方应用；首次使用点击下载环境，已有环境直接复用。源码、版本发布和无需 GitHub Key 的更新入口现统一在本仓库。Agent 接入是后续演进方向，当前尚未提供通用 Agent 控制接口。此包使用 Developer ID 签名，已完成 Apple 公证；App 内已钉附公证票据。"
+  NOTES="Macdora ${TAG} · 早期预览（Build ${BUNDLE_BUILD}）。支持 macOS 15 及以上的 Apple Silicon Mac。本版增加签名插件的本地 MCP 接入、复制给 Agent、显式授权与人工接回，以及按环境保存的办公实例保持唤醒策略；改善管理台搜索、焦点与插件工作页刷新。具体业务能力由另行安装的插件提供，个人业务插件不随本次公开版本分发。轻量安装包不附带 Android 环境或第三方应用；首次使用按需下载环境，已有环境继续复用。此包使用 Developer ID 签名，已完成 Apple 公证；App 内已钉附公证票据。"
   EXTRA_ASSETS=()
   if [[ -f "$PROJECT_ROOT/plugins/registry.json" && -f "$PROJECT_ROOT/plugins/dist/builtin.developer.location.auplugin" ]]; then
     EXTRA_ASSETS+=("$PROJECT_ROOT/plugins/registry.json" "$PROJECT_ROOT/plugins/dist/builtin.developer.location.auplugin" "$PROJECT_ROOT/plugins/dist/builtin.developer.location.auplugin.sha256")

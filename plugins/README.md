@@ -89,3 +89,10 @@ The public key embedded in a downloaded registry does not establish trust.
 
 Building and signing write local outputs only. Publishing requires a separate
 explicit authorization through the project's release process.
+
+The main application release includes only explicitly listed `builtin.*`
+catalog entries and their selected public assets. Personal business plugins
+are separate installations: they must not be added to the default registry,
+copied from the user's plugin directory into the app, or collected as release
+assets. The release payload check rejects installed plugins, local control
+state and non-built-in registry entries before packaging or GitHub writes.
