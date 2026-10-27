@@ -30,6 +30,17 @@ plugin schema. `entrypoints.hostService` is optional for other drivers and is
 included in signed package path validation. It is not a guest-shell hook.
 The host launches the executable without extra arguments.
 
+An Agent-capable package is an explicit opt-in extension of this driver. It
+must also declare `agent.readonly` and `entrypoints.agentMCP`; a plain
+`host_service` does not receive an Agent workspace or Agent control file. See
+[AGENT_PLUGIN_HOST.md](AGENT_PLUGIN_HOST.md) for the control-state schema,
+lowercase wire IDs, bounded cold-start/readiness behavior, generation-CAS
+handoff rules, read-only RPC and configuration export.
+Optional signed `agentInstructions` and `agentSummary` let the package own
+Agent onboarding and capability text. The generic workspace copies those
+instructions with the verified local MCP configuration; provider workflows
+remain outside the host.
+
 `host_service` requires:
 
 - the `host.service` capability;
@@ -38,7 +49,10 @@ The host launches the executable without extra arguments.
 - a valid code signature for that executable.
 
 The executable is checked again before launch and before health acceptance.
-Its package contents are never modified at runtime.
+For an Agent package, the signed Agent executable snapshot is also checked by
+health acceptance and by grant/configuration actions. Package contents are
+never modified at runtime, and hot reload compares package identity (bundle
+location plus manifest) rather than reusing a retired instance by ID alone.
 
 ## Environment
 
@@ -92,12 +106,27 @@ The service writes `endpoint.json` atomically with mode `0600`:
 ```
 
 `pid` identifies the hosting Mac app process, not the service process.
+`instanceId` retains the host/endpoint UUID casing. Agent RPC `generation` and
+`consumerId` are separate lowercase UUID wire values; they are not endpoint
+identity.
+
+For an Agent package, the persistent user handoff lives separately at
+`private/agent-control/<plugin-id>.json` and is never part of the signed
+package. Only that manifest capability receives
+`MACDORA_AGENT_CONTROL_PATH`.
 
 ## Health handshake
 
 Within five seconds the host requires the launched process handle to still be
-running, the endpoint to match this launch, and a secure Unix socket. It then
-sends one JSON line:
+running, the endpoint to match this launch, and a secure Unix socket. An
+Agent package that explicitly declares both `agent.readonly` and
+`entrypoints.agentMCP` gets a bounded 35-second first-health window instead,
+because a freshly packaged Python executable may initialize on-disk caches
+before `--help` / socket startup. The non-Agent window remains five seconds.
+The wider budget waits only for the fixed health response; it does not retry
+business work or restart the process. Disable/cancellation aborts the wait
+immediately, and a late health result cannot revive a cancelled instance.
+The host then sends one JSON line:
 
 ```json
 {"jsonrpc":"2.0","id":123,"method":"macdora.ping","params":{"instanceId":"UUID"}}
@@ -110,13 +139,18 @@ The service must reply with one JSON line (maximum 4 KiB):
 ```
 
 Health I/O runs off the main thread with bounded timeouts. Process stdout and
-stderr are drained, but are not included in health or diagnostic UI text.
+stderr are drained, but are not included in health or diagnostic UI text. The
+health socket sets `SO_NOSIGPIPE`; if a service disconnects, the write returns
+a fixed failure instead of delivering a process-fatal `SIGPIPE`.
 
 ## Service responsibilities
 
 - Hold a `flock`-based single-instance lock in `MACDORA_PLUGIN_STATE_DIR`.
 - Monitor `getppid()` and exit when the Mac host disappears.
 - Listen only on `MACDORA_PLUGIN_SOCKET_PATH`.
+- For Agent packages, keep `macdora.ping` independent of business startup
+  state and treat only the signed executable/endpoint/socket handshake as
+  readiness.
 - Write and remove only its own endpoint/socket files.
 - Treat endpoint files and stale locks as ownership hints, never as authority
   to terminate an arbitrary PID or executable path.

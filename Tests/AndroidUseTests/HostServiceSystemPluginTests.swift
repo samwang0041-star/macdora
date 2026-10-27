@@ -476,7 +476,7 @@ private final class HostServiceSyntheticLauncher: ProcessExecuting, @unchecked S
                 lock.lock()
                 let waiter = invocationWaiters.removeValue(forKey: id)
                 lock.unlock()
-                waiter?.continuation.resume(throwing: HostServiceFixtureError.commandFailed("launch event timed out"))
+                waiter?.continuation.resume(throwing: HostServiceFixtureError.commandFailed("launch event \(count) timed out"))
             }
         }
     }

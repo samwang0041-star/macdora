@@ -1085,6 +1085,7 @@ final class RuntimeController: SystemPluginHostBridge {
     var onDisplayTerminated: (() -> Void)?
     var onPluginBanner: ((String) -> Void)?
     var onPluginStateChanged: (() -> Void)?
+    var onOfficeKeepAwakeChanged: (() -> Void)?
     var cameraEnabled: Bool {
         get {
             if let stored = defaults.object(forKey: Self.cameraDefaultsKey) as? Bool {
@@ -1163,6 +1164,9 @@ final class RuntimeController: SystemPluginHostBridge {
     private var stoppingTask: Task<Bool, Never>?
     private var runtimeCleanupTask: Task<Bool, Never>?
     private var guestEnvironmentTask: Task<Void, Error>?
+    private var officeKeepAwakeTask: Task<Bool, Never>?
+    private var officeKeepAwakePhase: OfficeKeepAwakePhase = .off
+    private var officeKeepAwakeActivity: NSObjectProtocol?
     private var unreapedProcesses: [any OwnedProcessHandle] = []
     private var isOpeningDisplay = false
     private var adbServerProcess: (any OwnedProcessHandle)?
@@ -1190,6 +1194,146 @@ final class RuntimeController: SystemPluginHostBridge {
 
     var activeDisplayPackage: String? {
         displayEndpoint?.package
+    }
+
+    private var officeKeepAwakePreferences: OfficeKeepAwakePreferences {
+        OfficeKeepAwakePreferences(rootURL: paths.rootURL, defaults: defaults)
+    }
+
+    var officeKeepAwakeStatus: OfficeKeepAwakeStatus {
+        let enabled = officeKeepAwakePreferences.enabled
+        let needsRuntime = enabled || officeKeepAwakePreferences.hasOriginal
+        let phase = needsRuntime && officeKeepAwakePhase == .off ? .waitingForRuntime : officeKeepAwakePhase
+        return OfficeKeepAwakeStatus(enabled: enabled, phase: phase)
+    }
+
+    var shouldKeepRuntimeInBackground: Bool {
+        containerPreferences.keepWarmInBackground || officeKeepAwakePreferences.enabled
+    }
+
+    var isOfficeKeepAwakeActivityHeld: Bool { officeKeepAwakeActivity != nil }
+
+    @discardableResult
+    func setOfficeKeepAwakeEnabled(_ enabled: Bool) async -> Bool {
+        guard !state.isBusy, !isStopping, runtimeCleanupTask == nil, officeKeepAwakeTask == nil else { return false }
+        officeKeepAwakePreferences.enabled = enabled
+        guard state == .ready || state == .running else {
+            setOfficeKeepAwakePhase(enabled || officeKeepAwakePreferences.hasOriginal ? .waitingForRuntime : .off)
+            return true
+        }
+        return await reconcileOfficeKeepAwake()
+    }
+
+    private func setOfficeKeepAwakePhase(_ phase: OfficeKeepAwakePhase) {
+        officeKeepAwakePhase = phase
+        onOfficeKeepAwakeChanged?()
+    }
+
+    private func holdOfficeKeepAwakeActivity(_ hold: Bool) {
+        if hold, officeKeepAwakeActivity == nil {
+            officeKeepAwakeActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Keep the selected office environment responsive in the background"
+            )
+        } else if !hold, let activity = officeKeepAwakeActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            officeKeepAwakeActivity = nil
+        }
+    }
+
+    private func officeKeepAwakeCommand(
+        _ script: String, generation operationGeneration: UInt64, allowStopping: Bool = false
+    ) async throws -> Data {
+        func validateOwnership() throws {
+            guard generation == operationGeneration,
+                  allowStopping || !isStopping,
+                  adbServerProcess?.isRunning == true,
+                  emulatorProcess?.isRunning == true else { throw CancellationError() }
+        }
+        try Task.checkCancellation()
+        try validateOwnership()
+        let result = try await runADB(
+            OfficeKeepAwakeCommands.arguments(script), operation: "配置办公环境唤醒策略",
+            timeout: 60, outputLimit: 1024
+        )
+        try Task.checkCancellation()
+        try validateOwnership()
+        guard result.exitCode == 0 else { throw RuntimeError.adbCommandFailed("配置办公环境唤醒策略") }
+        return result.stdout
+    }
+
+    private func reconcileOfficeKeepAwake() async -> Bool {
+        if let task = officeKeepAwakeTask { return await task.value }
+        guard officeKeepAwakePreferences.enabled || officeKeepAwakePreferences.hasOriginal else {
+            holdOfficeKeepAwakeActivity(false)
+            setOfficeKeepAwakePhase(.off)
+            return true
+        }
+        let operationGeneration = generation
+        let task = Task { [self] in
+            setOfficeKeepAwakePhase(.applying)
+            do {
+                if officeKeepAwakePreferences.enabled {
+                    if !officeKeepAwakePreferences.hasOriginal {
+                        let output = try await officeKeepAwakeCommand(
+                            OfficeKeepAwakeCommands.inspect, generation: operationGeneration
+                        )
+                        guard let snapshot = OfficeFreezerSnapshot(output: output) else {
+                            throw RuntimeError.adbCommandFailed("识别 Android 冻结策略")
+                        }
+                        // Persist the recovery lease BEFORE any guest mutation.
+                        officeKeepAwakePreferences.original = snapshot
+                    }
+                    guard officeKeepAwakePreferences.original != nil else {
+                        throw RuntimeError.adbCommandFailed("读取唤醒策略恢复记录")
+                    }
+                    let output = try await officeKeepAwakeCommand(
+                        OfficeKeepAwakeCommands.apply, generation: operationGeneration
+                    )
+                    guard String(decoding: output, as: UTF8.self)
+                        .trimmingCharacters(in: .whitespacesAndNewlines) == "MACDORA_OFFICE_AWAKE_APPLIED" else {
+                        throw RuntimeError.adbCommandFailed("确认 Android 已解除冻结")
+                    }
+                    holdOfficeKeepAwakeActivity(true)
+                    setOfficeKeepAwakePhase(.active)
+                } else {
+                    try await restoreOfficeKeepAwake(generation: operationGeneration)
+                    holdOfficeKeepAwakeActivity(false)
+                    setOfficeKeepAwakePhase(.off)
+                }
+                return true
+            } catch {
+                if generation == operationGeneration, !isStopping {
+                    if officeKeepAwakePreferences.enabled, !Task.isCancelled {
+                        try? await restoreOfficeKeepAwake(generation: operationGeneration)
+                    }
+                    guard generation == operationGeneration, !isStopping else { return false }
+                    holdOfficeKeepAwakeActivity(false)
+                    // Keep the lease on partial failure, including cancelled ADB writes.
+                    setOfficeKeepAwakePhase(.failed)
+                }
+                return false
+            }
+        }
+        officeKeepAwakeTask = task
+        let result = await task.value
+        officeKeepAwakeTask = nil
+        return result
+    }
+
+    private func restoreOfficeKeepAwake(generation operationGeneration: UInt64, allowStopping: Bool = false) async throws {
+        guard officeKeepAwakePreferences.hasOriginal else { return }
+        guard let original = officeKeepAwakePreferences.original else {
+            throw RuntimeError.adbCommandFailed("读取唤醒策略恢复记录")
+        }
+        let output = try await officeKeepAwakeCommand(
+            OfficeKeepAwakeCommands.restore(original), generation: operationGeneration, allowStopping: allowStopping
+        )
+        let marker = String(decoding: output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard marker == "MACDORA_OFFICE_AWAKE_RESTORED" || marker == "MACDORA_OFFICE_AWAKE_EXTERNAL" else {
+            throw RuntimeError.adbCommandFailed("确认 Android 冻结策略已恢复")
+        }
+        officeKeepAwakePreferences.original = nil
     }
 
     var containerPreferences: ContainerPreferences {
@@ -2078,13 +2222,16 @@ final class RuntimeController: SystemPluginHostBridge {
         activeOperations.removeAll()
         let preparing = preparingTask; let starting = startingTask
         let installing = installingTask; let opening = openingTask
+        let officeKeepAwake = officeKeepAwakeTask
         preparing?.cancel(); starting?.cancel(); installing?.cancel(); opening?.cancel()
+        officeKeepAwake?.cancel()
         updateState(.stopping)
         let task = Task { [self] in
             _ = try? await preparing?.value
             _ = try? await starting?.value
             _ = try? await installing?.value
             _ = try? await opening?.value
+            _ = await officeKeepAwake?.value
             preparingTask = nil; startingTask = nil; installingTask = nil
             let completed = await cleanUpOwnedRuntime()
             isStopping = false
@@ -2592,6 +2739,10 @@ final class RuntimeController: SystemPluginHostBridge {
                             guard isOperationCurrent(operationGeneration), !isStopping else {
                                 throw CancellationError()
                             }
+                            _ = await reconcileOfficeKeepAwake()
+                            guard isOperationCurrent(operationGeneration), !isStopping else {
+                                throw CancellationError()
+                            }
                             updateState(.ready)
                             await pluginManager.handleRuntimeBecameReady()
                             return
@@ -3076,6 +3227,8 @@ final class RuntimeController: SystemPluginHostBridge {
             return
         }
         emulatorProcess = nil
+        holdOfficeKeepAwakeActivity(false)
+        setOfficeKeepAwakePhase(officeKeepAwakePreferences.enabled ? .waitingForRuntime : .off)
         bootedCameraEnabled = nil
         inputHelperInstalled = false
         inputHelperInstallTask?.cancel()
@@ -3186,11 +3339,30 @@ final class RuntimeController: SystemPluginHostBridge {
     }
 
     private func performRuntimeCleanup() async -> Bool {
+        // Cleanup also occurs on a camera configuration restart, outside stop().
+        // Close this entry point to new toggles and drain any old guest mutation.
+        let officeKeepAwake = officeKeepAwakeTask
+        officeKeepAwake?.cancel()
+        if officeKeepAwakePreferences.hasOriginal { setOfficeKeepAwakePhase(.applying) }
+        _ = await officeKeepAwake?.value
         inputHelperInstalled = false
         inputHelperInstallTask?.cancel()
         inputHelperInstallTask = nil
         await pluginManager.handleRuntimeStopping()
         await closeDisplay()
+        // Only restore through the still-owned, live transport, before stopping it.
+        // A failed restore retains its recovery lease for the next owned startup.
+        if emulatorProcess?.isRunning == true, adbServerProcess?.isRunning == true {
+            do {
+                try await restoreOfficeKeepAwake(generation: generation, allowStopping: true)
+            } catch {
+                setOfficeKeepAwakePhase(.failed)
+            }
+        }
+        holdOfficeKeepAwakeActivity(false)
+        if officeKeepAwakePhase != .failed {
+            setOfficeKeepAwakePhase(officeKeepAwakePreferences.enabled ? .waitingForRuntime : .off)
+        }
         let pending = unreapedProcesses
         unreapedProcesses.removeAll()
         _ = await stopProcessesWithoutBlockingMainActor(pending)

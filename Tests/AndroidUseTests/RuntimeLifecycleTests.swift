@@ -3,6 +3,204 @@ import XCTest
 
 @MainActor
 final class RuntimeLifecycleTests: XCTestCase {
+    func testOfficeKeepAwakeDefaultsOffAndNeverRunsGuestCommandsWithoutOptIn() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        XCTAssertEqual(fixture.controller.officeKeepAwakeStatus, .off)
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        _ = await fixture.controller.stop()
+        XCTAssertEqual(fixture.registry.officeCommands, [])
+        XCTAssertFalse(fixture.controller.isOfficeKeepAwakeActivityHeld)
+    }
+
+    func testOfficeKeepAwakeSavedWhileStoppedAppliesBeforeReadyAndSurvivesDisplayClose() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        var prefs = fixture.controller.containerPreferences
+        prefs.keepWarmInBackground = false
+        fixture.controller.containerPreferences = prefs
+        XCTAssertFalse(fixture.controller.shouldKeepRuntimeInBackground)
+        let saved = await fixture.controller.setOfficeKeepAwakeEnabled(true)
+        XCTAssertTrue(saved)
+        XCTAssertEqual(fixture.controller.officeKeepAwakeStatus.phase, .waitingForRuntime)
+        XCTAssertTrue(fixture.controller.shouldKeepRuntimeInBackground)
+        XCTAssertEqual(fixture.registry.officeCommands, [])
+        var phaseAtReady: OfficeKeepAwakePhase?
+        fixture.controller.onState = { state in
+            if state == .ready { phaseAtReady = fixture.controller.officeKeepAwakeStatus.phase }
+        }
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        XCTAssertEqual(phaseAtReady, .active)
+        XCTAssertEqual(fixture.registry.officeCommands, ["inspect", "apply"])
+        XCTAssertEqual(fixture.registry.freezerSetting, "disabled")
+        XCTAssertTrue(fixture.controller.isOfficeKeepAwakeActivityHeld)
+        _ = try await fixture.controller.openDisplay()
+        await fixture.controller.closeDisplay()
+        XCTAssertEqual(fixture.controller.state, .ready)
+        XCTAssertEqual(fixture.controller.officeKeepAwakeStatus.phase, .active)
+        XCTAssertTrue(fixture.controller.isOfficeKeepAwakeActivityHeld)
+        XCTAssertEqual(fixture.registry.emulatorArguments.count, 1)
+        _ = await fixture.controller.stop()
+        XCTAssertEqual(fixture.registry.freezerSetting, "null")
+        XCTAssertFalse(fixture.controller.isOfficeKeepAwakeActivityHeld)
+        XCTAssertFalse(fixture.officePreferences.hasOriginal)
+        XCTAssertTrue(fixture.controller.officeKeepAwakeStatus.enabled, "Stopping must preserve the user's opt-in.")
+    }
+
+    func testOfficeKeepAwakeLiveToggleRestoresOriginalSettingAndReleasesHostActivity() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        fixture.registry.freezerSetting = "enabled"
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        let enabled = await fixture.controller.setOfficeKeepAwakeEnabled(true)
+        XCTAssertTrue(enabled)
+        XCTAssertEqual(fixture.officePreferences.original, OfficeFreezerSnapshot(setting: .enabled, inUse: true))
+        let disabled = await fixture.controller.setOfficeKeepAwakeEnabled(false)
+        XCTAssertTrue(disabled)
+        XCTAssertEqual(fixture.registry.freezerSetting, "enabled")
+        XCTAssertEqual(fixture.controller.officeKeepAwakeStatus, .off)
+        XCTAssertFalse(fixture.controller.isOfficeKeepAwakeActivityHeld)
+        XCTAssertFalse(fixture.officePreferences.hasOriginal)
+        _ = await fixture.controller.stop()
+    }
+
+    func testOfficeKeepAwakeFailureRollsBackAndUnconfirmedRestoreRetainsLease() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        fixture.registry.failOfficeApply = true
+        let applied = await fixture.controller.setOfficeKeepAwakeEnabled(true)
+        XCTAssertFalse(applied)
+        XCTAssertEqual(fixture.controller.officeKeepAwakeStatus.phase, .failed)
+        XCTAssertEqual(fixture.registry.freezerSetting, "null", "Partial guest changes must roll back.")
+        XCTAssertFalse(fixture.controller.isOfficeKeepAwakeActivityHeld)
+        fixture.registry.failOfficeApply = false
+        let retried = await fixture.controller.setOfficeKeepAwakeEnabled(true)
+        XCTAssertTrue(retried)
+        fixture.registry.failOfficeRestore = true
+        let restored = await fixture.controller.setOfficeKeepAwakeEnabled(false)
+        XCTAssertFalse(restored)
+        XCTAssertEqual(fixture.controller.officeKeepAwakeStatus.phase, .failed)
+        XCTAssertTrue(fixture.officePreferences.hasOriginal)
+        XCTAssertFalse(fixture.controller.isOfficeKeepAwakeActivityHeld)
+        _ = await fixture.controller.stop()
+        XCTAssertTrue(fixture.officePreferences.hasOriginal)
+        fixture.registry.failOfficeRestore = false
+        try await fixture.controller.start()
+        XCTAssertEqual(fixture.registry.freezerSetting, "null")
+        XCTAssertFalse(fixture.officePreferences.hasOriginal)
+        XCTAssertEqual(fixture.controller.officeKeepAwakeStatus, .off)
+        _ = await fixture.controller.stop()
+    }
+
+    func testOfficeKeepAwakeCrashRecoveryAndExternalChangePreservation() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        fixture.officePreferences.original = OfficeFreezerSnapshot(setting: .absent, inUse: true)
+        fixture.registry.freezerSetting = "disabled"
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        XCTAssertEqual(fixture.registry.officeCommands, ["restore"])
+        XCTAssertFalse(fixture.officePreferences.hasOriginal)
+        _ = await fixture.controller.setOfficeKeepAwakeEnabled(true)
+        fixture.registry.freezerSetting = "device_default"
+        let restored = await fixture.controller.setOfficeKeepAwakeEnabled(false)
+        XCTAssertTrue(restored)
+        XCTAssertEqual(fixture.registry.freezerSetting, "device_default", "Do not overwrite a later external policy change.")
+        XCTAssertFalse(fixture.officePreferences.hasOriginal)
+        _ = await fixture.controller.stop()
+    }
+
+    func testOfficeKeepAwakeRejectsUnknownGuestStateAndCorruptRecoveryRecordWithoutWrites() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        fixture.registry.freezerSetting = "unknown_value"
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        let enabled = await fixture.controller.setOfficeKeepAwakeEnabled(true)
+        XCTAssertFalse(enabled)
+        XCTAssertEqual(fixture.registry.officeCommands, ["inspect"])
+        XCTAssertEqual(fixture.registry.freezerSetting, "unknown_value")
+        XCTAssertFalse(fixture.officePreferences.hasOriginal)
+        _ = await fixture.controller.setOfficeKeepAwakeEnabled(false)
+        let preferences = fixture.officePreferences
+        preferences.defaults.set(Data("invalid record".utf8), forKey: preferences.key + ".original")
+        let corrupted = await fixture.controller.setOfficeKeepAwakeEnabled(true)
+        XCTAssertFalse(corrupted)
+        XCTAssertEqual(fixture.registry.officeCommands, ["inspect"])
+        XCTAssertTrue(preferences.hasOriginal)
+        XCTAssertNil(preferences.original)
+        _ = await fixture.controller.stop()
+    }
+
+    func testOfficeKeepAwakeStopDrainsCancelledApplyBeforeRestoreAndCannotReapply() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        let gate = LifecycleGate()
+        fixture.registry.officeApplyGate = gate
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        let enabling = Task { await fixture.controller.setOfficeKeepAwakeEnabled(true) }
+        await gate.waitUntilEntered()
+        let stopping = Task { await fixture.controller.stop() }
+        while fixture.controller.state != .stopping { await Task.yield() }
+        let rejected = await fixture.controller.setOfficeKeepAwakeEnabled(false)
+        XCTAssertFalse(rejected)
+        await gate.release()
+        let enabled = await enabling.value
+        let stopped = await stopping.value
+        XCTAssertFalse(enabled)
+        XCTAssertTrue(stopped)
+        XCTAssertEqual(fixture.registry.officeCommands, ["inspect", "apply", "restore"])
+        XCTAssertEqual(fixture.registry.freezerSetting, "null")
+        XCTAssertFalse(fixture.controller.isOfficeKeepAwakeActivityHeld)
+        XCTAssertFalse(fixture.officePreferences.hasOriginal)
+    }
+
+    func testOfficeKeepAwakeReleasesHostActivityOnUnexpectedEmulatorExit() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        _ = await fixture.controller.setOfficeKeepAwakeEnabled(true)
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        fixture.registry.emulator?.finish()
+        while fixture.controller.isOfficeKeepAwakeActivityHeld { await Task.yield() }
+        XCTAssertTrue(fixture.officePreferences.hasOriginal, "A dead transport cannot confirm restoration.")
+        XCTAssertEqual(fixture.controller.officeKeepAwakeStatus.phase, .waitingForRuntime)
+        _ = await fixture.controller.stop()
+    }
+
+    func testOfficeKeepAwakeCameraRestartDrainsApplyBeforeRestoreAndNewStartup() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        let gate = LifecycleGate()
+        fixture.registry.officeApplyGate = gate
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        let enabling = Task { await fixture.controller.setOfficeKeepAwakeEnabled(true) }
+        await gate.waitUntilEntered()
+        let cleanupEntered = expectation(description: "camera restart entered keep-awake cleanup")
+        fixture.controller.onOfficeKeepAwakeChanged = { cleanupEntered.fulfill() }
+        fixture.controller.cameraEnabled.toggle()
+        let restart = Task { try await fixture.controller.start() }
+        await fulfillment(of: [cleanupEntered], timeout: 2)
+        fixture.controller.onOfficeKeepAwakeChanged = nil
+        fixture.registry.officeApplyGate = nil
+        await gate.release()
+        let enabled = await enabling.value
+        XCTAssertFalse(enabled)
+        try await restart.value
+        XCTAssertEqual(fixture.registry.officeCommands, ["inspect", "apply", "restore", "inspect", "apply"])
+        XCTAssertEqual(fixture.registry.emulatorArguments.count, 2)
+        XCTAssertEqual(fixture.controller.officeKeepAwakeStatus.phase, .active)
+        XCTAssertTrue(fixture.controller.isOfficeKeepAwakeActivityHeld)
+        _ = await fixture.controller.stop()
+    }
+
     func testDisplayLayoutPreferenceDefaultsToHorizontalAndPreservesLegacyVertical() throws {
         let legacyVertical = Data(#"{"resolutionPreset":"1080p","targetFPS":60,"keepWarmInBackground":true,"clipboardSyncEnabled":true,"directIMEEnabled":true,"cameraEnabled":true,"tabletMode":false}"#.utf8)
         let decodedVertical = try JSONDecoder().decode(ContainerPreferences.self, from: legacyVertical)
@@ -413,6 +611,11 @@ private final class LifecycleRegistry: @unchecked Sendable {
     var failNextCatalogRefresh = false
     var failNextGuestEnvironmentSetup = false
     var inputHelperRequiresUninstallBeforeInstall = false
+    var officeCommands: [String] = []
+    var freezerSetting = "null"
+    var failOfficeApply = false
+    var failOfficeRestore = false
+    var officeApplyGate: LifecycleGate?
     func withLock<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
 }
 
@@ -440,6 +643,41 @@ private final class LifecycleRunner: ProcessExecuting, @unchecked Sendable {
     }
     func run(_ invocation: ProcessInvocation) async throws -> ProcessResult {
         let args = invocation.arguments
+        if let script = args.last, script.contains("# macdora-office-awake:") {
+            if script.contains("# macdora-office-awake:apply"), let gate = registry.officeApplyGate {
+                await gate.pause()
+            }
+            return registry.withLock {
+                var output = ""
+                var status: Int32 = 0
+                if script.contains("# macdora-office-awake:inspect") {
+                    registry.officeCommands.append("inspect")
+                    output = "\(registry.freezerSetting)\n\(registry.freezerSetting == "disabled" ? "false" : "true")\n"
+                } else if script.contains("# macdora-office-awake:apply") {
+                    registry.officeCommands.append("apply")
+                    registry.freezerSetting = "disabled"
+                    status = registry.failOfficeApply ? 1 : 0
+                    output = "MACDORA_OFFICE_AWAKE_APPLIED\n"
+                } else {
+                    registry.officeCommands.append("restore")
+                    if registry.failOfficeRestore {
+                        status = 1
+                    } else if registry.freezerSetting != "disabled" {
+                        output = "MACDORA_OFFICE_AWAKE_EXTERNAL\n"
+                    } else {
+                        if script.contains("settings delete global cached_apps_freezer") {
+                            registry.freezerSetting = "null"
+                        } else if script.contains("settings put global cached_apps_freezer enabled") {
+                            registry.freezerSetting = "enabled"
+                        } else if script.contains("settings put global cached_apps_freezer device_default") {
+                            registry.freezerSetting = "device_default"
+                        }
+                        output = "MACDORA_OFFICE_AWAKE_RESTORED\n"
+                    }
+                }
+                return ProcessResult(exitCode: status, stdout: Data(output.utf8), timedOut: false)
+            }
+        }
         if args.contains("uninstall"), let package = args.last {
             registry.withLock {
                 _ = registry.installedPackages.remove(package)
@@ -622,6 +860,9 @@ private struct LifecycleFixture {
     let registry = LifecycleRegistry()
     let terminator: LifecycleTerminator
     let controller: RuntimeController
+    var officePreferences: OfficeKeepAwakePreferences {
+        OfficeKeepAwakePreferences(rootURL: controller.paths.rootURL, defaults: UserDefaults(suiteName: defaultsName)!)
+    }
     init(stopGate: LifecycleGate? = nil, closeGate: LifecycleGate? = nil, androidAPI: Int = 35) throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("android-use-lifecycle-\(UUID().uuidString)")
         defaultsName = "android-use-lifecycle-\(UUID().uuidString)"

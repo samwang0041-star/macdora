@@ -1136,6 +1136,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     var onSettings: (() -> Void)?
     var onToggleCamera: ((Bool) -> Void)?
     var onUpdatePreferences: ((ContainerPreferences) -> Void)?
+    var onToggleOfficeKeepAwake: ((Bool) -> Void)?
     var onClearCache: (() -> Void)?
     var onRevealData: (() -> Void)?
     var onImportDeveloperPlugin: (() -> Void)?
@@ -1163,6 +1164,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     private var activePackage: String?
     private var currentTelemetry: ContainerTelemetry = .idle
     private var currentPreferences: ContainerPreferences = .default
+    private var currentOfficeKeepAwake: OfficeKeepAwakeStatus = .off
     private var currentReadiness: [ReadinessCheckItem] = []
     private var cameraEnabled = true
     private var canChangeCamera = true
@@ -1171,6 +1173,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     private weak var pluginManager: SystemPluginManager?
     private(set) var activePluginDetailID: String?
     private var locationWorkspaceViews: [String: DeveloperLocationWorkspaceView] = [:]
+    private var agentWorkspaceViews: [String: HostServiceAgentWorkspaceView] = [:]
     private weak var livePluginStatusLabel: NSTextField?
     private weak var livePluginToggleButton: TFButton?
     private(set) var currentUpdateState: MacdoraUpdateState = .idle(lastCheckedAt: nil)
@@ -1575,6 +1578,9 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         for ws in locationWorkspaceViews.values {
             ws.refreshTheme()
         }
+        for ws in agentWorkspaceViews.values {
+            ws.refreshTheme()
+        }
         activeRuntimeButton?.needsDisplay = true
         refreshSidebarState()
     }
@@ -1643,10 +1649,43 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     }
 
     func refreshPluginsSection() {
+        var reusedAgentDetail = false
         if let pm = pluginManager {
             for existingID in Array(locationWorkspaceViews.keys) where !pm.isPluginInstalled(existingID) {
                 locationWorkspaceViews[existingID]?.removeFromSuperview()
                 locationWorkspaceViews.removeValue(forKey: existingID)
+            }
+            for existingID in Array(agentWorkspaceViews.keys)
+                where !pm.isPluginInstalled(existingID) || !pm.isPluginEnabled(existingID) {
+                agentWorkspaceViews[existingID]?.removeFromSuperview()
+                agentWorkspaceViews.removeValue(forKey: existingID)
+            }
+            if selectedSection == .plugins,
+               let detailID = activePluginDetailID,
+               pm.isPluginEnabled(detailID),
+               let host = pm.hostServicePlugin(for: detailID),
+               let ws = agentWorkspaceViews[detailID],
+               ws.pluginIdentity == ObjectIdentifier(host),
+               ws.superview === pageStack {
+                refreshLivePluginControls(for: detailID)
+                reusedAgentDetail = true
+            } else if selectedSection == .plugins,
+                      let detailID = activePluginDetailID,
+                      pm.isPluginEnabled(detailID),
+                      let host = pm.hostServicePlugin(for: detailID),
+                      let stale = agentWorkspaceViews.removeValue(forKey: detailID) {
+                let staleIndex = pageStack.arrangedSubviews.firstIndex(of: stale)
+                let replacement = HostServiceAgentWorkspaceView(plugin: host)
+                agentWorkspaceViews[detailID] = replacement
+                stale.removeFromSuperview()
+                if let staleIndex {
+                    pageStack.insertArrangedSubview(replacement, at: staleIndex)
+                    replacement.widthAnchor.constraint(equalTo: pageStack.widthAnchor).isActive = true
+                } else {
+                    addFullWidth(replacement, to: pageStack)
+                }
+                refreshLivePluginControls(for: detailID)
+                reusedAgentDetail = true
             }
         }
         if let detailID = activePluginDetailID,
@@ -1664,6 +1703,9 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             }
             return
         }
+        if reusedAgentDetail {
+            return
+        }
         if selectedSection == .plugins || selectedSection == .settings || selectedSection == .serving {
             rebuildPageContent()
         }
@@ -1671,6 +1713,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
 
     private func refreshLivePluginControls(for id: String) {
         guard let manager = pluginManager else { return }
+        agentWorkspaceViews[id]?.controller.hostStateDidChange()
         if let label = livePluginStatusLabel {
             label.stringValue = manager.pluginStatusText(for: id)
             let hasError = manager.lastError(for: id) != nil || manager.pluginHealthStatus(for: id).isDegraded
@@ -1774,19 +1817,22 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         canChangeCamera: Bool,
         rootPath: String,
         preferences: ContainerPreferences,
-        readiness: [ReadinessCheckItem]
+        readiness: [ReadinessCheckItem],
+        officeKeepAwake: OfficeKeepAwakeStatus = .off
     ) {
         let tabletModeChanged = self.currentPreferences.tabletMode != preferences.tabletMode
         let settingsChanged =
             self.cameraEnabled != cameraEnabled ||
             self.canChangeCamera != canChangeCamera ||
             self.rootPath != rootPath ||
-            self.currentPreferences != preferences
+            self.currentPreferences != preferences ||
+            self.currentOfficeKeepAwake != officeKeepAwake
         let readinessChanged = self.currentReadiness != readiness
         self.cameraEnabled = cameraEnabled
         self.canChangeCamera = canChangeCamera
         self.rootPath = rootPath
         self.currentPreferences = preferences
+        self.currentOfficeKeepAwake = officeKeepAwake
         self.currentReadiness = readiness
         if selectedSection == .settings && settingsChanged {
             rebuildPageContent()
@@ -2178,6 +2224,26 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             ws.syncFromTelemetry(locPlugin.currentTelemetrySnapshot(), recenterMap: false)
         } else if let extPlugin = pm.externalScriptPlugin(for: item.id) {
             let ws = ExternalScriptPluginWorkspaceView(plugin: extPlugin, hostBridge: pm.hostBridge)
+            addFullWidth(ws, to: pageStack)
+        } else if item.isAgentHostService,
+                  let hostPlugin = pm.hostServicePlugin(for: item.id),
+                  hostPlugin.manifest.entrypoints.agentMCP != nil {
+            let ws: HostServiceAgentWorkspaceView
+            if let existing = agentWorkspaceViews[item.id] {
+                if existing.pluginIdentity == ObjectIdentifier(hostPlugin) {
+                    existing.removeFromSuperview()
+                    ws = existing
+                } else {
+                    existing.removeFromSuperview()
+                    let replacement = HostServiceAgentWorkspaceView(plugin: hostPlugin)
+                    agentWorkspaceViews[item.id] = replacement
+                    ws = replacement
+                }
+            } else {
+                let created = HostServiceAgentWorkspaceView(plugin: hostPlugin)
+                agentWorkspaceViews[item.id] = created
+                ws = created
+            }
             addFullWidth(ws, to: pageStack)
         }
     }
@@ -3104,6 +3170,33 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             self.onUpdatePreferences?(prefs)
         }
 
+        let officeKeepAwakeToggle = TFToggleSwitch(isOn: currentOfficeKeepAwake.enabled)
+        officeKeepAwakeToggle.identifier = NSUserInterfaceItemIdentifier("office-keep-awake-toggle")
+        officeKeepAwakeToggle.setAccessibilityLabel("办公实例保持唤醒")
+        officeKeepAwakeToggle.isEnabled = !currentState.isBusy && currentOfficeKeepAwake.phase != .applying
+        officeKeepAwakeToggle.onToggle = { [weak self] enabled in
+            self?.onToggleOfficeKeepAwake?(enabled)
+        }
+        let officeKeepAwakeControl: NSView
+        if currentOfficeKeepAwake.phase == .failed {
+            let retry = TFButton(title: "重试", variant: .secondary, size: .sm)
+            retry.identifier = NSUserInterfaceItemIdentifier("office-keep-awake-retry")
+            retry.setAccessibilityLabel("重试办公实例保持唤醒设置")
+            retry.isEnabled = !currentState.isBusy
+            retry.onClick = { [weak self] in
+                guard let self else { return }
+                self.onToggleOfficeKeepAwake?(self.currentOfficeKeepAwake.enabled)
+            }
+            let controls = NSStackView(views: [retry, officeKeepAwakeToggle])
+            controls.orientation = .horizontal
+            controls.alignment = .centerY
+            controls.spacing = 8
+            controls.translatesAutoresizingMaskIntoConstraints = false
+            officeKeepAwakeControl = controls
+        } else {
+            officeKeepAwakeControl = officeKeepAwakeToggle
+        }
+
         let imeToggle = TFToggleSwitch(isOn: currentPreferences.directIMEEnabled)
         imeToggle.onToggle = { [weak self] enabled in
             guard let self else { return }
@@ -3135,6 +3228,11 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                     title: "后台常驻",
                     detail: "关闭窗口后保持运行，下次打开更快",
                     control: keepWarmToggle
+                ),
+                makeSettingRow(
+                    title: "办公实例保持唤醒",
+                    detail: currentOfficeKeepAwake.detail,
+                    control: officeKeepAwakeControl
                 ),
                 makeSettingRow(
                     title: "原生中文输入",

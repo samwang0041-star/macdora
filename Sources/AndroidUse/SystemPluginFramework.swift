@@ -14,6 +14,7 @@ struct SystemPluginEntrypoints: Codable, Equatable, Sendable {
     var presetsFile: String?
     var configFile: String?
     var hostService: String?
+    var agentMCP: String?
 
     init(
         onEnable: String? = nil,
@@ -25,7 +26,8 @@ struct SystemPluginEntrypoints: Codable, Equatable, Sendable {
         tickIntervalMs: Int? = nil,
         presetsFile: String? = nil,
         configFile: String? = nil,
-        hostService: String? = nil
+        hostService: String? = nil,
+        agentMCP: String? = nil
     ) {
         self.onEnable = onEnable
         self.onDisable = onDisable
@@ -37,10 +39,11 @@ struct SystemPluginEntrypoints: Codable, Equatable, Sendable {
         self.presetsFile = presetsFile
         self.configFile = configFile
         self.hostService = hostService
+        self.agentMCP = agentMCP
     }
 
     var allRelativePaths: [String] {
-        [onEnable, onDisable, onRuntimeReady, onAppLaunch, onLocationUpdate, onTick, presetsFile, configFile, hostService]
+        [onEnable, onDisable, onRuntimeReady, onAppLaunch, onLocationUpdate, onTick, presetsFile, configFile, hostService, agentMCP]
             .compactMap { $0 }
     }
 
@@ -65,7 +68,8 @@ struct SystemPluginManifest: Codable, Equatable, Identifiable, Sendable {
         "ui.map.workspace",
         "guest.shell",
         "lifecycle.hooks",
-        "host.service"
+        "host.service",
+        "agent.readonly"
     ]
     static let exclusiveCapabilities: Set<String> = [
         "hardware.gnss",
@@ -85,6 +89,15 @@ struct SystemPluginManifest: Codable, Equatable, Identifiable, Sendable {
     var capabilities: [String]
     var driverType: String
     var entrypoints: SystemPluginEntrypoints
+    var agentInstructions: String? = nil
+    var agentSummary: String? = nil
+
+    static func isValidAgentText(_ text: String, maximumBytes: Int) -> Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && text.utf8.count <= maximumBytes
+            && !text.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0)
+                && $0 != "\n" && $0 != "\r" && $0 != "\t" }
+    }
 
     static func isValidPluginIdentifier(_ id: String) -> Bool {
         id.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{2,80}$"#, options: .regularExpression) != nil
@@ -282,7 +295,15 @@ struct SystemPluginCatalogItem: Equatable, Identifiable, Sendable {
     var downloadSourceDescription: String
 
     var hasDedicatedWorkspace: Bool {
-        driverType == "hardware_gnss_location" || driverType == "external_script"
+        driverType == "hardware_gnss_location"
+            || driverType == "external_script"
+            || isAgentHostService
+    }
+
+    var isAgentHostService: Bool {
+        driverType == "host_service"
+            && capabilities.contains("host.service")
+            && capabilities.contains("agent.readonly")
     }
 
     static let developerLocationID = "builtin.developer.location"
@@ -314,6 +335,11 @@ struct SystemPluginCatalogItem: Equatable, Identifiable, Sendable {
             downloadSourceDescription: "github.com/samwang0041-star/macdora"
         )
     ]
+}
+
+struct SystemPluginPackageIdentity: Equatable, Sendable {
+    let bundleURL: URL
+    let manifest: SystemPluginManifest
 }
 
 // MARK: - Host Context Provided to Hot-Plugged Plugins
@@ -954,6 +980,15 @@ enum SystemPluginPackageFactory {
         guard Set(manifest.capabilities).isSubset(of: SystemPluginManifest.supportedCapabilities) else {
             throw SystemPluginPackageError.incompatibleManifest("capabilities")
         }
+        for (text, maximum) in [(manifest.agentInstructions, 16_384), (manifest.agentSummary, 240)] {
+            if let text {
+                guard manifest.driverType == "host_service",
+                      manifest.capabilities.contains("agent.readonly"),
+                      SystemPluginManifest.isValidAgentText(text, maximumBytes: maximum) else {
+                    throw SystemPluginPackageError.incompatibleManifest("Agent setup metadata")
+                }
+            }
+        }
         if manifest.driverType == "external_script" && manifest.entrypoints.hasGuestShellHooks {
             guard manifest.capabilities.contains("guest.shell") || manifest.capabilities.contains("lifecycle.hooks") else {
                 throw SystemPluginPackageError.incompatibleManifest("missing guest.shell capability for hook scripts")
@@ -981,6 +1016,36 @@ enum SystemPluginPackageFactory {
                     "hostService must be a signed executable"
                 )
             }
+            if manifest.capabilities.contains("agent.readonly") {
+                guard let agentPath = manifest.entrypoints.agentMCP,
+                      !agentPath.isEmpty,
+                      !agentPath.contains(".."),
+                      !agentPath.hasPrefix("."),
+                      !agentPath.contains("/.") else {
+                    throw SystemPluginPackageError.incompatibleManifest(
+                        "agent.readonly requires entrypoints.agentMCP"
+                    )
+                }
+                let agentURL = root.appendingPathComponent(agentPath).standardizedFileURL
+                guard agentURL.path.hasPrefix(root.path + "/") else {
+                    throw SystemPluginPackageError.unsafePackageContent
+                }
+                do {
+                    _ = try HostServicePackageSnapshotter().snapshot(serviceURL: agentURL)
+                } catch {
+                    throw SystemPluginPackageError.incompatibleManifest(
+                        "agentMCP must be a signed executable"
+                    )
+                }
+            } else if manifest.entrypoints.agentMCP != nil {
+                throw SystemPluginPackageError.incompatibleManifest(
+                    "agentMCP requires agent.readonly capability"
+                )
+            }
+        } else if manifest.entrypoints.agentMCP != nil || manifest.capabilities.contains("agent.readonly") {
+            throw SystemPluginPackageError.incompatibleManifest(
+                "Agent entrypoints require host_service"
+            )
         }
 
         // 2. Enumerate ALL files (including hidden files) and enforce file count / size / symlink safety
@@ -1372,6 +1437,7 @@ final class SystemPluginManager {
     private var runtimeCapabilityReservations: [String: Set<String>] = [:]
     private var runtimeOperationWaiters: [CheckedContinuation<Void, Never>] = []
     private var pluginGenerations: [String: UInt64] = [:]
+    private var pluginPackageIdentities: [String: SystemPluginPackageIdentity] = [:]
 
     init(
         rootURL: URL,
@@ -1428,6 +1494,10 @@ final class SystemPluginManager {
 
     func hostServicePlugin(for id: String) -> HostServiceSystemPlugin? {
         installedPlugins[id] as? HostServiceSystemPlugin
+    }
+
+    func pluginPackageIdentity(for id: String) -> SystemPluginPackageIdentity? {
+        pluginPackageIdentities[id]
     }
 
     func pluginHealthStatus(for id: String) -> SystemPluginHealthState {
@@ -1566,6 +1636,11 @@ final class SystemPluginManager {
                     downloadSourceDescription: "本地 / 开发者插件目录"
                 )
             )
+        }
+        for index in items.indices {
+            if let installed = installedPlugins[items[index].id] {
+                items[index].capabilities = installed.manifest.capabilities
+            }
         }
         return items
     }
@@ -1774,6 +1849,10 @@ final class SystemPluginManager {
             )
             let newPlugin = createPluginInstance(manifest: manifest, bundleURL: destinationURL)
             installedPlugins[id] = newPlugin
+            pluginPackageIdentities[id] = SystemPluginPackageIdentity(
+                bundleURL: destinationURL,
+                manifest: manifest
+            )
             if shouldEnable {
                 guard await setPluginEnabledInternal(
                     id: id, enabled: true, generation: expectedGeneration, waitForRuntime: true
@@ -1830,6 +1909,10 @@ final class SystemPluginManager {
                         throw SystemPluginPackageError.operationFailed("更新未完成，设置已保留，请重新下载插件。")
                     }
                     installedPlugins[id] = prev
+                    pluginPackageIdentities[id] = SystemPluginPackageIdentity(
+                        bundleURL: destinationURL,
+                        manifest: prev.manifest
+                    )
                     if wasPreviouslyEnabled {
                         if let bridge = hostBridge {
                             await prev.activate(bridge: bridge)
@@ -1839,12 +1922,17 @@ final class SystemPluginManager {
                     }
                 } else {
                     installedPlugins.removeValue(forKey: id)
+                    pluginPackageIdentities.removeValue(forKey: id)
                     persistEnabled(id: id, enabled: false)
                 }
             } else if wasPreviouslyEnabled, let prev = previousPlugin {
                 // A failure before the provisional instance exists still leaves
                 // the old persisted enable intent to be restored.
                 installedPlugins[id] = prev
+                pluginPackageIdentities[id] = SystemPluginPackageIdentity(
+                    bundleURL: destinationURL,
+                    manifest: prev.manifest
+                )
                 if let bridge = hostBridge {
                     await prev.activate(bridge: bridge)
                 } else {
@@ -2065,6 +2153,7 @@ final class SystemPluginManager {
         // The ID can have used another driver in an earlier package version.
         DeveloperLocationPlugin.deleteStoredConfiguration(id: id, defaults: defaults)
         installedPlugins.removeValue(forKey: id)
+        pluginPackageIdentities.removeValue(forKey: id)
         var enabledSet = persistedEnabledPluginIDs()
         enabledSet.remove(id)
         savePersistedEnabledPluginIDs(enabledSet)
@@ -2079,6 +2168,7 @@ final class SystemPluginManager {
               pluginsRootURL.resolvingSymlinksInPath().path == pluginsRootURL.path else { return }
         let previousPlugins = installedPlugins
         var discovered: [String: any HotPluggableSystemPlugin] = [:]
+        var discoveredIdentities: [String: SystemPluginPackageIdentity] = [:]
         let enabledSet = persistedEnabledPluginIDs()
 
         if let entries = try? fileManager.contentsOfDirectory(
@@ -2105,10 +2195,15 @@ final class SystemPluginManager {
                 } else {
                     discovered[manifest.id] = createPluginInstance(manifest: manifest, bundleURL: url)
                 }
+                discoveredIdentities[manifest.id] = SystemPluginPackageIdentity(
+                    bundleURL: url.standardizedFileURL,
+                    manifest: manifest
+                )
             }
         }
 
         installedPlugins = discovered
+        pluginPackageIdentities = discoveredIdentities
 
         for (oldID, oldPlugin) in previousPlugins {
             let stillSameInstance = discovered[oldID] === oldPlugin

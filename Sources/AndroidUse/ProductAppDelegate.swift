@@ -56,6 +56,14 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         manager.onSettings = { [weak self] in self?.showSettings() }
         manager.onToggleCamera = { [weak self] enabled in self?.setCameraEnabled(enabled) }
         manager.onUpdatePreferences = { [weak self] prefs in self?.updateContainerPreferences(prefs) }
+        manager.onToggleOfficeKeepAwake = { [weak self] enabled in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let applied = await self.runtime.setOfficeKeepAwakeEnabled(enabled)
+                self.syncPreferencesToManager()
+                if !applied { self.manager.show(detail: "未能确认办公环境唤醒设置生效，请稍后重试。") }
+            }
+        }
         manager.onClearCache = { [weak self] in self?.clearContainerCache() }
         manager.onRevealData = { [weak self] in self?.revealData() }
         manager.onAppearanceChanged = { [weak self] in self?.applicationWindow?.refreshTheme() }
@@ -103,6 +111,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             self.syncPreferencesToManager()
             self.refreshTelemetry()
         }
+        runtime.onOfficeKeepAwakeChanged = { [weak self] in self?.syncPreferencesToManager() }
         runtime.onDisplayTerminated = { [weak self] in
             guard let self, self.stream != nil, !self.terminating else { return }
             let appTitle = self.resolvedAppMetadata(for: self.activePackage).title
@@ -792,7 +801,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             await previousOperation?.value
             guard self.displayGeneration == generation else { return }
             await self.runtime.closeDisplay()
-            if !self.runtime.containerPreferences.keepWarmInBackground {
+            if !self.runtime.shouldKeepRuntimeInBackground {
                 _ = await self.runtime.stop()
             }
             if !self.terminating, self.displayGeneration == generation {
@@ -915,7 +924,8 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             canChangeCamera: canChangeCamera,
             rootPath: runtime.rootURL.path,
             preferences: runtime.containerPreferences,
-            readiness: runtime.evaluateReadinessChecks(metalAvailable: metalAvailable)
+            readiness: runtime.evaluateReadinessChecks(metalAvailable: metalAvailable),
+            officeKeepAwake: runtime.officeKeepAwakeStatus
         )
     }
 

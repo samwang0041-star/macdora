@@ -152,6 +152,24 @@ struct HostServiceServiceFileSnapshot: Equatable, Sendable {
     let digest: String
 }
 
+struct HostServiceStartupTiming: Sendable {
+    let now: @Sendable () -> Duration
+    let sleep: @Sendable (Duration) async throws -> Void
+
+    static func live() -> HostServiceStartupTiming {
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        return HostServiceStartupTiming(
+            now: {
+                startedAt.duration(to: clock.now)
+            },
+            sleep: { duration in
+                try await clock.sleep(for: duration)
+            }
+        )
+    }
+}
+
 struct HostServiceFilesystemInspector: Sendable {
     func inspect(_ url: URL) throws -> stat {
         var info = stat()
@@ -446,6 +464,12 @@ enum JSONValue: Decodable, Equatable, Sendable {
 enum HostServiceHealthClient {
     static let responseLimit = 4 * 1024
 
+    #if DEBUG
+    static func connectForTesting(socketURL: URL, deadline: DispatchTime) -> Int32? {
+        connect(socketURL: socketURL, deadline: deadline)
+    }
+    #endif
+
     static func isValidPingResponse(
         _ data: Data,
         requestID: Int,
@@ -559,6 +583,12 @@ enum HostServiceHealthClient {
     private static func connect(socketURL: URL, deadline: DispatchTime) -> Int32? {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
+        var noSignal: Int32 = 1
+        guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal,
+                         socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            Darwin.close(fd)
+            return nil
+        }
         let flags = fcntl(fd, F_GETFL, 0)
         guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
             Darwin.close(fd)
@@ -705,6 +735,7 @@ struct HostServiceOwnedProcess: @unchecked Sendable {
     let configuration: HostServiceRuntimeConfiguration
     let handle: any OwnedProcessHandle
     let serviceSnapshot: HostServiceServiceFileSnapshot
+    let agentSnapshot: HostServiceServiceFileSnapshot?
     let environment: [String: String]
     let onExit: @Sendable (ProcessExit) -> Void
 }
@@ -1123,6 +1154,8 @@ enum HostServicePrivateStateStore {
 final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendable {
     static let fixedHealthError = "宿主服务健康检查失败，请重试。"
     static let fixedStartError = "宿主服务启动失败，请重试。"
+    static let standardStartupHealthBudget: TimeInterval = 5
+    static let agentStartupHealthBudget: TimeInterval = 35
 
     let manifest: SystemPluginManifest
     let bundleDirectoryURL: URL
@@ -1143,6 +1176,10 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
     private var lifecycleGeneration: UInt64 = 0
     private var isDeleted = false
     private weak var notificationBridge: SystemPluginHostBridge?
+    let agentControlStore: HostServiceAgentControlStore
+    let agentRPCClient: any HostServiceAgentRPCPerforming
+    private let startupHealthBudgetOverride: TimeInterval?
+    private let startupTiming: HostServiceStartupTiming
 
     private(set) var isEnabled = false
     private(set) var healthState: SystemPluginHealthState = .inactive
@@ -1173,11 +1210,18 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
         processExecuter: any ProcessExecuting = ProcessRunner(),
         processTerminator: any OwnedProcessTerminating = ProcessRunner(),
         supervisor: HostServiceSupervisorRegistry? = nil,
-        healthClient: HostServiceHealthProbe? = nil
+        healthClient: HostServiceHealthProbe? = nil,
+        startupHealthBudgetOverride: TimeInterval? = nil,
+        startupTiming: HostServiceStartupTiming? = nil
     ) {
         self.manifest = manifest
         self.bundleDirectoryURL = bundleDirectoryURL.standardizedFileURL
         self.rootURL = rootURL.resolvingSymlinksInPath().standardizedFileURL
+        self.agentControlStore = HostServiceAgentControlStore(
+            rootURL: rootURL,
+            pluginID: manifest.id
+        )
+        self.agentRPCClient = HostServiceAgentRPCClient()
         self.fileManager = fileManager
         self.processExecuter = processExecuter
         self.processTerminator = processTerminator
@@ -1189,6 +1233,8 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
                 instanceID: $2
             )
         }
+        self.startupHealthBudgetOverride = startupHealthBudgetOverride
+        self.startupTiming = startupTiming ?? .live()
     }
 
     func setEnabledWithoutBridge(_ enabled: Bool) async {
@@ -1210,6 +1256,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
 
     func setNotificationBridge(_ bridge: SystemPluginHostBridge?) {
         notificationBridge = bridge
+        ensureAgentControlDefaultIfNeeded()
     }
 
     func activate(bridge: SystemPluginHostBridge) async {
@@ -1511,7 +1558,17 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
                 throw HostServiceHealthError.notRunning
             }
             try preparePrivateDirectories(for: configuration)
+            let agentURL = agentMCPExecutableURL
             let serviceSnapshot = try snapshotter.snapshot(serviceURL: serviceURL)
+            let agentSnapshot = manifest.capabilities.contains("agent.readonly")
+                ? try snapshotter.snapshot(serviceURL: agentURL)
+                : nil
+            if manifest.capabilities.contains("agent.readonly") {
+                guard agentSnapshot != nil else {
+                    throw HostServiceHealthError.notRunning
+                }
+                _ = try agentControlStore.loadOrCreate()
+            }
             cleanupStoppedOwnerIfPresent()
             try removeStaleEndpointIfOwned(for: configuration)
             let environment = serviceEnvironment(bridge: bridge, configuration: configuration)
@@ -1539,6 +1596,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
                 configuration: configuration,
                 handle: launched,
                 serviceSnapshot: serviceSnapshot,
+                agentSnapshot: agentSnapshot,
                 environment: environment,
                 onExit: onExit
             )
@@ -1650,21 +1708,45 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
         owned: HostServiceOwnedProcess,
         generation: UInt64
     ) async -> Bool {
-        let deadline = ContinuousClock.now + .seconds(5)
-        while ContinuousClock.now < deadline {
+        let budget = startupHealthBudget
+        let deadline = startupTiming.now() + .seconds(budget)
+        while startupTiming.now() < deadline {
             guard isCurrent(generation), owned.handle.isRunning else { return false }
             if await validateHealth(owned) {
                 return isCurrent(generation)
             }
-            guard await sleepAfterRuntimeCheck() else { return false }
+            let remaining = max(
+                .zero,
+                deadline - startupTiming.now()
+            )
+            guard remaining > .zero,
+                  await sleepAfterRuntimeCheck(upTo: remaining) else {
+                return false
+            }
         }
         return false
     }
 
-    private func sleepAfterRuntimeCheck() async -> Bool {
+    private var startupHealthBudget: TimeInterval {
+        if let startupHealthBudgetOverride {
+            return startupHealthBudgetOverride
+        }
+        return manifest.capabilities.contains("agent.readonly")
+            && manifest.entrypoints.agentMCP != nil
+            ? Self.agentStartupHealthBudget
+            : Self.standardStartupHealthBudget
+    }
+
+    #if DEBUG
+    func startupHealthBudgetForTesting() -> TimeInterval {
+        startupHealthBudget
+    }
+    #endif
+
+    private func sleepAfterRuntimeCheck(upTo remaining: Duration) async -> Bool {
         guard !Task.isCancelled else { return false }
         do {
-            try await Task.sleep(for: .milliseconds(100))
+            try await startupTiming.sleep(min(Duration.milliseconds(100), remaining))
             return !Task.isCancelled
         } catch {
             return false
@@ -1684,6 +1766,13 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
             )
             guard try snapshotter.snapshot(serviceURL: serviceURL) == owned.serviceSnapshot else {
                 return false
+            }
+            if manifest.capabilities.contains("agent.readonly") {
+                guard let agentSnapshot = owned.agentSnapshot,
+                      try snapshotter.snapshot(serviceURL: agentMCPExecutableURL)
+                        == agentSnapshot else {
+                    return false
+                }
             }
         } catch {
             return false
@@ -1734,6 +1823,9 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
             "MACDORA_PLUGIN_INSTANCE_ID": configuration.instanceID.uuidString,
             "MACDORA_HOST_PID": String(configuration.hostPID)
         ]
+        if manifest.capabilities.contains("agent.readonly") {
+            environment["MACDORA_AGENT_CONTROL_PATH"] = agentControlStore.fileURL.path
+        }
         if manifest.capabilities.contains("guest.shell") {
             for name in [
                 "MACDORA_ADB_PATH",
@@ -1747,6 +1839,121 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
             }
         }
         return environment
+    }
+
+    var agentControlPath: URL? {
+        manifest.capabilities.contains("agent.readonly") ? agentControlStore.fileURL : nil
+    }
+
+    #if DEBUG
+    func agentServiceEnvironmentForTesting(
+        bridge: SystemPluginHostBridge
+    ) -> [String: String] {
+        serviceEnvironment(
+            bridge: bridge,
+            configuration: HostServiceRuntimeConfiguration.make(
+                rootURL: rootURL,
+                pluginID: manifest.id
+            )
+        )
+    }
+    #endif
+
+    @discardableResult
+    func ensureAgentControlDefaultIfNeeded() -> HostServiceAgentControlRecord? {
+        guard manifest.capabilities.contains("agent.readonly"),
+              FileManager.default.fileExists(atPath: rootURL.path) else {
+            return nil
+        }
+        return try? agentControlStore.loadOrCreate()
+    }
+
+    #if DEBUG
+    func installAgentTestRuntime(handle: any OwnedProcessHandle) {
+        let configuration = HostServiceRuntimeConfiguration.make(
+            rootURL: rootURL,
+            pluginID: manifest.id
+        )
+        try? preparePrivateDirectories(for: configuration)
+        let serviceURL = currentServiceFileURL ?? agentMCPExecutableURL
+        let snapshot = try? snapshotter.snapshot(serviceURL: serviceURL)
+        guard let snapshot, currentServiceFileURL != nil else { return }
+        let agentSnapshot = try? snapshotter.snapshot(serviceURL: agentMCPExecutableURL)
+        guard let agentSnapshot else { return }
+        isEnabled = true
+        ownedProcess = HostServiceOwnedProcess(
+            rootURL: rootURL,
+            pluginID: manifest.id,
+            configuration: configuration,
+            handle: handle,
+            serviceSnapshot: snapshot,
+            agentSnapshot: agentSnapshot,
+            environment: [:],
+            onExit: { _ in }
+        )
+        healthState = .healthy
+        runtimeStatusSummary = "已启用 · 宿主服务运行中"
+    }
+    #endif
+
+    var agentMCPExecutableURL: URL {
+        guard let relativePath = manifest.entrypoints.agentMCP,
+              !relativePath.isEmpty,
+              !relativePath.contains(".."),
+              !relativePath.hasPrefix("."),
+              !relativePath.contains("/.") else {
+            return bundleDirectoryURL.appendingPathComponent("__unavailable-agent-entry__")
+        }
+        let root = bundleDirectoryURL.standardizedFileURL
+        let target = root.appendingPathComponent(relativePath).standardizedFileURL
+        guard target.path.hasPrefix(root.path + "/") else {
+            return bundleDirectoryURL.appendingPathComponent("__unavailable-agent-entry__")
+        }
+        return target
+    }
+
+    var currentAgentStatusEndpointURL: URL {
+        currentAgentRuntimeConfiguration?.endpointURL
+            ?? lastOwnedConfiguration?.endpointURL
+            ?? HostServiceRuntimeConfiguration.make(
+                rootURL: rootURL,
+                pluginID: manifest.id
+            ).endpointURL
+    }
+
+    func agentRuntimeContext() -> HostServiceAgentRuntimeContext? {
+        guard let owned = currentOwnedProcess(),
+              owned.handle.isRunning,
+              manifest.driverType == "host_service",
+              manifest.capabilities.contains("host.service"),
+              manifest.capabilities.contains("agent.readonly"),
+              isEnabled,
+              !isDeleted,
+              let configuration = currentAgentRuntimeConfiguration,
+              let agentSnapshot = owned.agentSnapshot else {
+            return nil
+        }
+        let serviceSnapshot = owned.serviceSnapshot
+        let serviceURL = currentServiceFileURL ?? owned.configuration.endpointURL
+        return HostServiceAgentRuntimeContext(
+            pluginID: manifest.id,
+            instanceID: configuration.instanceID,
+            rootURL: rootURL,
+            configuration: configuration,
+            serviceURL: serviceURL,
+            agentURL: agentMCPExecutableURL,
+            securityStateCheck: .process(
+                handle: owned.handle,
+                serviceURL: serviceURL,
+                agentURL: agentMCPExecutableURL,
+                serviceSnapshot: serviceSnapshot,
+                agentSnapshot: agentSnapshot
+            )
+        )
+    }
+
+    private var currentAgentRuntimeConfiguration: HostServiceRuntimeConfiguration? {
+        currentOwnedProcess()?.configuration
     }
 
     private func preparePrivateDirectories(
