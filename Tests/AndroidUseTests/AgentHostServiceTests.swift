@@ -1579,6 +1579,84 @@ struct AgentHostServiceTests {
         #expect(controller.status == nil)
         #expect(controller.display == .failed("运行实例已改变，请重新检查连接。"))
     }
+
+    @Test("Enabling location plugin after Agent plugin keeps each plugin title and status isolated")
+    @MainActor
+    func enablingLocationAfterAgentKeepsCatalogAndDetailLabelsIsolated() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "AgentHostServiceTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let (_, locationHarness) = try SignedArchiveTestHarness.buildSignedLocationPackage(in: root)
+        let fetcher = DefaultSystemPluginPackageFetcher(
+            httpTransport: MockGitHubHTTPTransport(
+                registryData: locationHarness.registryData,
+                archiveData: locationHarness.archiveData
+            ),
+            trustedPublicKeys: [locationHarness.keyID: locationHarness.publicKeyBase64]
+        )
+        let agentSource = root.appendingPathComponent("agent-office-source", isDirectory: true)
+        try installAgentFixturePackage(
+            at: agentSource,
+            id: "dev.agent.office",
+            capabilities: ["host.service", "agent.readonly"],
+            agentMCP: "bin/agent"
+        )
+
+        let manager = SystemPluginManager(
+            rootURL: root,
+            defaults: defaults,
+            packageFetcher: fetcher,
+            additionalTrustedPublicKeys: [locationHarness.keyID: locationHarness.publicKeyBase64],
+            locationConsoleTransport: MockLocationConsoleTransport(),
+            hostServiceHealthClient: { _, _, _ in .success(()) }
+        )
+        let locationID = SystemPluginCatalogItem.developerLocationID
+        _ = try await manager.downloadAndInstallPlugin(id: locationID)
+        _ = try await manager.importDeveloperPlugin(from: agentSource)
+
+        let window = ManagementWindow()
+        window.bindPluginManager(manager)
+        window.selectSection(.plugins)
+        let content = try #require(window.window?.contentView)
+
+        await manager.setPluginEnabled(id: "dev.agent.office", enabled: true)
+        await manager.setPluginEnabled(id: locationID, enabled: true)
+
+        let locationPlugin = try #require(manager.locationPlugin(for: locationID))
+        locationPlugin.selectLocation(
+            GeoCoordinate(latitude: 31.230416, longitude: 121.473701, name: "定位测试点", subtitle: "测试")
+        )
+        _ = await locationPlugin.injectSingleTick()
+
+        func textField(_ id: String) -> NSTextField? {
+            descendants(of: content)
+                .compactMap { $0 as? NSTextField }
+                .first { $0.identifier?.rawValue == id }
+        }
+
+        let locationTitle = try #require(textField("plugin-title-\(locationID)"))
+        let locationStatus = try #require(textField("plugin-status-\(locationID)"))
+        let agentTitle = try #require(textField("plugin-title-dev.agent.office"))
+        let agentStatus = try #require(textField("plugin-status-dev.agent.office"))
+
+        #expect(locationTitle.stringValue == "开发者虚拟定位")
+        #expect(locationStatus.stringValue.contains("定位测试点"))
+        #expect(agentTitle.stringValue == "Agent Fixture")
+        #expect(agentStatus.stringValue == manager.pluginStatusText(for: "dev.agent.office"))
+        #expect(!agentStatus.stringValue.contains("当前位置"))
+        #expect(!agentStatus.stringValue.contains("定位测试点"))
+
+        window.openPluginDetailPage(id: "dev.agent.office")
+        _ = await locationPlugin.injectSingleTick()
+        let detailTitle = try #require(textField("plugin-detail-title-dev.agent.office"))
+        let detailStatus = try #require(textField("plugin-detail-status-dev.agent.office"))
+        #expect(detailTitle.stringValue == "Agent Fixture")
+        #expect(detailStatus.stringValue == manager.pluginStatusText(for: "dev.agent.office"))
+        #expect(!detailStatus.stringValue.contains("当前位置"))
+    }
 }
 
 private struct AgentRPCCall: Equatable, Sendable {

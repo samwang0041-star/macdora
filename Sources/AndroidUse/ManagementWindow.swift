@@ -1127,6 +1127,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     var onOpenApp: ((String) -> Void)?
     var onForceStopApp: ((String) -> Void)?
     var onUninstallApp: ((String) -> Void)?
+    var onCloseApp: ((String) -> Void)?
     var onCloseActiveApp: (() -> Void)?
     var onInstall: (() -> Void)?
     var onDropAPK: ((URL) -> Void)?
@@ -1162,6 +1163,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     private var currentState: RuntimeState = .stopped
     private var apps: [ContainerApp] = []
     private var activePackage: String?
+    private(set) var activePackages: Set<String> = []
     private var currentTelemetry: ContainerTelemetry = .idle
     private var currentPreferences: ContainerPreferences = .default
     private var currentOfficeKeepAwake: OfficeKeepAwakeStatus = .off
@@ -1174,8 +1176,10 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     private(set) var activePluginDetailID: String?
     private var locationWorkspaceViews: [String: DeveloperLocationWorkspaceView] = [:]
     private var agentWorkspaceViews: [String: HostServiceAgentWorkspaceView] = [:]
-    private weak var livePluginStatusLabel: NSTextField?
-    private weak var livePluginToggleButton: TFButton?
+    private var livePluginCatalogStatusLabels: [String: NSTextField] = [:]
+    private var livePluginDetailTitleLabels: [String: NSTextField] = [:]
+    private var livePluginDetailStatusLabels: [String: NSTextField] = [:]
+    private var livePluginDetailToggleButtons: [String: TFButton] = [:]
     private(set) var currentUpdateState: MacdoraUpdateState = .idle(lastCheckedAt: nil)
 
     private let rootView = TFFlippedView(frame: NSRect(x: 0, y: 0, width: 1060, height: 700))
@@ -1714,15 +1718,27 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     private func refreshLivePluginControls(for id: String) {
         guard let manager = pluginManager else { return }
         agentWorkspaceViews[id]?.controller.hostStateDidChange()
-        if let label = livePluginStatusLabel {
+        let isEnabled = manager.isPluginEnabled(id)
+        let hasError = manager.lastError(for: id) != nil || manager.pluginHealthStatus(for: id).isDegraded
+        if activePluginDetailID == id {
+            if let titleLabel = livePluginDetailTitleLabels[id],
+               let item = manager.catalogItems().first(where: { $0.id == id }) {
+                titleLabel.stringValue = item.name
+            }
+            if let label = livePluginDetailStatusLabels[id] {
+                label.stringValue = manager.pluginStatusText(for: id)
+                label.textColor = hasError ? TFTheme.danger : TFTheme.ink3
+            }
+            if let toggle = livePluginDetailToggleButtons[id] {
+                let isBusy = manager.isPluginBusy(id)
+                toggle.isEnabled = !isBusy
+                toggle.title = isBusy ? "处理中…" : "停用"
+            }
+        } else if activePluginDetailID == nil,
+                  isEnabled || hasError,
+                  let label = livePluginCatalogStatusLabels[id] {
             label.stringValue = manager.pluginStatusText(for: id)
-            let hasError = manager.lastError(for: id) != nil || manager.pluginHealthStatus(for: id).isDegraded
-            label.textColor = hasError ? TFTheme.danger : (activePluginDetailID == nil ? TFTheme.ink2 : TFTheme.ink3)
-        }
-        if activePluginDetailID == id, let toggle = livePluginToggleButton {
-            let isBusy = manager.isPluginBusy(id)
-            toggle.isEnabled = !isBusy
-            toggle.title = isBusy ? "处理中…" : "停用"
+            label.textColor = hasError ? TFTheme.danger : (isEnabled ? TFTheme.ink2 : TFTheme.ink3)
         }
     }
 
@@ -1782,9 +1798,16 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         }
     }
 
-    func updateApps(_ apps: [ContainerApp], activePackage: String?) {
+    func updateApps(_ apps: [ContainerApp], activePackage: String?, activePackages: Set<String>? = nil) {
         self.apps = apps
         self.activePackage = activePackage
+        if let activePackages {
+            self.activePackages = activePackages
+        } else if let activePackage {
+            self.activePackages = [activePackage]
+        } else {
+            self.activePackages = []
+        }
         for app in apps {
             quickAppIcons[app.package]?.configure(with: app)
         }
@@ -1820,7 +1843,9 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         readiness: [ReadinessCheckItem],
         officeKeepAwake: OfficeKeepAwakeStatus = .off
     ) {
-        let tabletModeChanged = self.currentPreferences.tabletMode != preferences.tabletMode
+        let tabletModeChanged =
+            self.currentPreferences.tabletMode != preferences.tabletMode ||
+            self.currentPreferences.resolutionPreset != preferences.resolutionPreset
         let settingsChanged =
             self.cameraEnabled != cameraEnabled ||
             self.canChangeCamera != canChangeCamera ||
@@ -1872,6 +1897,10 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             pageInsertionIndex = nil
             retainedAppsSearchRow = nil
         }
+        livePluginCatalogStatusLabels.removeAll()
+        livePluginDetailTitleLabels.removeAll()
+        livePluginDetailStatusLabels.removeAll()
+        livePluginDetailToggleButtons.removeAll()
         for sub in pageStack.arrangedSubviews {
             if sub === retainedAppsSearchRow { continue }
             pageStack.removeArrangedSubview(sub)
@@ -1978,8 +2007,10 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         card.addSubview(listStack)
 
         let items = pluginManager?.catalogItems() ?? SystemPluginCatalogItem.defaultPresetCatalog
-        livePluginStatusLabel = nil
-        livePluginToggleButton = nil
+        livePluginCatalogStatusLabels.removeAll()
+        livePluginDetailTitleLabels.removeAll()
+        livePluginDetailStatusLabels.removeAll()
+        livePluginDetailToggleButtons.removeAll()
         for (idx, item) in items.enumerated() {
             addFullWidth(makePluginCatalogRow(item, isLast: idx == items.count - 1), to: listStack)
         }
@@ -2002,6 +2033,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         row.addSubview(badge)
 
         let titleLbl = NSTextField(labelWithString: item.name)
+        titleLbl.identifier = NSUserInterfaceItemIdentifier("plugin-title-\(item.id)")
         titleLbl.font = .systemFont(ofSize: 14.5, weight: .medium)
         titleLbl.textColor = TFTheme.ink
         titleLbl.lineBreakMode = .byTruncatingTail
@@ -2036,13 +2068,15 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         let hasError = isFailedState || item.lastErrorDetail != nil
         let summaryText = (item.state.isEnabled || hasError) ? item.statusDetail : item.subtitle
         let descLbl = NSTextField(labelWithString: summaryText)
+        descLbl.identifier = NSUserInterfaceItemIdentifier("plugin-status-\(item.id)")
         descLbl.font = .systemFont(ofSize: 12.5, weight: .regular)
         descLbl.textColor = hasError ? TFTheme.danger : (item.state.isEnabled ? TFTheme.ink2 : TFTheme.ink3)
         descLbl.lineBreakMode = .byTruncatingTail
+        descLbl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         descLbl.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(descLbl)
         if item.hasDedicatedWorkspace && item.state.isEnabled {
-            livePluginStatusLabel = descLbl
+            livePluginCatalogStatusLabels[item.id] = descLbl
         }
 
         let controls = NSStackView()
@@ -2206,6 +2240,10 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     }
 
     private func buildSinglePluginDedicatedManagementPage(for item: SystemPluginCatalogItem) {
+        livePluginCatalogStatusLabels.removeAll()
+        livePluginDetailTitleLabels.removeAll()
+        livePluginDetailStatusLabels.removeAll()
+        livePluginDetailToggleButtons.removeAll()
         addFullWidth(makePluginSubpageHeader(for: item), to: pageStack)
 
         guard let pm = pluginManager else { return }
@@ -2286,19 +2324,23 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         card.addSubview(badge)
 
         let titleLbl = NSTextField(labelWithString: item.name)
+        titleLbl.identifier = NSUserInterfaceItemIdentifier("plugin-detail-title-\(item.id)")
         titleLbl.font = .systemFont(ofSize: 14.5, weight: .semibold)
         titleLbl.textColor = TFTheme.ink
         titleLbl.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(titleLbl)
+        livePluginDetailTitleLabels[item.id] = titleLbl
 
         let subLbl = NSTextField(labelWithString: item.statusDetail)
+        subLbl.identifier = NSUserInterfaceItemIdentifier("plugin-detail-status-\(item.id)")
         subLbl.font = .systemFont(ofSize: 12, weight: .regular)
         subLbl.textColor = TFTheme.ink3
         subLbl.lineBreakMode = .byTruncatingTail
+        subLbl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         subLbl.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(subLbl)
         if item.hasDedicatedWorkspace {
-            livePluginStatusLabel = subLbl
+            livePluginDetailStatusLabels[item.id] = subLbl
         }
 
         let rightControls = NSStackView()
@@ -2318,7 +2360,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             }
         }
         rightControls.addArrangedSubview(toggle)
-        livePluginToggleButton = toggle
+        livePluginDetailToggleButtons[item.id] = toggle
         refreshLivePluginControls(for: item.id)
 
         NSLayoutConstraint.activate([
@@ -2410,6 +2452,22 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         activeRuntimeFPSLabel = fpsLbl
         rightControls.addArrangedSubview(fpsLbl)
 
+        let currentResOption = ContainerPreferences.resolutionOption(for: currentPreferences.resolutionPreset)
+        let resQuickBtn = TFButton(
+            title: "\(currentResOption.shortTitle) ▾",
+            symbolName: "aspectratio",
+            variant: .secondary,
+            size: .sm
+        )
+        resQuickBtn.identifier = NSUserInterfaceItemIdentifier("runtime-bar-resolution-switch")
+        resQuickBtn.setAccessibilityLabel("一键切换分辨率")
+        resQuickBtn.toolTip = "当前分辨率：\(currentPreferences.resolutionDisplayLabel)（点击一键切换常用分辨率）"
+        resQuickBtn.onClick = { [weak self, weak resQuickBtn] in
+            guard let self, let resQuickBtn else { return }
+            self.presentResolutionPresetMenu(anchor: resQuickBtn)
+        }
+        rightControls.addArrangedSubview(resQuickBtn)
+
         let androidModeSwitch = TFSegmentedControl(
             options: [
                 .init(value: "phone", label: "竖屏"),
@@ -2471,6 +2529,11 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         case .ready:
             return ("环境已就绪", "选择应用，在独立窗口中打开", .positive)
         case .running:
+            if activePackages.count > 1 {
+                let names = apps.filter { activePackages.contains($0.package) }.map(\.title)
+                let joined = names.isEmpty ? "\(activePackages.count) 个应用" : names.joined(separator: "、")
+                return ("运行中 (\(activePackages.count)/\(RuntimeController.maxConcurrentDisplays) 独立窗口)", "并行融合窗口：\(joined)", .positive)
+            }
             return ("运行中", currentTelemetry.activeAppName.map { "当前应用：\($0)" } ?? "应用在独立窗口中运行", .positive)
         case .stopping:
             return ("正在停止", "正在安全关闭运行环境", .neutral)
@@ -2704,7 +2767,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         titleLbl.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(titleLbl)
 
-        let isActive = (activePackage == app.package && currentState == .running)
+        let isActive = ((activePackages.contains(app.package) || activePackage == app.package) && currentState == .running)
         let pill = makeStatusPill(
             text: isActive ? "运行中" : (app.isInstalled ? app.category : "未安装"),
             tone: isActive ? .positive : .neutral
@@ -2738,7 +2801,20 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                 actions.addArrangedSubview(uninstallBtn)
             }
 
+            let closeWinBtn = TFButton(title: "关闭窗口", variant: .secondary, size: .sm)
+            closeWinBtn.identifier = NSUserInterfaceItemIdentifier("close-window-\(app.package)")
+            closeWinBtn.isEnabled = !currentState.isBusy
+            closeWinBtn.onClick = { [weak self] in
+                if let onCloseApp = self?.onCloseApp {
+                    onCloseApp(app.package)
+                } else {
+                    self?.onCloseActiveApp?()
+                }
+            }
+            actions.addArrangedSubview(closeWinBtn)
+
             let focusBtn = TFButton(title: "切回窗口", variant: .primary, size: .sm)
+            focusBtn.identifier = NSUserInterfaceItemIdentifier("focus-\(app.package)")
             focusBtn.onClick = { [weak self] in self?.onOpenApp?(app.package) }
             actions.addArrangedSubview(focusBtn)
         } else {
@@ -3108,19 +3184,38 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
 
         let resSeg = TFSegmentedControl(
             options: [
-                .init(value: "720p", label: "流畅"),
-                .init(value: "1080p", label: "标准"),
-                .init(value: "1440p", label: "超清")
+                .init(value: "960x600", label: "紧凑大字"),
+                .init(value: "1280x800_comfortable", label: "舒适大字"),
+                .init(value: "1920x1200_hidpi", label: "高清大字"),
+                .init(value: "1080p", label: "1080p"),
+                .init(value: "1440p", label: "1440p")
             ],
             selectedValue: currentPreferences.resolutionPreset
         )
         resSeg.onSelect = { [weak self] val in
             guard let self else { return }
-            var prefs = self.currentPreferences
-            prefs.resolutionPreset = val
-            self.currentPreferences = prefs
-            self.onUpdatePreferences?(prefs)
+            self.selectResolutionPreset(val)
         }
+
+        let currentResOption = ContainerPreferences.resolutionOption(for: currentPreferences.resolutionPreset)
+        let moreResBtn = TFButton(
+            title: "\(currentResOption.shortTitle) ▾",
+            symbolName: "aspectratio",
+            variant: .secondary,
+            size: .sm
+        )
+        moreResBtn.identifier = NSUserInterfaceItemIdentifier("settings-resolution-menu-button")
+        moreResBtn.setAccessibilityLabel("选择常用分辨率预设")
+        moreResBtn.onClick = { [weak self, weak moreResBtn] in
+            guard let self, let moreResBtn else { return }
+            self.presentResolutionPresetMenu(anchor: moreResBtn)
+        }
+
+        let resControlStack = NSStackView(views: [resSeg, moreResBtn])
+        resControlStack.orientation = .horizontal
+        resControlStack.alignment = .centerY
+        resControlStack.spacing = 8
+        resControlStack.translatesAutoresizingMaskIntoConstraints = false
 
         let fpsSeg = TFSegmentedControl(
             options: [
@@ -3138,6 +3233,11 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             self.onUpdatePreferences?(prefs)
         }
 
+        let multiWindowPill = makeStatusPill(
+            text: "支持最多 \(RuntimeController.maxConcurrentDisplays) 窗口并行",
+            tone: .positive
+        )
+
         addFullWidth(makeSettingsSection(
             title: "窗口布局与显示",
             rows: [
@@ -3147,9 +3247,14 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                     control: modeSeg
                 ),
                 makeSettingRow(
-                    title: "画面清晰度",
-                    detail: "当前分辨率：\(currentPreferences.resolutionDisplayLabel)",
-                    control: resSeg
+                    title: "画面清晰度与字体比例",
+                    detail: "当前分辨率：\(currentPreferences.resolutionDisplayLabel) · 推荐「舒适大字」解决 OA 与微信字体过小",
+                    control: resControlStack
+                ),
+                makeSettingRow(
+                    title: "多应用独立窗口 (融合模式)",
+                    detail: "多个应用可同时在独立原生窗口中运行，每个窗口顶部均可独立调节分辨率与横竖屏",
+                    control: multiWindowPill
                 ),
                 makeSettingRow(
                     title: "最高刷新率",
@@ -3744,6 +3849,38 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         case neutral
     }
 
+    func selectResolutionPreset(_ preset: String) {
+        let option = ContainerPreferences.resolutionOption(for: preset)
+        var prefs = currentPreferences
+        prefs.resolutionPreset = option.preset
+        currentPreferences = prefs
+        onUpdatePreferences?(prefs)
+        rebuildPageContent()
+    }
+
+    private func presentResolutionPresetMenu(anchor: NSView) {
+        let menu = NSMenu(title: "选择分辨率")
+        for option in ContainerPreferences.resolutionOptions {
+            let item = NSMenuItem(
+                title: option.menuTitle(tabletMode: currentPreferences.tabletMode),
+                action: #selector(handleResolutionMenuItem(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = option.preset
+            item.toolTip = option.subtitle
+            item.state = (option.preset == currentPreferences.resolutionPreset) ? .on : .off
+            menu.addItem(item)
+        }
+        let location = NSPoint(x: 0, y: anchor.bounds.height + 4)
+        menu.popUp(positioning: nil, at: location, in: anchor)
+    }
+
+    @objc private func handleResolutionMenuItem(_ sender: NSMenuItem) {
+        guard let preset = sender.representedObject as? String else { return }
+        selectResolutionPreset(preset)
+    }
+
     private func makeStatusPill(text: String, tone: PillTone) -> NSView {
         let pill = TFCardView(frame: .zero)
         pill.translatesAutoresizingMaskIntoConstraints = false
@@ -3789,10 +3926,12 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
     var onManagement: (() -> Void)?
     var onBack: (() -> Void)?
     var onToggleTabletMode: (() -> Void)?
+    var onSelectResolutionPreset: ((String) -> Void)?
 
     private static let toolbarHeight: CGFloat = 38
     private var allowExplicitClose = false
-    private var isHorizontalLayout = true
+    private(set) var isHorizontalLayout = true
+    private(set) var currentResolutionPreset: String = ContainerPreferences.default.resolutionPreset
     private var lockedAspectRatio: CGFloat
 
     private let overlay = TFCardView(frame: .zero)
@@ -3807,6 +3946,7 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
     private let topBarSep = TFCardView(frame: .zero)
     private let fpsBadgeCard = TFCardView(frame: .zero)
     private let fpsBadgeLabel = NSTextField(labelWithString: "60 FPS")
+    private(set) var resolutionSwitchButton: TFButton!
     private var modeSwitchButton: TFButton!
     private var explicitCloseButton: TFButton!
     private var inputBannerTask: Task<Void, Never>?
@@ -3907,15 +4047,57 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
         win.contentMaxSize = NSSize(width: maxHeight * lockedAspectRatio, height: maxHeight)
     }
 
-    func applyDisplayMode(tabletMode: Bool, preferredPixelSize: CGSize) {
+    func applyDisplayMode(tabletMode: Bool, preferredPixelSize: CGSize, resolutionPreset: String? = nil) {
         let modeChanged = (isHorizontalLayout != tabletMode)
+        let presetChanged = (resolutionPreset != nil && resolutionPreset != currentResolutionPreset)
         isHorizontalLayout = tabletMode
+        if let resolutionPreset {
+            currentResolutionPreset = ContainerPreferences.resolutionOption(for: resolutionPreset).preset
+        }
+        let option = ContainerPreferences.resolutionOption(for: currentResolutionPreset)
+        resolutionSwitchButton?.title = option.shortTitle
+        resolutionSwitchButton?.toolTip = "当前分辨率：\(ContainerPreferences.displayLabel(for: currentResolutionPreset, tabletMode: tabletMode))（点击一键切换）"
         modeSwitchButton?.title = tabletMode ? "切换竖屏" : "切换横屏"
         modeSwitchButton?.symbolName = tabletMode ? "ipad.landscape" : "iphone"
         if preferredPixelSize.width > 0, preferredPixelSize.height > 0 {
             surface.pixelSize = preferredPixelSize
-            syncToPixelSize(preferredPixelSize, resetDefaultHeight: modeChanged)
+            syncToPixelSize(preferredPixelSize, resetDefaultHeight: modeChanged || presetChanged)
         }
+    }
+
+    func selectResolutionPreset(_ preset: String) {
+        let option = ContainerPreferences.resolutionOption(for: preset)
+        let targetPixels = option.pixelSize(tabletMode: isHorizontalLayout)
+        applyDisplayMode(
+            tabletMode: isHorizontalLayout,
+            preferredPixelSize: targetPixels,
+            resolutionPreset: option.preset
+        )
+        onSelectResolutionPreset?(option.preset)
+    }
+
+    private func presentResolutionMenu() {
+        guard let anchor = resolutionSwitchButton else { return }
+        let menu = NSMenu(title: "选择分辨率")
+        for option in ContainerPreferences.resolutionOptions {
+            let item = NSMenuItem(
+                title: option.menuTitle(tabletMode: isHorizontalLayout),
+                action: #selector(handleWindowResolutionMenuItem(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = option.preset
+            item.toolTip = option.subtitle
+            item.state = (option.preset == currentResolutionPreset) ? .on : .off
+            menu.addItem(item)
+        }
+        let location = NSPoint(x: 0, y: anchor.bounds.height + 4)
+        menu.popUp(positioning: nil, at: location, in: anchor)
+    }
+
+    @objc private func handleWindowResolutionMenuItem(_ sender: NSMenuItem) {
+        guard let preset = sender.representedObject as? String else { return }
+        selectResolutionPreset(preset)
     }
 
     func syncToPixelSize(_ size: CGSize, resetDefaultHeight: Bool = false) {
@@ -4020,6 +4202,19 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
         rightStack.translatesAutoresizingMaskIntoConstraints = false
         topBar.addSubview(rightStack)
 
+        let initialOption = ContainerPreferences.resolutionOption(for: currentResolutionPreset)
+        resolutionSwitchButton = TFButton(
+            title: initialOption.shortTitle,
+            symbolName: nil,
+            variant: .subtle,
+            size: .sm
+        )
+        resolutionSwitchButton.identifier = NSUserInterfaceItemIdentifier("app-window-resolution-switch")
+        resolutionSwitchButton.setAccessibilityLabel("切换分辨率")
+        resolutionSwitchButton.toolTip = "一键切换分辨率与字体缩放比例"
+        resolutionSwitchButton.onClick = { [weak self] in self?.presentResolutionMenu() }
+        rightStack.addArrangedSubview(resolutionSwitchButton)
+
         modeSwitchButton = TFButton(title: "切换竖屏", symbolName: "ipad.landscape", variant: .subtle, size: .sm)
         modeSwitchButton.onClick = { [weak self] in self?.onToggleTabletMode?() }
         rightStack.addArrangedSubview(modeSwitchButton)
@@ -4098,7 +4293,11 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
 
             rightStack.trailingAnchor.constraint(equalTo: topBar.trailingAnchor, constant: -10),
             rightStack.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
-            rightStack.leadingAnchor.constraint(greaterThanOrEqualTo: fpsBadgeCard.trailingAnchor, constant: 8),
+            {
+                let c = rightStack.leadingAnchor.constraint(greaterThanOrEqualTo: fpsBadgeCard.trailingAnchor, constant: 6)
+                c.priority = NSLayoutConstraint.Priority(40)
+                return c
+            }(),
 
             surface.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             surface.trailingAnchor.constraint(equalTo: root.trailingAnchor),

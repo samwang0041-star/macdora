@@ -177,6 +177,87 @@ final class ManagementInteractionTests: XCTestCase {
         XCTAssertEqual(changes, [true, false])
     }
 
+
+    func testOneClickResolutionSwitchInSettingsTopBarAndAppWindow() throws {
+        _ = NSApplication.shared
+        let manager = ManagementWindow()
+        let window = try XCTUnwrap(manager.window)
+        defer { window.orderOut(nil) }
+        var updatedPrefs: ContainerPreferences?
+        manager.onUpdatePreferences = { updatedPrefs = $0 }
+        manager.updatePreferences(
+            cameraEnabled: true,
+            canChangeCamera: true,
+            rootPath: "/tmp/macdora",
+            preferences: .default,
+            readiness: []
+        )
+
+        manager.selectSection(.apps)
+        manager.presentWindow()
+        let root = try XCTUnwrap(window.contentView)
+        let runtimeResBtn = try XCTUnwrap(
+            descendants(root).first { $0.identifier?.rawValue == "runtime-bar-resolution-switch" } as? TFButton
+        )
+        XCTAssertEqual(runtimeResBtn.title, "1080p 标准 ▾")
+
+        manager.selectSection(.settings)
+        let settingsMenuBtn = try XCTUnwrap(
+            descendants(root).first { $0.identifier?.rawValue == "settings-resolution-menu-button" } as? TFButton
+        )
+        XCTAssertTrue(settingsMenuBtn.isAccessibilityElement())
+
+        manager.selectResolutionPreset("1280x800_comfortable")
+        XCTAssertEqual(updatedPrefs?.resolutionPreset, "1280x800_comfortable")
+
+        manager.selectSection(.apps)
+        let refreshedRuntimeResBtn = try XCTUnwrap(
+            descendants(root).first { $0.identifier?.rawValue == "runtime-bar-resolution-switch" } as? TFButton
+        )
+        XCTAssertEqual(refreshedRuntimeResBtn.title, "舒适大字 ▾")
+
+        let appWin = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        defer { appWin.performExplicitClose() }
+        var selectedWindowPreset: String?
+        appWin.onSelectResolutionPreset = { selectedWindowPreset = $0 }
+        XCTAssertEqual(appWin.resolutionSwitchButton.identifier?.rawValue, "app-window-resolution-switch")
+        appWin.selectResolutionPreset("960x600")
+        XCTAssertEqual(selectedWindowPreset, "960x600")
+        XCTAssertEqual(appWin.currentResolutionPreset, "960x600")
+        XCTAssertEqual(appWin.resolutionSwitchButton.title, "紧凑大字")
+        XCTAssertEqual(appWin.surface.pixelSize, CGSize(width: 960, height: 600))
+    }
+
+    func testMultiAppConcurrentActiveRowsProvideIndependentCloseAndSwitchControls() throws {
+        _ = NSApplication.shared
+        let manager = ManagementWindow()
+        let window = try XCTUnwrap(manager.window)
+        defer { window.orderOut(nil) }
+        let apps = [
+            ContainerApp.metadata(for: "com.tencent.mm"),
+            ContainerApp.metadata(for: "com.sankuai.meituan"),
+            ContainerApp.metadata(for: "com.coolapk.market"),
+            ContainerApp.metadata(for: "com.android.settings")
+        ]
+        let activeSet: Set<String> = ["com.tencent.mm", "com.sankuai.meituan", "com.coolapk.market", "com.android.settings"]
+        manager.update(.running)
+        manager.updateApps(apps, activePackage: "com.tencent.mm", activePackages: activeSet)
+        manager.presentWindow()
+
+        let root = try XCTUnwrap(window.contentView)
+        var closedPackages: [String] = []
+        manager.onCloseApp = { closedPackages.append($0) }
+
+        for pkg in activeSet {
+            let openBtn = try XCTUnwrap(descendants(root).first { $0.identifier?.rawValue == "focus-\(pkg)" } as? TFButton)
+            XCTAssertEqual(openBtn.title, "切回窗口")
+            let closeBtn = try XCTUnwrap(descendants(root).first { $0.identifier?.rawValue == "close-window-\(pkg)" } as? TFButton)
+            XCTAssertEqual(closeBtn.title, "关闭窗口")
+            XCTAssertTrue(closeBtn.accessibilityPerformPress())
+        }
+        XCTAssertEqual(Set(closedPackages), activeSet)
+    }
+
     private func descendants(_ root: NSView) -> [NSView] {
         [root] + root.subviews.flatMap { descendants($0) }
     }

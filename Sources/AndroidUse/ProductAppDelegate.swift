@@ -4,39 +4,96 @@ import Metal
 import UniformTypeIdentifiers
 
 @MainActor
+final class AppWindowSession {
+    let package: String
+    let window: ApplicationWindow
+    var stream: VideoStream?
+    var openTask: Task<Void, Never>?
+    var presenceTimer: Timer?
+    var presenceQueryInProgress = false
+    var absentCount = 0
+    var hasObservedTarget = false
+    var hasPresentedFrame = false
+    var hasDecodedFrame = false
+    var generation = UUID()
+    var presentationTimes: [Double] = []
+    var usingHardwareDecoder = true
+    var isOpening = false
+    var resolutionPreset: String
+    var tabletMode: Bool
+
+    init(
+        package: String,
+        window: ApplicationWindow,
+        resolutionPreset: String,
+        tabletMode: Bool
+    ) {
+        self.package = package
+        self.window = window
+        self.resolutionPreset = resolutionPreset
+        self.tabletMode = tabletMode
+    }
+
+    func stopStreamAndTimers() {
+        presenceTimer?.invalidate()
+        presenceTimer = nil
+        presenceQueryInProgress = false
+        stream?.stop()
+        stream = nil
+        presentationTimes.removeAll()
+    }
+}
+
+@MainActor
 final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     private let runtime = RuntimeController()
     private var manager: ManagementWindow!
-    private var applicationWindow: ApplicationWindow?
-    private var stream: VideoStream?
+    private var injectedApplicationWindow: ApplicationWindow?
+    private var appSessions: [String: AppWindowSession] = [:]
     private var operation: Task<Void, Never>?
-    private var displayGeneration = UUID()
-    private var presenceTimer: Timer?
     private var telemetryTimer: Timer?
-    private var presenceQueryInProgress = false
-    private var absentCount = 0
-    private var hasObservedTarget = false
-    private var hasPresentedFrame = false
-    private var hasDecodedFrame = false
     private var terminating = false
     private var isRestartingForUpdate = false
-    private var openingPackage: String?
     private var keyboardMenu: HostKeyboardMenu?
     private var uninstallConfirmationActive = false
     private var activePackage: String = DefaultApp.package
-    private var presentationTimes: [Double] = []
-    private var usingHardwareDecoder = true
     private let dockPresentation = AppDockPresentation(mode: AppDockIconMode.parse(arguments: ProcessInfo.processInfo.arguments))
 
     init(manager: ManagementWindow? = nil, applicationWindow: ApplicationWindow? = nil) {
         self.manager = manager
-        self.applicationWindow = applicationWindow
+        self.injectedApplicationWindow = applicationWindow
         super.init()
+    }
+
+    private var applicationWindow: ApplicationWindow? {
+        if let keyWin = NSApp.keyWindow,
+           let matched = appSessions.values.first(where: { $0.window.window === keyWin }) {
+            return matched.window
+        }
+        if let activeSession = appSessions[activePackage] {
+            return activeSession.window
+        }
+        return appSessions.values.first?.window ?? injectedApplicationWindow
+    }
+
+    private var activeSession: AppWindowSession? {
+        if let keyWin = NSApp.keyWindow,
+           let matched = appSessions.values.first(where: { $0.window.window === keyWin }) {
+            return matched
+        }
+        return appSessions[activePackage] ?? appSessions.values.first
     }
 
     private func resolvedAppMetadata(for package: String) -> ContainerApp {
         runtime.cachedContainerApps().first(where: { $0.package == package })
             ?? ContainerApp.metadata(for: package)
+    }
+
+    private func syncManagerApps(_ catalog: [ContainerApp]? = nil) {
+        let apps = catalog ?? runtime.cachedContainerApps()
+        let activeSet = Set(appSessions.keys).union(runtime.activeDisplayPackages)
+        let primaryPkg = runtime.activeDisplayPackage ?? appSessions[activePackage]?.package ?? appSessions.keys.first
+        manager.updateApps(apps, activePackage: primaryPkg, activePackages: activeSet)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -47,6 +104,9 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         manager.onOpenApp = { [weak self] pkg in self?.openApp(package: pkg) }
         manager.onForceStopApp = { [weak self] pkg in self?.forceStopApp(package: pkg) }
         manager.onUninstallApp = { [weak self] pkg in self?.uninstallApp(package: pkg) }
+        manager.onCloseApp = { [weak self] pkg in
+            self?.appSessions[pkg]?.window.performExplicitClose()
+        }
         manager.onInstall = { [weak self] in self?.chooseAPK() }
         manager.onDropAPK = { [weak self] url in self?.installAPKFile(url) }
         manager.onStartRuntime = { [weak self] in self?.startContainerOnly() }
@@ -66,7 +126,12 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         }
         manager.onClearCache = { [weak self] in self?.clearContainerCache() }
         manager.onRevealData = { [weak self] in self?.revealData() }
-        manager.onAppearanceChanged = { [weak self] in self?.applicationWindow?.refreshTheme() }
+        manager.onAppearanceChanged = { [weak self] in
+            guard let self else { return }
+            for session in self.appSessions.values {
+                session.window.refreshTheme()
+            }
+        }
         manager.onImportDeveloperPlugin = { [weak self] in self?.chooseDeveloperPluginPackage() }
         manager.onExportDeveloperPluginTemplate = { [weak self] in self?.exportDeveloperPluginTemplate() }
         manager.onRevealPluginsDirectory = { [weak self] in self?.revealPluginsDirectory() }
@@ -112,13 +177,22 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             self.refreshTelemetry()
         }
         runtime.onOfficeKeepAwakeChanged = { [weak self] in self?.syncPreferencesToManager() }
+        runtime.onPackageDisplayTerminated = { [weak self] pkg in
+            guard let self, !self.terminating, let session = self.appSessions[pkg], session.stream != nil else { return }
+            let appTitle = self.resolvedAppMetadata(for: pkg).title
+            self.displayFailed(for: pkg, message: "\(appTitle) 会话已结束，可在管理台重新打开。")
+        }
         runtime.onDisplayTerminated = { [weak self] in
-            guard let self, self.stream != nil, !self.terminating else { return }
-            let appTitle = self.resolvedAppMetadata(for: self.activePackage).title
-            self.displayFailed("\(appTitle) 会话已结束，可在管理台重新打开。")
+            guard let self, !self.terminating else { return }
+            if self.runtime.activeDisplayPackages.isEmpty {
+                for pkg in Array(self.appSessions.keys) where self.appSessions[pkg]?.stream != nil {
+                    let appTitle = self.resolvedAppMetadata(for: pkg).title
+                    self.displayFailed(for: pkg, message: "\(appTitle) 会话已结束，可在管理台重新打开。")
+                }
+            }
         }
 
-        manager.updateApps(runtime.cachedContainerApps(), activePackage: runtime.activeDisplayPackage)
+        syncManagerApps(runtime.cachedContainerApps())
         syncPreferencesToManager()
         manager.update(runtime.state)
         manager.updateAppUpdateState(MacdoraUpdateController.shared.state)
@@ -200,13 +274,13 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             }
             NSGraphicsContext.restoreGraphicsState()
         }
-        if window === applicationWindow?.window,
-           let surface = applicationWindow?.surface,
-           let cgImage = surface.currentSnapshotCGImage() {
+        if let appWin = appSessions.values.first(where: { $0.window.window === window })?.window ?? applicationWindow,
+           window === appWin.window,
+           let cgImage = appWin.surface.currentSnapshotCGImage() {
             NSGraphicsContext.saveGraphicsState()
             if let ctx = NSGraphicsContext(bitmapImageRep: rep) {
                 NSGraphicsContext.current = ctx
-                let surfaceRect = view.convert(surface.bounds, from: surface)
+                let surfaceRect = view.convert(appWin.surface.bounds, from: appWin.surface)
                 ctx.cgContext.draw(cgImage, in: surfaceRect)
             }
             NSGraphicsContext.restoreGraphicsState()
@@ -272,9 +346,13 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func installCommand() { chooseAPK() }
     @objc private func explicitCloseAppCommand() { applicationWindow?.performExplicitClose() }
     @objc private func toggleTabletModeCommand() {
-        var prefs = runtime.containerPreferences
-        prefs.tabletMode.toggle()
-        updateContainerPreferences(prefs)
+        if let session = activeSession {
+            toggleWindowOrientation(for: session.package)
+        } else {
+            var prefs = runtime.containerPreferences
+            prefs.tabletMode.toggle()
+            updateContainerPreferences(prefs)
+        }
     }
     @objc private func settingsCommand() { showSettings() }
     @objc private func managementCommand() { manager.selectSection(.apps); manager.presentWindow() }
@@ -295,15 +373,14 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         isRestartingForUpdate = true
         terminating = true
         operation?.cancel()
-        openingPackage = nil
-        displayGeneration = UUID()
-        presenceTimer?.invalidate()
-        presenceTimer = nil
         telemetryTimer?.invalidate()
         telemetryTimer = nil
-        stream?.stop()
-        stream = nil
-        applicationWindow?.window?.orderOut(nil)
+        for session in appSessions.values {
+            session.openTask?.cancel()
+            session.stopStreamAndTimers()
+            session.window.window?.orderOut(nil)
+        }
+        appSessions.removeAll()
         _ = await runtime.stop()
         manager.window?.orderOut(nil)
     }
@@ -319,30 +396,45 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshTelemetry() {
         let now = CACurrentMediaTime()
-        presentationTimes.removeAll { now - $0 > 2.5 }
-        var fps = 0.0
-        var p95Ms = 0.0
-        if presentationTimes.count >= 2, let first = presentationTimes.first, let last = presentationTimes.last, last > first {
-            fps = min(60.0, Double(presentationTimes.count - 1) / max(0.25, now - first))
-            var intervals: [Double] = []
-            for i in 1..<presentationTimes.count {
-                intervals.append((presentationTimes[i] - presentationTimes[i - 1]) * 1000.0)
+        var primaryFPS = 0.0
+        var primaryP95Ms = 0.0
+        var primaryHW = true
+
+        for session in appSessions.values {
+            session.presentationTimes.removeAll { now - $0 > 2.5 }
+            var fps = 0.0
+            var p95Ms = 0.0
+            if session.presentationTimes.count >= 2,
+               let first = session.presentationTimes.first,
+               let last = session.presentationTimes.last,
+               last > first {
+                fps = min(60.0, Double(session.presentationTimes.count - 1) / max(0.25, now - first))
+                var intervals: [Double] = []
+                for i in 1..<session.presentationTimes.count {
+                    intervals.append((session.presentationTimes[i] - session.presentationTimes[i - 1]) * 1000.0)
+                }
+                intervals.sort()
+                let p95Index = min(intervals.count - 1, Int(Double(intervals.count - 1) * 0.95))
+                p95Ms = intervals[p95Index]
             }
-            intervals.sort()
-            let p95Index = min(intervals.count - 1, Int(Double(intervals.count - 1) * 0.95))
-            p95Ms = intervals[p95Index]
+            session.window.updateFPSBadge(fps)
+            if session.package == activePackage || primaryFPS == 0 {
+                primaryFPS = fps
+                primaryP95Ms = p95Ms
+                primaryHW = session.usingHardwareDecoder
+            }
         }
-        let activePkg = runtime.activeDisplayPackage
+
+        let activePkg = runtime.activeDisplayPackage ?? activeSession?.package
         let activeName = activePkg.map { resolvedAppMetadata(for: $0).title }
         let sample = runtime.sampleTelemetry(
-            presentedFPS: fps,
-            frameIntervalP95Ms: p95Ms,
-            hardwareDecoder: usingHardwareDecoder,
+            presentedFPS: primaryFPS,
+            frameIntervalP95Ms: primaryP95Ms,
+            hardwareDecoder: primaryHW,
             activeAppName: activeName,
             activePackage: activePkg
         )
         manager.updateTelemetry(sample)
-        applicationWindow?.updateFPSBadge(fps)
     }
 
     private func startContainerOnly() {
@@ -359,7 +451,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 try await self.runtime.start()
                 try Task.checkCancellation()
                 let apps = await self.runtime.refreshContainerApps()
-                self.manager.updateApps(apps, activePackage: self.runtime.activeDisplayPackage)
+                self.syncManagerApps(apps)
                 self.manager.show(detail: "运行环境已就绪，可使用 \(apps.filter(\.isInstalled).count) 个应用。")
             } catch is CancellationError {
                 return
@@ -373,7 +465,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         Task { [weak self] in
             guard let self else { return }
             let apps = await self.runtime.refreshContainerApps()
-            self.manager.updateApps(apps, activePackage: self.runtime.activeDisplayPackage)
+            self.syncManagerApps(apps)
         }
     }
 
@@ -383,15 +475,17 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         Task { [weak self] in
             guard let self else { return }
             do {
-                if self.runtime.activeDisplayPackage == package {
-                    self.dockPresentation.update(app: nil)
-                    self.stream?.stop()
-                    self.stream = nil
-                    await self.runtime.closeDisplay()
-                    self.applicationWindow?.performRuntimeOperationClose()
+                if let session = self.appSessions.removeValue(forKey: package) {
+                    session.openTask?.cancel()
+                    session.stopStreamAndTimers()
+                    await self.runtime.closeDisplay(package: package)
+                    session.window.performRuntimeOperationClose()
+                    if self.appSessions.isEmpty {
+                        self.dockPresentation.update(app: nil)
+                    }
                 }
                 try await self.runtime.forceStopApp(package: package)
-                self.manager.updateApps(await self.runtime.refreshContainerApps(), activePackage: self.runtime.activeDisplayPackage)
+                self.syncManagerApps(await self.runtime.refreshContainerApps())
                 self.manager.show(detail: "已停止 \(appMeta.title)。")
             } catch {
                 self.manager.show(detail: error.localizedDescription)
@@ -413,7 +507,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         confirmation.beginSheetModal(for: window) { [weak self] response in
             self?.uninstallConfirmationActive = false
             guard let self, response == .alertFirstButtonReturn else {
-                self?.manager.updateApps(self?.runtime.cachedContainerApps() ?? [], activePackage: self?.runtime.activeDisplayPackage)
+                self?.syncManagerApps()
                 return
             }
             self.performUninstallApp(package: package, appTitle: appTitle)
@@ -424,27 +518,21 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         guard !runtime.state.isBusy, !terminating else { return }
         let previousOperation = operation
         previousOperation?.cancel()
-        if activePackage == package || runtime.activeDisplayPackage == package {
-            dockPresentation.update(app: nil)
-            openingPackage = nil
-            displayGeneration = UUID()
-            presenceTimer?.invalidate()
-            presenceTimer = nil
-            stream?.stop()
-            stream = nil
-            presentationTimes.removeAll()
-            applicationWindow?.performRuntimeOperationClose()
+        if let session = appSessions.removeValue(forKey: package) {
+            session.openTask?.cancel()
+            session.stopStreamAndTimers()
+            session.window.performRuntimeOperationClose()
+            if appSessions.isEmpty {
+                dockPresentation.update(app: nil)
+            }
         }
         operation = Task { [weak self] in
             guard let self else { return }
             do {
                 await previousOperation?.value
                 try Task.checkCancellation()
-                if self.runtime.activeDisplayPackage == package {
-                    self.stream?.stop()
-                    self.stream = nil
-                    await self.runtime.closeDisplay()
-                    self.applicationWindow?.performRuntimeOperationClose()
+                if self.runtime.displayEndpoint(for: package) != nil {
+                    await self.runtime.closeDisplay(package: package)
                 }
                 if self.runtime.state != .ready && self.runtime.state != .running {
                     self.manager.show(detail: "正在启动环境以卸载 \(appTitle)…")
@@ -456,12 +544,12 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                     self.manager.show(detail: "正在卸载 \(appTitle)…")
                 }
                 try await self.runtime.uninstallApp(package: package)
-                self.manager.updateApps(self.runtime.cachedContainerApps(), activePackage: self.runtime.activeDisplayPackage)
+                self.syncManagerApps(self.runtime.cachedContainerApps())
                 self.syncPreferencesToManager()
                 self.refreshTelemetry()
                 self.manager.show(detail: "已卸载 \(appTitle)。")
             } catch is CancellationError {
-                self.manager.updateApps(self.runtime.cachedContainerApps(), activePackage: self.runtime.activeDisplayPackage)
+                self.syncManagerApps(self.runtime.cachedContainerApps())
                 return
             } catch {
                 self.manager.show(detail: error.localizedDescription)
@@ -473,47 +561,64 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         guard runtime.state != .stopping, !terminating else { return }
         manager.show(detail: nil)
         let appMeta = resolvedAppMetadata(for: package)
+
         if !forceReconfigureDisplay,
-           let applicationWindow,
-           stream != nil,
-           runtime.activeDisplayPackage == package,
-           (applicationWindow.window?.isVisible == true || applicationWindow.window?.isMiniaturized == true) {
-            applicationWindow.presentWindow()
+           let existing = appSessions[package] {
+            if existing.stream != nil,
+               self.runtime.displayEndpoint(for: package) != nil,
+               (existing.window.window?.isVisible == true || existing.window.window?.isMiniaturized == true) {
+                activePackage = package
+                dockPresentation.update(app: appMeta)
+                existing.window.presentWindow()
+                return
+            }
+            if existing.isOpening {
+                activePackage = package
+                existing.window.presentWindow()
+                return
+            }
+        }
+
+        if appSessions[package] == nil && appSessions.count >= RuntimeController.maxConcurrentDisplays {
+            let limit = RuntimeController.maxConcurrentDisplays
+            manager.show(detail: "最多可同时开启 \(limit) 个独立应用窗口，请先关闭一个窗口后再打开 \(appMeta.title)。")
+            manager.presentWindow()
             return
         }
-        if !forceReconfigureDisplay,
-           openingPackage == package,
-           operation != nil {
-            applicationWindow?.presentWindow()
-            return
-        }
+
         activePackage = package
-        openingPackage = package
-        presentationTimes.removeAll()
-        presenceTimer?.invalidate()
-        presenceTimer = nil
-        stream?.stop()
-        stream = nil
+        let generation = UUID()
+        guard let session = ensureAppWindowSession(for: appMeta, generation: generation) else {
+            return
+        }
+        session.openTask?.cancel()
+        session.stopStreamAndTimers()
+        session.generation = generation
+        session.isOpening = true
+        session.hasObservedTarget = false
+        session.hasPresentedFrame = false
+        session.hasDecodedFrame = false
+
+        syncManagerApps()
+        session.window.loading("正在准备 \(appMeta.title)…")
+
         let previousOperation = operation
-        previousOperation?.cancel()
-        displayGeneration = UUID()
-        let generation = displayGeneration
-        let cachedApps = runtime.cachedContainerApps()
-        manager.updateApps(cachedApps, activePackage: package)
-        showApplicationWindow(for: appMeta)
-        applicationWindow?.loading("正在准备 \(appMeta.title)…")
-        operation = Task { [weak self] in
-            guard let self else { return }
+        let task = Task { @MainActor [weak self, weak session] in
+            guard let self, let session else { return }
             defer {
-                if self.displayGeneration == generation {
-                    self.openingPackage = nil
+                if session.generation == generation {
+                    session.isOpening = false
                 }
             }
             do {
                 await previousOperation?.value
                 try Task.checkCancellation()
-                self.stream?.stop(); self.stream = nil
-                await self.runtime.closeDisplay()
+                guard session.generation == generation else { return }
+
+                if forceReconfigureDisplay {
+                    session.stopStreamAndTimers()
+                    await self.runtime.closeDisplay(package: package)
+                }
                 try Task.checkCancellation()
                 try await self.runtime.prepare()
                 try Task.checkCancellation()
@@ -524,7 +629,9 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                     self.syncPreferencesToManager()
                 }
                 try Task.checkCancellation()
-                self.applicationWindow?.loading("正在启动运行环境…")
+                if self.runtime.state != .ready && self.runtime.state != .running {
+                    session.window.loading("正在启动运行环境…")
+                }
                 try await self.runtime.start()
                 try Task.checkCancellation()
                 if package != DefaultApp.package {
@@ -546,97 +653,201 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                     apps = await self.runtime.refreshContainerApps()
                 }
                 let refreshedMeta = self.resolvedAppMetadata(for: package)
-                self.applicationWindow?.configureForApp(refreshedMeta)
+                session.window.configureForApp(refreshedMeta)
                 self.dockPresentation.update(app: refreshedMeta)
-                self.manager.updateApps(apps, activePackage: package)
-                self.applicationWindow?.loading("正在打开 \(refreshedMeta.title)…")
-                let endpoint = try await self.runtime.openDisplay(package: package)
-                guard self.displayGeneration == generation, !Task.isCancelled else { await self.runtime.closeDisplay(); return }
-                self.manager.updateApps(apps, activePackage: package)
-                self.connect(endpoint, generation: generation)
+                self.syncManagerApps(apps)
+                session.window.loading("正在打开 \(refreshedMeta.title)…")
+                let endpoint = try await self.runtime.openDisplay(
+                    package: package,
+                    resolutionPreset: session.resolutionPreset,
+                    tabletMode: session.tabletMode,
+                    replaceExisting: false
+                )
+                guard session.generation == generation, !Task.isCancelled else {
+                    await self.runtime.closeDisplay(package: package)
+                    return
+                }
+                self.syncManagerApps(apps)
+                self.connect(endpoint, session: session, generation: generation)
             } catch is CancellationError {
-                await self.runtime.closeDisplay()
+                if session.generation == generation {
+                    await self.runtime.closeDisplay(package: package)
+                }
             } catch {
-                if self.displayGeneration == generation { self.displayFailed(error.localizedDescription) }
+                if session.generation == generation {
+                    self.displayFailed(for: package, message: error.localizedDescription)
+                }
             }
         }
+        session.openTask = task
+        operation = task
     }
 
-    private func showApplicationWindow(for app: ContainerApp) {
-        if applicationWindow == nil {
-            guard let device = MTLCreateSystemDefaultDevice() else {
-                manager.update(.failed("当前设备不支持硬件图形加速。")); return
+    private func ensureAppWindowSession(for app: ContainerApp, generation: UUID) -> AppWindowSession? {
+        let appPref = runtime.containerPreferences.displayPreference(for: app.package)
+        let session: AppWindowSession
+        let isNewWindow: Bool
+        if let existing = appSessions[app.package] {
+            existing.resolutionPreset = appPref.resolutionPreset
+            existing.tabletMode = appPref.tabletMode
+            session = existing
+            isNewWindow = false
+        } else {
+            let window: ApplicationWindow
+            if let injected = injectedApplicationWindow {
+                injectedApplicationWindow = nil
+                window = injected
+            } else {
+                guard let device = MTLCreateSystemDefaultDevice() else {
+                    manager.update(.failed("当前设备不支持硬件图形加速。"))
+                    return nil
+                }
+                window = ApplicationWindow(device: device)
             }
-            let window = ApplicationWindow(device: device)
-            window.onClose = { [weak self] in self?.closedApplicationWindow() }
-            window.onRetry = { [weak self] in
-                guard let self else { return }
-                self.openApp(package: self.activePackage)
-            }
+            let pkg = app.package
+            window.onClose = { [weak self] in self?.closedApplicationWindow(for: pkg) }
+            window.onRetry = { [weak self] in self?.openApp(package: pkg, forceReconfigureDisplay: true) }
             window.onManagement = { [weak self] in self?.manager.presentWindow() }
             window.onBack = { [weak window] in window?.surface.key(4) }
-            window.onToggleTabletMode = { [weak self] in
-                guard let self else { return }
-                var prefs = self.runtime.containerPreferences
-                prefs.tabletMode.toggle()
-                self.updateContainerPreferences(prefs)
+            window.onToggleTabletMode = { [weak self] in self?.toggleWindowOrientation(for: pkg) }
+            window.onSelectResolutionPreset = { [weak self] preset in
+                self?.selectWindowResolutionPreset(preset, for: pkg)
             }
-            applicationWindow = window
+            let created = AppWindowSession(
+                package: pkg,
+                window: window,
+                resolutionPreset: appPref.resolutionPreset,
+                tabletMode: appPref.tabletMode
+            )
+            appSessions[pkg] = created
+            session = created
+            isNewWindow = true
         }
-        let prefs = runtime.containerPreferences
-        applicationWindow?.applyDisplayMode(
-            tabletMode: prefs.tabletMode,
-            preferredPixelSize: prefs.preferredPixelSize
+
+        let targetPixels = ContainerPreferences.pixelSize(
+            for: session.resolutionPreset,
+            tabletMode: session.tabletMode
         )
-        applicationWindow?.configureForApp(app)
+        session.window.applyDisplayMode(
+            tabletMode: session.tabletMode,
+            preferredPixelSize: targetPixels,
+            resolutionPreset: session.resolutionPreset
+        )
+        session.window.configureForApp(app)
+        if isNewWindow && appSessions.count > 1 {
+            cascadeWindowPlacement(session.window, index: appSessions.count - 1)
+        }
         dockPresentation.update(app: app)
-        applicationWindow?.presentWindow()
+        session.window.presentWindow()
+        return session
     }
 
-    private func connect(_ endpoint: DisplayEndpoint, generation: UUID) {
-        guard let window = applicationWindow else { return }
+    private func cascadeWindowPlacement(_ appWindow: ApplicationWindow, index: Int) {
+        guard index > 0, let win = appWindow.window else { return }
+        let screen = (win.screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let offset = CGFloat(index % 4) * 34.0
+        var frame = win.frame
+        frame.origin.x = min(max(screen.minX + 16, frame.origin.x + offset), screen.maxX - frame.width - 16)
+        frame.origin.y = max(screen.minY + 16, min(screen.maxY - frame.height - 16, frame.origin.y - offset))
+        win.setFrameOrigin(frame.origin)
+    }
+
+    private func toggleWindowOrientation(for package: String) {
+        var prefs = runtime.containerPreferences
+        let currentPref = prefs.displayPreference(for: package)
+        let nextTabletMode = !currentPref.tabletMode
+        prefs.appDisplayOverrides[package] = AppDisplayPreference(
+            resolutionPreset: currentPref.resolutionPreset,
+            tabletMode: nextTabletMode
+        )
+        runtime.containerPreferences = prefs
+        if let session = appSessions[package] {
+            session.tabletMode = nextTabletMode
+            let pixels = ContainerPreferences.pixelSize(for: session.resolutionPreset, tabletMode: nextTabletMode)
+            session.window.applyDisplayMode(
+                tabletMode: nextTabletMode,
+                preferredPixelSize: pixels,
+                resolutionPreset: session.resolutionPreset
+            )
+        }
+        syncPreferencesToManager()
+        let label = ContainerPreferences.displayLabel(for: currentPref.resolutionPreset, tabletMode: nextTabletMode)
+        manager.show(detail: "已切换 \(resolvedAppMetadata(for: package).title) 至 \(label)。")
+        if runtime.state == .running {
+            openApp(package: package, forceReconfigureDisplay: true)
+        }
+    }
+
+    private func selectWindowResolutionPreset(_ preset: String, for package: String) {
+        let option = ContainerPreferences.resolutionOption(for: preset)
+        var prefs = runtime.containerPreferences
+        let currentPref = prefs.displayPreference(for: package)
+        prefs.appDisplayOverrides[package] = AppDisplayPreference(
+            resolutionPreset: option.preset,
+            tabletMode: currentPref.tabletMode
+        )
+        runtime.containerPreferences = prefs
+        if let session = appSessions[package] {
+            session.resolutionPreset = option.preset
+            let pixels = option.pixelSize(tabletMode: session.tabletMode)
+            session.window.applyDisplayMode(
+                tabletMode: session.tabletMode,
+                preferredPixelSize: pixels,
+                resolutionPreset: option.preset
+            )
+        }
+        syncPreferencesToManager()
+        let label = ContainerPreferences.displayLabel(for: option.preset, tabletMode: currentPref.tabletMode)
+        manager.show(detail: "已切换 \(resolvedAppMetadata(for: package).title) 分辨率至 \(label)。")
+        if runtime.state == .running {
+            openApp(package: package, forceReconfigureDisplay: true)
+        }
+    }
+
+    private func connect(_ endpoint: DisplayEndpoint, session: AppWindowSession, generation: UUID) {
+        let window = session.window
         let stream = VideoStream()
-        self.stream = stream
-        hasObservedTarget = false
-        hasPresentedFrame = false
-        hasDecodedFrame = false
-        presentationTimes.removeAll()
+        session.stream = stream
+        session.hasObservedTarget = false
+        session.hasPresentedFrame = false
+        session.hasDecodedFrame = false
+        session.presentationTimes.removeAll()
         window.surface.beginSession(generation)
         window.surface.clipboardSyncEnabled = runtime.containerPreferences.clipboardSyncEnabled
         window.surface.onPixelSizeChanged = { [weak window] size in
             window?.syncToPixelSize(size)
         }
-        stream.decoder.onHardware = { [weak self] hw in
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.displayGeneration == generation else { return }
-                self.usingHardwareDecoder = hw
+        stream.decoder.onHardware = { [weak session] hw in
+            DispatchQueue.main.async { [weak session] in
+                guard let session, session.generation == generation else { return }
+                session.usingHardwareDecoder = hw
             }
         }
-        window.surface.onPresented = { [weak self] _, hostTime in
-            guard let self, self.displayGeneration == generation else { return }
-            self.presentationTimes.append(hostTime)
-            if self.presentationTimes.count > 180 {
-                self.presentationTimes.removeFirst(self.presentationTimes.count - 180)
+        window.surface.onPresented = { [weak session] _, hostTime in
+            guard let session, session.generation == generation else { return }
+            session.presentationTimes.append(hostTime)
+            if session.presentationTimes.count > 180 {
+                session.presentationTimes.removeFirst(session.presentationTimes.count - 180)
             }
         }
-        let inputIssue: (String) -> Void = { [weak self, weak window] message in
-            DispatchQueue.main.async { [weak self, weak window] in
-                guard self?.displayGeneration == generation else { return }
+        let inputIssue: (String) -> Void = { [weak session, weak window] message in
+            DispatchQueue.main.async { [weak session, weak window] in
+                guard session?.generation == generation else { return }
                 window?.showInputIssue(message)
             }
         }
         window.surface.onInputIssue = inputIssue
         window.surface.onPointerBegan = { [weak stream] in stream?.beginPointer($0) }
-        stream.onConfirmedFocus = { [weak self, weak window] focus, pointer in
-            DispatchQueue.main.async { [weak self, weak window] in
-                guard self?.displayGeneration == generation else { return }
+        stream.onConfirmedFocus = { [weak session, weak window] focus, pointer in
+            DispatchQueue.main.async { [weak session, weak window] in
+                guard session?.generation == generation else { return }
                 window?.surface.confirmInputFocus(focus, pointerSequence: pointer)
             }
         }
         if runtime.containerPreferences.directIMEEnabled, let imePort = endpoint.imePort {
-            stream.enableDirectInput(port: imePort) { [weak self, weak window] focus in
-                DispatchQueue.main.async { [weak self, weak window] in
-                    guard self?.displayGeneration == generation else { return }
+            stream.enableDirectInput(port: imePort) { [weak session, weak window] focus in
+                DispatchQueue.main.async { [weak session, weak window] in
+                    guard session?.generation == generation else { return }
                     window?.surface.setInputFocus(focus)
                 }
             }
@@ -644,104 +855,116 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 stream?.sendText(text, lease: lease) { inputIssue($0 ?? "") }
             }
         }
-        stream.onClipboard = { [weak self] text in
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.displayGeneration == generation,
+        stream.onClipboard = { [weak self, weak session] text in
+            DispatchQueue.main.async { [weak self, weak session] in
+                guard let self, session?.generation == generation,
                       self.runtime.containerPreferences.clipboardSyncEnabled else { return }
-                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
             }
         }
         window.surface.sendInput = { [weak stream] in stream?.send($0) }
         stream.decoder.onFrame = { [weak window] frame in window?.surface.accept(frame, session: generation) }
-        stream.decoder.onFirstDecodedFrame = { [weak self] in
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.displayGeneration == generation else { return }
-                self.hasDecodedFrame = true
+        stream.decoder.onFirstDecodedFrame = { [weak session] in
+            DispatchQueue.main.async { [weak session] in
+                guard let session, session.generation == generation else { return }
+                session.hasDecodedFrame = true
             }
         }
-        stream.onSize = { [weak self, weak window] width, height in
-            DispatchQueue.main.async { [weak self, weak window] in
-                guard self?.displayGeneration == generation else { return }
+        stream.onSize = { [weak session, weak window] width, height in
+            DispatchQueue.main.async { [weak session, weak window] in
+                guard session?.generation == generation else { return }
                 let newSize = CGSize(width: width, height: height)
                 window?.surface.pixelSize = newSize
                 window?.syncToPixelSize(newSize)
             }
         }
-        stream.onError = { [weak self] error in
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.displayGeneration == generation else { return }
-                self.displayFailed(error.localizedDescription)
+        stream.onError = { [weak self, weak session] error in
+            DispatchQueue.main.async { [weak self, weak session] in
+                guard let self, let session, session.generation == generation else { return }
+                self.displayFailed(for: session.package, message: error.localizedDescription)
             }
         }
-        window.surface.onFirstFrame = { [weak self] in
-            guard let self, self.displayGeneration == generation else { return }
-            self.hasPresentedFrame = true
-            if self.hasObservedTarget { self.applicationWindow?.ready() }
-            let isHorizontal = self.runtime.containerPreferences.tabletMode
+        window.surface.onFirstFrame = { [weak self, weak session] in
+            guard let self, let session, session.generation == generation else { return }
+            session.hasPresentedFrame = true
+            if session.hasObservedTarget { session.window.ready() }
+            let isHorizontal = session.tabletMode
             Task { @MainActor [weak self] in
                 await self?.runtime.configureVirtualDisplayOrientation(tabletMode: isHorizontal)
             }
         }
         stream.connect(port: endpoint.port, startApp: endpoint.package)
-        startPresenceMonitor(generation: generation)
+        startPresenceMonitor(for: session, generation: generation)
         let appTitle = resolvedAppMetadata(for: endpoint.package).title
-        Task { [weak self] in
+        Task { [weak self, weak session] in
             var deadline = DisplayStartupDeadline(at: CACurrentMediaTime())
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(500))
-                guard let self, self.displayGeneration == generation, self.stream != nil,
-                      !(self.hasObservedTarget && self.hasPresentedFrame) else { return }
-                let window = self.applicationWindow?.window
-                let presentable = window?.isVisible == true && window?.isMiniaturized == false
-                    && window?.occlusionState.contains(.visible) == true
-                if deadline.expired(at: CACurrentMediaTime(), decoded: self.hasDecodedFrame,
-                                    targetVisible: self.hasObservedTarget, presentable: presentable,
-                                    applicationActive: NSApp.isActive && window?.isKeyWindow == true) {
-                    self.displayFailed("\(appTitle) 暂时没有产生可显示的画面。请重新打开；若仍失败，请停止容器后重试。")
+                guard let self, let session, session.generation == generation, session.stream != nil,
+                      !(session.hasObservedTarget && session.hasPresentedFrame) else { return }
+                let win = session.window.window
+                let presentable = win?.isVisible == true && win?.isMiniaturized == false
+                    && win?.occlusionState.contains(.visible) == true
+                if deadline.expired(
+                    at: CACurrentMediaTime(),
+                    decoded: session.hasDecodedFrame,
+                    targetVisible: session.hasObservedTarget,
+                    presentable: presentable,
+                    applicationActive: NSApp.isActive && win?.isKeyWindow == true
+                ) {
+                    self.displayFailed(
+                        for: session.package,
+                        message: "\(appTitle) 暂时没有产生可显示的画面。请重新打开；若仍失败，请停止容器后重试。"
+                    )
                     return
                 }
             }
         }
     }
 
-    private func startPresenceMonitor(generation: UUID) {
-        presenceTimer?.invalidate()
-        absentCount = 0
-        let monitoredPackage = activePackage
+    private func startPresenceMonitor(for session: AppWindowSession, generation: UUID) {
+        session.presenceTimer?.invalidate()
+        session.absentCount = 0
+        let monitoredPackage = session.package
         let appTitle = resolvedAppMetadata(for: monitoredPackage).title
         var tickCount = 0
-        presenceTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, !self.presenceQueryInProgress, self.displayGeneration == generation, self.stream != nil else { return }
+        session.presenceTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self, weak session] _ in
+            Task { @MainActor [weak self, weak session] in
+                guard let self, let session,
+                      !session.presenceQueryInProgress,
+                      session.generation == generation,
+                      session.stream != nil else { return }
                 tickCount &+= 1
-                if self.hasObservedTarget && self.absentCount == 0 && (tickCount % 5) != 0 {
+                if session.hasObservedTarget && session.absentCount == 0 && (tickCount % 5) != 0 {
                     return
                 }
-                self.presenceQueryInProgress = true
+                session.presenceQueryInProgress = true
                 let presence = await self.runtime.targetPresence(package: monitoredPackage)
-                self.presenceQueryInProgress = false
-                guard self.displayGeneration == generation else { return }
+                session.presenceQueryInProgress = false
+                guard session.generation == generation else { return }
                 switch presence {
                 case .notRunning:
-                    if self.hasObservedTarget {
-                        self.absentCount += 1
-                        if self.absentCount >= 2 { self.displayFailed("\(appTitle) 已退出。可以在容器管理台重新打开。") }
+                    if session.hasObservedTarget {
+                        session.absentCount += 1
+                        if session.absentCount >= 2 {
+                            self.displayFailed(for: monitoredPackage, message: "\(appTitle) 已退出。可以在容器管理台重新打开。")
+                        }
                     }
                 case .visible, .systemInteraction:
-                    self.absentCount = 0
-                    if !self.hasObservedTarget {
-                        self.hasObservedTarget = true
-                        // Allow rendering under the loading state; readiness waits for an actual presentation.
-                        self.applicationWindow?.awaitFirstPresentation()
-                        if self.hasPresentedFrame { self.applicationWindow?.ready() }
+                    session.absentCount = 0
+                    if !session.hasObservedTarget {
+                        session.hasObservedTarget = true
+                        session.window.awaitFirstPresentation()
+                        if session.hasPresentedFrame { session.window.ready() }
                         self.refreshTelemetry()
                         if let snapDir = ProcessInfo.processInfo.environment["ANDROID_USE_SNAPSHOT_DIR"] {
                             let dirURL = URL(fileURLWithPath: snapDir, isDirectory: true)
-                            Task { @MainActor [weak self] in
+                            Task { @MainActor [weak self, weak session] in
                                 try? await Task.sleep(for: .seconds(3))
-                                guard let self else { return }
+                                guard let self, let session else { return }
                                 self.refreshTelemetry()
-                                self.writeWindowSnapshot(self.applicationWindow?.window, to: dirURL.appendingPathComponent("macdora-app-window.png"))
+                                self.writeWindowSnapshot(session.window.window, to: dirURL.appendingPathComponent("macdora-app-window.png"))
                                 for (section, filename) in [
                                     (ManagementSection.apps, "macdora-apps-running.png"),
                                     (ManagementSection.monitor, "macdora-monitor-running.png"),
@@ -757,57 +980,65 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                             }
                         }
                     }
-                case .unavailable: break
+                case .unavailable:
+                    break
                 }
             }
         }
     }
 
-    private func displayFailed(_ message: String) {
-        displayGeneration = UUID()
-        let generation = displayGeneration
-        openingPackage = nil
-        presenceTimer?.invalidate(); presenceTimer = nil
-        stream?.stop(); stream = nil
-        presentationTimes.removeAll()
-        applicationWindow?.failure(message)
+    private func displayFailed(for package: String, message: String) {
+        guard let session = appSessions[package] else {
+            manager.show(detail: message)
+            return
+        }
+        let generation = UUID()
+        session.generation = generation
+        session.isOpening = false
+        session.stopStreamAndTimers()
+        session.window.failure(message)
         if runtime.state == .ready || runtime.state == .running {
             manager.show(detail: message)
             manager.update(runtime.state)
         } else {
             manager.update(.failed(message))
         }
-        Task { [weak self] in
-            guard let self, self.displayGeneration == generation else { return }
-            await self.runtime.closeDisplay()
-            self.manager.updateApps(self.runtime.cachedContainerApps(), activePackage: nil)
+        Task { [weak self, weak session] in
+            guard let self, let session, session.generation == generation else { return }
+            await self.runtime.closeDisplay(package: package)
+            self.syncManagerApps()
             self.manager.update(self.runtime.state)
         }
     }
 
-    private func closedApplicationWindow() {
-        dockPresentation.update(app: nil)
-        displayGeneration = UUID()
-        openingPackage = nil
-        let previousOperation = operation
-        previousOperation?.cancel()
-        let generation = displayGeneration
-        presenceTimer?.invalidate(); presenceTimer = nil
-        stream?.stop(); stream = nil
-        presentationTimes.removeAll()
-        applicationWindow?.surface.sendInput = nil
-        operation = Task { [weak self] in
+    private func closedApplicationWindow(for package: String) {
+        guard let session = appSessions.removeValue(forKey: package) else { return }
+        session.generation = UUID()
+        session.isOpening = false
+        session.openTask?.cancel()
+        session.stopStreamAndTimers()
+        session.window.surface.sendInput = nil
+
+        if let nextSession = appSessions.values.first {
+            activePackage = nextSession.package
+            dockPresentation.update(app: resolvedAppMetadata(for: nextSession.package))
+        } else {
+            dockPresentation.update(app: nil)
+        }
+
+        let noRemainingWindows = appSessions.isEmpty
+        Task { [weak self] in
             guard let self else { return }
-            await previousOperation?.value
-            guard self.displayGeneration == generation else { return }
-            await self.runtime.closeDisplay()
-            if !self.runtime.shouldKeepRuntimeInBackground {
+            await self.runtime.closeDisplay(package: package)
+            if noRemainingWindows && !self.runtime.shouldKeepRuntimeInBackground {
                 _ = await self.runtime.stop()
             }
-            if !self.terminating, self.displayGeneration == generation {
-                self.manager.updateApps(self.runtime.cachedContainerApps(), activePackage: nil)
+            if !self.terminating {
+                self.syncManagerApps()
                 self.manager.update(self.runtime.state)
-                self.manager.presentWindow()
+                if noRemainingWindows {
+                    self.manager.presentWindow()
+                }
             }
         }
     }
@@ -836,7 +1067,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 self.manager.show(detail: "正在安装 \(fileName)…")
                 try await self.runtime.installAPK(url)
                 let apps = await self.runtime.refreshContainerApps()
-                self.manager.updateApps(apps, activePackage: self.runtime.activeDisplayPackage)
+                self.syncManagerApps(apps)
                 self.manager.show(detail: "\(fileName) 安装完成。")
             } catch {
                 self.manager.update(.failed(error.localizedDescription))
@@ -846,15 +1077,20 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
 
     private func stopRuntime() {
         guard !runtime.state.isBusy, !terminating else { return }
-        operation?.cancel(); displayGeneration = UUID()
-        presenceTimer?.invalidate(); presenceTimer = nil
-        stream?.stop(); stream = nil
-        presentationTimes.removeAll()
-        applicationWindow?.performExplicitClose()
+        operation?.cancel()
+        let sessions = Array(appSessions.values)
+        appSessions.removeAll()
+        for session in sessions {
+            session.generation = UUID()
+            session.openTask?.cancel()
+            session.stopStreamAndTimers()
+            session.window.performRuntimeOperationClose()
+        }
+        dockPresentation.update(app: nil)
         operation = Task { [weak self] in
             guard let self else { return }
             _ = await self.runtime.stop()
-            self.manager.updateApps(self.runtime.cachedContainerApps(), activePackage: nil)
+            self.syncManagerApps()
             self.refreshTelemetry()
         }
     }
@@ -931,25 +1167,57 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateContainerPreferences(_ prefs: ContainerPreferences) {
         let previous = runtime.containerPreferences
-        runtime.containerPreferences = prefs
-        applicationWindow?.surface.clipboardSyncEnabled = prefs.clipboardSyncEnabled
-        if !prefs.directIMEEnabled {
-            applicationWindow?.surface.sendDirectText = nil
+        var updatedPrefs = prefs
+        if previous.resolutionPreset != prefs.resolutionPreset || previous.tabletMode != prefs.tabletMode {
+            for pkg in appSessions.keys {
+                var override = updatedPrefs.displayPreference(for: pkg)
+                if previous.resolutionPreset != prefs.resolutionPreset {
+                    override.resolutionPreset = prefs.resolutionPreset
+                }
+                if previous.tabletMode != prefs.tabletMode {
+                    override.tabletMode = prefs.tabletMode
+                }
+                updatedPrefs.appDisplayOverrides[pkg] = override
+            }
         }
-        applicationWindow?.applyDisplayMode(
-            tabletMode: prefs.tabletMode,
-            preferredPixelSize: prefs.preferredPixelSize
-        )
+        runtime.containerPreferences = updatedPrefs
+
+        for session in appSessions.values {
+            session.window.surface.clipboardSyncEnabled = updatedPrefs.clipboardSyncEnabled
+            if !updatedPrefs.directIMEEnabled {
+                session.window.surface.sendDirectText = nil
+            }
+            if previous.resolutionPreset != updatedPrefs.resolutionPreset {
+                session.resolutionPreset = updatedPrefs.resolutionPreset
+            }
+            if previous.tabletMode != updatedPrefs.tabletMode {
+                session.tabletMode = updatedPrefs.tabletMode
+            }
+            let targetPixels = ContainerPreferences.pixelSize(
+                for: session.resolutionPreset,
+                tabletMode: session.tabletMode
+            )
+            session.window.applyDisplayMode(
+                tabletMode: session.tabletMode,
+                preferredPixelSize: targetPixels,
+                resolutionPreset: session.resolutionPreset
+            )
+        }
+
         syncPreferencesToManager()
-        if (previous.tabletMode != prefs.tabletMode || previous.resolutionPreset != prefs.resolutionPreset),
+        if (previous.tabletMode != updatedPrefs.tabletMode || previous.resolutionPreset != updatedPrefs.resolutionPreset),
            runtime.state == .running,
-           let activePkg = runtime.activeDisplayPackage {
-            manager.show(detail: "已切换至\(prefs.resolutionDisplayLabel) · \(prefs.targetFPS)Hz。")
-            openApp(package: activePkg, forceReconfigureDisplay: true)
-        } else if previous.tabletMode != prefs.tabletMode, runtime.state == .ready {
-            let expectedTabletMode = prefs.tabletMode
-            let summary = "\(prefs.resolutionDisplayLabel) · \(prefs.targetFPS)Hz"
-            manager.show(detail: "正在切换至\(prefs.resolutionDisplayLabel) · \(prefs.targetFPS)Hz…")
+           !appSessions.isEmpty {
+            manager.show(detail: "已切换至\(updatedPrefs.resolutionDisplayLabel) · \(updatedPrefs.targetFPS)Hz。")
+            let packagesToReconfigure = Array(appSessions.keys)
+            for pkg in packagesToReconfigure {
+                openApp(package: pkg, forceReconfigureDisplay: true)
+            }
+        } else if (previous.tabletMode != updatedPrefs.tabletMode || previous.resolutionPreset != updatedPrefs.resolutionPreset),
+                  runtime.state == .ready {
+            let expectedTabletMode = updatedPrefs.tabletMode
+            let summary = "\(updatedPrefs.resolutionDisplayLabel) · \(updatedPrefs.targetFPS)Hz"
+            manager.show(detail: "正在切换至\(updatedPrefs.resolutionDisplayLabel) · \(updatedPrefs.targetFPS)Hz…")
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let applied = await self.runtime.applyGuestDeviceFormFactor(tabletMode: expectedTabletMode)
@@ -961,7 +1229,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         } else {
-            manager.show(detail: "已切换至\(prefs.resolutionDisplayLabel) · \(prefs.targetFPS)Hz。")
+            manager.show(detail: "已切换至\(updatedPrefs.resolutionDisplayLabel) · \(updatedPrefs.targetFPS)Hz。")
         }
     }
 
@@ -994,15 +1262,19 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             guard changed else { return }
-            if self.runtime.state == .running, let pkg = self.runtime.activeDisplayPackage {
+            if self.runtime.state == .running, !self.appSessions.isEmpty {
+                let openPackages = Array(self.appSessions.keys)
                 self.manager.show(detail: allowed ? "已启用摄像头权限，正在应用更改…" : "已关闭摄像头权限，正在应用更改…")
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    self.stream?.stop()
-                    self.stream = nil
+                    for session in self.appSessions.values {
+                        session.stopStreamAndTimers()
+                    }
                     await self.runtime.closeDisplay()
                     _ = await self.runtime.stop()
-                    self.openApp(package: pkg, forceReconfigureDisplay: true)
+                    for pkg in openPackages {
+                        self.openApp(package: pkg, forceReconfigureDisplay: true)
+                    }
                 }
             } else if self.runtime.state == .ready {
                 self.manager.show(detail: allowed ? "已启用摄像头权限，正在刷新运行环境…" : "已关闭摄像头权限，正在刷新运行环境…")
@@ -1031,9 +1303,14 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if let window = applicationWindow?.window,
-           window.isVisible || window.isMiniaturized || openingPackage != nil {
-            applicationWindow?.presentWindow()
+        if let session = activeSession,
+           let win = session.window.window,
+           win.isVisible || win.isMiniaturized || session.isOpening {
+            session.window.presentWindow()
+        } else if let injected = injectedApplicationWindow,
+                  let win = injected.window,
+                  win.isVisible || win.isMiniaturized {
+            injected.presentWindow()
         } else {
             manager.presentWindow()
         }
@@ -1042,10 +1319,27 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
-        if let window = applicationWindow?.window, window.isVisible || window.isMiniaturized || openingPackage != nil {
-            let restore = menu.addItem(withTitle: "返回 \(window.title)", action: #selector(restoreApplicationCommand), keyEquivalent: "")
+        let sessions = appSessions.values.sorted(by: { $0.package < $1.package })
+        var addedRestoreItems = false
+        for session in sessions {
+            guard let win = session.window.window,
+                  win.isVisible || win.isMiniaturized || session.isOpening else { continue }
+            let restore = menu.addItem(withTitle: "返回 \(win.title)", action: #selector(restoreSpecificApplicationCommand(_:)), keyEquivalent: "")
             restore.target = self
-            restore.image = window.miniwindowImage
+            restore.representedObject = session.package
+            restore.image = win.miniwindowImage
+            addedRestoreItems = true
+        }
+        if !addedRestoreItems,
+           let injected = injectedApplicationWindow,
+           let win = injected.window,
+           win.isVisible || win.isMiniaturized {
+            let restore = menu.addItem(withTitle: "返回 \(win.title)", action: #selector(restoreSpecificApplicationCommand(_:)), keyEquivalent: "")
+            restore.target = self
+            restore.image = win.miniwindowImage
+            addedRestoreItems = true
+        }
+        if addedRestoreItems {
             menu.addItem(.separator())
         }
         let management = menu.addItem(withTitle: "打开 \(MacdoraBrand.appName)", action: #selector(managementCommand), keyEquivalent: "")
@@ -1053,32 +1347,44 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         return menu
     }
 
-    @objc private func restoreApplicationCommand() { applicationWindow?.presentWindow() }
+    @objc private func restoreSpecificApplicationCommand(_ sender: NSMenuItem) {
+        if let pkg = sender.representedObject as? String, let session = appSessions[pkg] {
+            activePackage = pkg
+            session.window.presentWindow()
+        } else {
+            applicationWindow?.presentWindow()
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if isRestartingForUpdate || runtime.state == .stopped {
             terminating = true
             operation?.cancel()
-            openingPackage = nil
-            displayGeneration = UUID()
-            presenceTimer?.invalidate(); presenceTimer = nil
             telemetryTimer?.invalidate(); telemetryTimer = nil
-            stream?.stop(); stream = nil
+            for session in appSessions.values {
+                session.openTask?.cancel()
+                session.stopStreamAndTimers()
+            }
             return .terminateNow
         }
         if terminating { return .terminateLater }
-        terminating = true; operation?.cancel(); displayGeneration = UUID()
-        openingPackage = nil
-        presenceTimer?.invalidate(); presenceTimer = nil
+        terminating = true; operation?.cancel()
         telemetryTimer?.invalidate(); telemetryTimer = nil
-        stream?.stop(); stream = nil
-        applicationWindow?.failure("正在正常退出 \(MacdoraBrand.appName)…")
+        for session in appSessions.values {
+            session.generation = UUID()
+            session.openTask?.cancel()
+            session.stopStreamAndTimers()
+            session.window.failure("正在正常退出 \(MacdoraBrand.appName)…")
+        }
         Task {
             let completed = await runtime.stop()
             if completed { sender.reply(toApplicationShouldTerminate: true) }
             else {
                 terminating = false
-                applicationWindow?.failure(RuntimeError.stopUnconfirmed.localizedDescription)
+                for session in appSessions.values {
+                    session.window.failure(RuntimeError.stopUnconfirmed.localizedDescription)
+                }
                 manager.update(runtime.state); manager.showWindow(nil)
                 sender.reply(toApplicationShouldTerminate: false)
             }

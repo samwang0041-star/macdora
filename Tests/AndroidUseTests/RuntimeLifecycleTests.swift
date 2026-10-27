@@ -555,6 +555,94 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertFalse(catalog.contains(where: { $0.package == "local.androiduse.ime" }))
         XCTAssertTrue(catalog.contains(where: { $0.package == "com.example.office" }))
     }
+
+    func testFourConcurrentAppsOpenAndCloseIndependentlyInUnityMode() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        let packages = [
+            "com.tencent.mm",
+            "com.icbc.im",
+            "com.sankuai.meituan",
+            "com.coolapk.market"
+        ]
+        fixture.registry.installedPackages = Set(packages + ["local.androiduse.ime"])
+
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+
+        var endpoints: [String: DisplayEndpoint] = [:]
+        let presets = ["1280x800_comfortable", "960x600", "1440x900", "1920x1200_hidpi"]
+        for (idx, pkg) in packages.enumerated() {
+            let ep = try await fixture.controller.openDisplay(
+                package: pkg,
+                resolutionPreset: presets[idx],
+                tabletMode: idx % 2 == 0,
+                replaceExisting: false
+            )
+            endpoints[pkg] = ep
+        }
+
+        XCTAssertEqual(fixture.controller.activeDisplayPackages.count, 4)
+        XCTAssertEqual(Set(fixture.controller.activeDisplayPackages), Set(packages))
+        XCTAssertEqual(Set(endpoints.values.map(\.port)).count, 4, "Each app window must have its own dedicated scrcpy video/control port.")
+        XCTAssertEqual(Set(endpoints.values.compactMap(\.imePort)).count, 1, "All concurrent app windows share the single direct-IME forward port.")
+        XCTAssertEqual(fixture.registry.servers.filter(\.isRunning).count, 4)
+
+        // Verify per-app launch scripts do not mutate display 0 wm size/density (only initial boot script does)
+        let appLaunchScripts = Array(fixture.registry.guestEnvironmentScripts.dropFirst())
+        XCTAssertEqual(appLaunchScripts.count, 4)
+        for script in appLaunchScripts {
+            XCTAssertFalse(script.contains("wm size "), "Per-app virtual display setup must not mutate default display 0 size.")
+            XCTAssertFalse(script.contains("wm density "), "Per-app virtual display setup must not mutate default display 0 density.")
+        }
+
+        // Reconfiguring one window (e.g. com.icbc.im to 1920x1200_hidpi landscape) replaces only that session
+        // and leaves the other 3 sessions untouched with their original ports and configs.
+        let reconfiguredICBC = try await fixture.controller.openDisplay(
+            package: "com.icbc.im",
+            resolutionPreset: "1920x1200_hidpi",
+            tabletMode: true,
+            replaceExisting: false
+        )
+        XCTAssertNotEqual(reconfiguredICBC.port, endpoints["com.icbc.im"]?.port)
+        XCTAssertEqual(fixture.controller.displayEndpoint(for: "com.tencent.mm")?.port, endpoints["com.tencent.mm"]?.port)
+        XCTAssertEqual(fixture.controller.displayEndpoint(for: "com.sankuai.meituan")?.port, endpoints["com.sankuai.meituan"]?.port)
+        XCTAssertEqual(fixture.controller.displayEndpoint(for: "com.coolapk.market")?.port, endpoints["com.coolapk.market"]?.port)
+        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "com.icbc.im")?.resolutionPreset, "1920x1200_hidpi")
+        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "com.icbc.im")?.tabletMode, true)
+        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "com.tencent.mm")?.resolutionPreset, "1280x800_comfortable")
+        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "com.tencent.mm")?.tabletMode, true)
+        XCTAssertEqual(fixture.registry.servers.filter(\.isRunning).count, 4)
+
+        // Opening a 5th concurrent app must fail with maxConcurrentDisplaysReached(4)
+        do {
+            _ = try await fixture.controller.openDisplay(
+                package: "com.android.settings",
+                replaceExisting: false
+            )
+            XCTFail("Expected 5th concurrent display to be rejected at maxConcurrentDisplays = 4.")
+        } catch {
+            XCTAssertEqual(error as? RuntimeError, .maxConcurrentDisplaysReached(4))
+        }
+
+        // Closing one app keeps the remaining 3 running
+        await fixture.controller.closeDisplay(package: "com.icbc.im")
+        XCTAssertNil(fixture.controller.displayEndpoint(for: "com.icbc.im"))
+        XCTAssertEqual(fixture.controller.activeDisplayPackages.count, 3)
+        XCTAssertEqual(fixture.controller.state, .running)
+        XCTAssertEqual(fixture.registry.servers.filter(\.isRunning).count, 3)
+
+        // Closing the remaining 3 apps transitions the runtime back to .ready
+        for pkg in ["com.tencent.mm", "com.sankuai.meituan", "com.coolapk.market"] {
+            await fixture.controller.closeDisplay(package: pkg)
+        }
+        XCTAssertTrue(fixture.controller.activeDisplayPackages.isEmpty)
+        XCTAssertEqual(fixture.controller.state, .ready)
+        XCTAssertTrue(fixture.registry.forwardPorts.isEmpty)
+
+        let stopped = await fixture.controller.stop()
+        XCTAssertTrue(stopped)
+    }
 }
 
 private actor LifecycleGate {
@@ -596,6 +684,7 @@ private final class LifecycleRegistry: @unchecked Sendable {
     var servers: [LifecycleHandle] = []
     var forwardPorts = Set<UInt16>()
     var nextPort: UInt16 = 55000
+    var nextSCID: UInt32 = 0x20
     var adbStopCalls = 0
     var connectivityCalls = 0
     var connectivityReplies: [String] = []
@@ -769,7 +858,7 @@ private final class LifecycleRunner: ProcessExecuting, @unchecked Sendable {
                 return "Active default network: 100\nNetworkAgentInfo{network{100} ni{MOBILE[HSPA] CONNECTED} nc{[ Capabilities: INTERNET&NOT_RESTRICTED ]}}\n"
             }
         }
-        else if args.last == "/proc/net/unix" { reply = "@scrcpy_00000021\n" }
+        else if args.last == "/proc/net/unix" { reply = "@scrcpy_00000021\n@scrcpy_00000022\n@scrcpy_00000023\n@scrcpy_00000024\n@scrcpy_00000025\n" }
         else { reply = "Success\n" }
         return ProcessResult(exitCode: 0, stdout: Data(reply.utf8), timedOut: false)
     }
@@ -883,7 +972,7 @@ private struct LifecycleFixture {
         let fixtureRegistry = registry
         controller = RuntimeController(rootURL: root.appendingPathComponent("data"), defaults: isolatedDefaults, runner: LifecycleRunner(registry), processTerminator: terminator,
             environment: environment, seed: RuntimeSeed(directoryURL: source, scrcpyServerURL: jar), hooks: RuntimeControllerHooks(
-                freePort: { fixtureRegistry.withLock { fixtureRegistry.nextPort += 1; return fixtureRegistry.nextPort } }, randomSCID: { 0x21 },
+                freePort: { fixtureRegistry.withLock { fixtureRegistry.nextPort += 1; return fixtureRegistry.nextPort } }, randomSCID: { fixtureRegistry.withLock { fixtureRegistry.nextSCID += 1; return fixtureRegistry.nextSCID } },
                 localHostPortAvailable: { _ in false }))
     }
     func remove() {

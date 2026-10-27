@@ -102,4 +102,72 @@ final class ProtocolTests: XCTestCase {
             XCTAssertLessThanOrEqual(nsWin.frame.height, screen.height + 1)
         }
     }
+
+    func testResolutionPresetsAndPerAppDisplayOverrides() throws {
+        XCTAssertEqual(ContainerPreferences.resolutionOptions.map(\.preset), [
+            "960x600",
+            "1280x800_comfortable",
+            "1440x900",
+            "1920x1200_hidpi",
+            "720p",
+            "1080p",
+            "1440p"
+        ])
+
+        let comfortableCmdLandscape = RuntimePorts.commandLine(
+            scid: 0x21,
+            resolutionPreset: "1280x800_comfortable",
+            targetFPS: 60,
+            tabletMode: true
+        )
+        XCTAssertTrue(comfortableCmdLandscape.contains("new_display=1280x800/213"))
+
+        let comfortableCmdPortrait = RuntimePorts.commandLine(
+            scid: 0x22,
+            resolutionPreset: "1280x800_comfortable",
+            targetFPS: 60,
+            tabletMode: false
+        )
+        XCTAssertTrue(comfortableCmdPortrait.contains("new_display=720x1280/320"))
+
+        let compactCmd = RuntimePorts.commandLine(
+            scid: 0x23,
+            resolutionPreset: "960x600",
+            targetFPS: 60,
+            tabletMode: true
+        )
+        XCTAssertTrue(compactCmd.contains("new_display=960x600/200"))
+
+        let hidpiCmd = RuntimePorts.commandLine(
+            scid: 0x24,
+            resolutionPreset: "1920x1200_hidpi",
+            targetFPS: 60,
+            tabletMode: true
+        )
+        XCTAssertTrue(hidpiCmd.contains("new_display=1920x1200/320"))
+
+        var prefs = ContainerPreferences.default
+        prefs.appDisplayOverrides["com.tencent.mm"] = AppDisplayPreference(
+            resolutionPreset: "1280x800_comfortable",
+            tabletMode: true
+        )
+        prefs.appDisplayOverrides["com.icbc.im"] = AppDisplayPreference(
+            resolutionPreset: "960x600",
+            tabletMode: false
+        )
+        let data = try JSONEncoder().encode(prefs)
+        let decoded = try JSONDecoder().decode(ContainerPreferences.self, from: data)
+        XCTAssertEqual(
+            decoded.displayPreference(for: "com.tencent.mm"),
+            AppDisplayPreference(resolutionPreset: "1280x800_comfortable", tabletMode: true)
+        )
+        XCTAssertEqual(
+            decoded.displayPreference(for: "com.icbc.im"),
+            AppDisplayPreference(resolutionPreset: "960x600", tabletMode: false)
+        )
+        XCTAssertEqual(
+            decoded.displayPreference(for: "com.android.settings"),
+            AppDisplayPreference(resolutionPreset: "1080p", tabletMode: true)
+        )
+    }
 }

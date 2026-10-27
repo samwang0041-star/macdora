@@ -26,6 +26,7 @@ enum RuntimeError: LocalizedError, Equatable {
     case stopUnconfirmed
     case uninstallUnconfirmed
     case upgradeRequiresStop
+    case maxConcurrentDisplaysReached(Int)
     case unexpected(String)
 
     var errorDescription: String? {
@@ -52,6 +53,7 @@ enum RuntimeError: LocalizedError, Equatable {
         case .stopUnconfirmed: return "尚未确认后台进程退出。请重试停止环境，当前会话会保留进程归属。"
         case .uninstallUnconfirmed: return "卸载命令已执行，但无法确认应用列表。请刷新应用列表核对，未确认前请勿重复操作。"
         case .upgradeRequiresStop: return "请先停止运行环境，再升级 Android 系统。"
+        case .maxConcurrentDisplaysReached(let limit): return "最多可同时开启 \(limit) 个独立应用窗口，请先关闭一个窗口后再打开新应用。"
         case .unexpected(let detail): return "运行环境发生内部错误：\(detail)。"
         }
     }
@@ -999,32 +1001,24 @@ enum RuntimePorts {
         tabletMode: Bool = true
     ) -> String {
         let scidHex = String(format: "%08x", scid)
-        let displaySpec: String
+        let displaySpec = ContainerPreferences.scrcpyNewDisplaySpec(
+            for: resolutionPreset,
+            tabletMode: tabletMode
+        )
+        let pixelSize = ContainerPreferences.pixelSize(
+            for: resolutionPreset,
+            tabletMode: tabletMode
+        )
+        let maxAxis = max(pixelSize.width, pixelSize.height)
         let bitRate: Int
-        if tabletMode {
-            switch resolutionPreset {
-            case "720p":
-                displaySpec = "1280x800/160"
-                bitRate = 14_000_000
-            case "1440p":
-                displaySpec = "2560x1600/320"
-                bitRate = 36_000_000
-            default:
-                displaySpec = "1920x1200/240"
-                bitRate = 24_000_000
-            }
+        if resolutionPreset == "1440p" || maxAxis >= 2400 {
+            bitRate = 36_000_000
+        } else if resolutionPreset == "720p" || maxAxis <= 1280 {
+            bitRate = 14_000_000
+        } else if maxAxis <= 1600 {
+            bitRate = 18_000_000
         } else {
-            switch resolutionPreset {
-            case "720p":
-                displaySpec = "800x1280/160"
-                bitRate = 14_000_000
-            case "1440p":
-                displaySpec = "1600x2560/320"
-                bitRate = 36_000_000
-            default:
-                displaySpec = "1200x1920/240"
-                bitRate = 24_000_000
-            }
+            bitRate = 24_000_000
         }
         let clampedFPS = [30, 45, 60].contains(targetFPS) ? targetFPS : 60
         return "CLASSPATH=/data/local/tmp/android-use-scrcpy.jar"
@@ -1078,11 +1072,14 @@ struct PreparedRuntime: Sendable {
 
 @MainActor
 final class RuntimeController: SystemPluginHostBridge {
+    static let maxConcurrentDisplays = 4
+
     let rootURL: URL
     let pluginManager: SystemPluginManager
     private(set) var state: RuntimeState = .stopped
     var onState: ((RuntimeState) -> Void)?
     var onDisplayTerminated: (() -> Void)?
+    var onPackageDisplayTerminated: ((String) -> Void)?
     var onPluginBanner: ((String) -> Void)?
     var onPluginStateChanged: (() -> Void)?
     var onOfficeKeepAwakeChanged: (() -> Void)?
@@ -1174,26 +1171,60 @@ final class RuntimeController: SystemPluginHostBridge {
     private var emulatorProcess: (any OwnedProcessHandle)?
     private var emulatorSerial: UInt64 = 0
     private var bootedCameraEnabled: Bool?
-    private var serverProcess: (any OwnedProcessHandle)?
+    private struct ActiveDisplaySession {
+        let package: String
+        let endpoint: DisplayEndpoint
+        let allocation: ForwardAllocation
+        let serverProcess: any OwnedProcessHandle
+        let serverSerial: UInt64
+        let tabletMode: Bool
+        let resolutionPreset: String
+        let openedOrder: UInt64
+    }
+    private var displaySessions: [String: ActiveDisplaySession] = [:]
+    private var displaySessionOrderCounter: UInt64 = 0
     private var serverSerial: UInt64 = 0
-    private var forwardAllocation: ForwardAllocation?
     private var inputForwardPort: UInt16?
     private var inputHelperInstalled = false
     private var inputHelperInstallTask: Task<Void, Error>?
-    private var displayEndpoint: DisplayEndpoint?
-    private var activeDisplayTabletMode: Bool?
-    private var activeDisplayResolutionPreset: String?
     private var isStopping = false
     private var cpuSampleTimes: [Int32: (totalNs: UInt64, wallTime: TimeInterval)] = [:]
     private var cachedDiskUsageGB: (value: Double, timestamp: TimeInterval)?
     private var diskUsageRefreshInFlight = false
 
+    private var mostRecentDisplaySession: ActiveDisplaySession? {
+        displaySessions.values.max(by: { $0.openedOrder < $1.openedOrder })
+    }
+
+    private var serverProcess: (any OwnedProcessHandle)? {
+        mostRecentDisplaySession?.serverProcess
+    }
+
+    private var displayEndpoint: DisplayEndpoint? {
+        mostRecentDisplaySession?.endpoint
+    }
+
     private var isDisplayOpen: Bool {
-        displayEndpoint != nil
+        !displaySessions.isEmpty
     }
 
     var activeDisplayPackage: String? {
-        displayEndpoint?.package
+        mostRecentDisplaySession?.package
+    }
+
+    var activeDisplayPackages: [String] {
+        displaySessions.values
+            .sorted(by: { $0.openedOrder < $1.openedOrder })
+            .map(\.package)
+    }
+
+    func displayEndpoint(for package: String) -> DisplayEndpoint? {
+        displaySessions[package]?.endpoint
+    }
+
+    func displaySessionConfig(for package: String) -> (resolutionPreset: String, tabletMode: Bool)? {
+        guard let session = displaySessions[package] else { return nil }
+        return (session.resolutionPreset, session.tabletMode)
     }
 
     private var officeKeepAwakePreferences: OfficeKeepAwakePreferences {
@@ -1676,7 +1707,7 @@ final class RuntimeController: SystemPluginHostBridge {
             throw RuntimeError.insecurePath
         }
         let ownedProcesses: [any OwnedProcessHandle] =
-            [serverProcess, emulatorProcess].compactMap { $0 }
+            displaySessions.values.map(\.serverProcess) + [emulatorProcess].compactMap { $0 }
         await waitForOwnedProcessesToExit(ownedProcesses)
         guard generation == operationGeneration,
               !isStopping,
@@ -2007,21 +2038,33 @@ final class RuntimeController: SystemPluginHostBridge {
         return result
     }
 
-    func openDisplay(package: String = DefaultApp.package) async throws -> DisplayEndpoint {
+    func openDisplay(
+        package: String = DefaultApp.package,
+        resolutionPreset: String? = nil,
+        tabletMode: Bool? = nil,
+        replaceExisting: Bool = true
+    ) async throws -> DisplayEndpoint {
         guard ContainerApp.isValidPackageIdentifier(package) else { throw RuntimeError.displayUnavailable }
         if let closingTask { await closingTask.value }
         if let openingTask {
-            if !openingTask.isCancelled, openingDisplayPackage == package {
+            if !openingTask.isCancelled, openingDisplayPackage == package, resolutionPreset == nil, tabletMode == nil {
                 return try await openingTask.value
             }
-            openingTask.cancel()
+            if replaceExisting || openingDisplayPackage == package {
+                openingTask.cancel()
+            }
             _ = try? await openingTask.value
             if let closingTask { await closingTask.value }
         }
         openingDisplayPackage = package
         let task = Task { [self] in
             do {
-                let result = try await performOpenDisplay(package: package)
+                let result = try await performOpenDisplay(
+                    package: package,
+                    resolutionPreset: resolutionPreset,
+                    tabletMode: tabletMode,
+                    replaceExisting: replaceExisting
+                )
                 openingTask = nil
                 openingDisplayPackage = nil
                 return result
@@ -2037,18 +2080,39 @@ final class RuntimeController: SystemPluginHostBridge {
         } onCancel: { task.cancel() }
     }
 
-    private func performOpenDisplay(package: String) async throws -> DisplayEndpoint {
+    private func performOpenDisplay(
+        package: String,
+        resolutionPreset: String?,
+        tabletMode: Bool?,
+        replaceExisting: Bool
+    ) async throws -> DisplayEndpoint {
         guard state == .ready || state == .running else {
             throw RuntimeError.runtimeNotReady
         }
-        let desiredPrefs = containerPreferences
-        if let displayEndpoint {
-            if displayEndpoint.package == package,
-               activeDisplayTabletMode == desiredPrefs.tabletMode,
-               activeDisplayResolutionPreset == desiredPrefs.resolutionPreset {
-                return displayEndpoint
+        let desiredAppPref = containerPreferences.displayPreference(for: package)
+        let targetPreset = resolutionPreset ?? desiredAppPref.resolutionPreset
+        let targetTabletMode = tabletMode ?? desiredAppPref.tabletMode
+
+        if replaceExisting {
+            if displaySessions.count == 1,
+               let existing = displaySessions[package],
+               existing.tabletMode == targetTabletMode,
+               existing.resolutionPreset == targetPreset {
+                return existing.endpoint
             }
-            await closeDisplayResources()
+            if !displaySessions.isEmpty {
+                await closeDisplayResources()
+            }
+        } else {
+            if let existing = displaySessions[package] {
+                if existing.tabletMode == targetTabletMode,
+                   existing.resolutionPreset == targetPreset {
+                    return existing.endpoint
+                }
+                await closeDisplayResources(forPackage: package)
+            } else if displaySessions.count >= Self.maxConcurrentDisplays {
+                throw RuntimeError.maxConcurrentDisplaysReached(Self.maxConcurrentDisplays)
+            }
         }
         guard !isOpeningDisplay else {
             throw RuntimeError.busy("显示连接")
@@ -2063,7 +2127,11 @@ final class RuntimeController: SystemPluginHostBridge {
         let operationGeneration = generation
         let prepared = try makePreparedRuntime()
         let localPort = try hooks.freePort()
-        let scid = hooks.randomSCID()
+        let usedSCIDs = Set(displaySessions.values.map { $0.allocation.scid })
+        var scid = hooks.randomSCID()
+        for _ in 0..<8 where usedSCIDs.contains(scid) || scid == 0 {
+            scid = hooks.randomSCID()
+        }
         guard scid != 0 else { throw RuntimeError.displayUnavailable }
 
         let allocation = try await environmentProvider.allocateForward(
@@ -2084,13 +2152,18 @@ final class RuntimeController: SystemPluginHostBridge {
             )
             throw RuntimeError.displayUnavailable
         }
-        forwardAllocation = allocation
 
+        var launchedHandle: (any OwnedProcessHandle)?
         do {
             guard isOperationCurrent(operationGeneration) else {
                 throw CancellationError()
             }
-            try await prepareGuestEnvironmentForApp(package: package, operationGeneration: operationGeneration)
+            try await prepareGuestEnvironmentForApp(
+                package: package,
+                resolutionPreset: targetPreset,
+                tabletMode: targetTabletMode,
+                operationGeneration: operationGeneration
+            )
             guard isOperationCurrent(operationGeneration) else { throw CancellationError() }
             await pluginManager.handleAppLaunching(package: package)
             guard isOperationCurrent(operationGeneration) else { throw CancellationError() }
@@ -2119,9 +2192,9 @@ final class RuntimeController: SystemPluginHostBridge {
             let prefs = containerPreferences
             let serverCommand = RuntimePorts.commandLine(
                 scid: scid,
-                resolutionPreset: prefs.resolutionPreset,
+                resolutionPreset: targetPreset,
                 targetFPS: prefs.targetFPS,
-                tabletMode: prefs.tabletMode
+                tabletMode: targetTabletMode
             )
             let handle = try await runner.launch(
                 ProcessInvocation(
@@ -2143,7 +2216,7 @@ final class RuntimeController: SystemPluginHostBridge {
                 await stopProcessesWithoutBlockingMainActor([handle])
                 throw CancellationError()
             }
-            serverProcess = handle
+            launchedHandle = handle
 
             let deadline = Date().addingTimeInterval(8)
             while Date() < deadline {
@@ -2172,7 +2245,7 @@ final class RuntimeController: SystemPluginHostBridge {
                             throw CancellationError()
                         }
                         await configureVirtualDisplayOrientation(
-                            tabletMode: prefs.tabletMode,
+                            tabletMode: targetTabletMode,
                             operationGeneration: operationGeneration
                         )
                         let endpoint = DisplayEndpoint(
@@ -2180,9 +2253,17 @@ final class RuntimeController: SystemPluginHostBridge {
                             package: package,
                             imePort: imePort
                         )
-                        displayEndpoint = endpoint
-                        activeDisplayTabletMode = prefs.tabletMode
-                        activeDisplayResolutionPreset = prefs.resolutionPreset
+                        displaySessionOrderCounter &+= 1
+                        displaySessions[package] = ActiveDisplaySession(
+                            package: package,
+                            endpoint: endpoint,
+                            allocation: allocation,
+                            serverProcess: handle,
+                            serverSerial: serverSerial,
+                            tabletMode: targetTabletMode,
+                            resolutionPreset: targetPreset,
+                            openedOrder: displaySessionOrderCounter
+                        )
                         updateState(.running)
                         return endpoint
                     }
@@ -2195,20 +2276,42 @@ final class RuntimeController: SystemPluginHostBridge {
             }
             throw RuntimeError.displayUnavailable
         } catch {
-            await closeDisplayResources()
+            if let launchedHandle {
+                await stopProcessesWithoutBlockingMainActor([launchedHandle])
+            }
+            try? await environmentProvider.removeForward(
+                adbURL: paths.adbURL,
+                environment: runtimeEnvironment(),
+                allocation: allocation
+            )
+            if displaySessions.isEmpty, let port = inputForwardPort {
+                inputForwardPort = nil
+                _ = try? await runADB(["forward", "--remove", "tcp:\(port)"], operation: "关闭文字输入通道", timeout: 3)
+            }
             throw error
         }
     }
 
-    func closeDisplay() async {
-        if let closingTask { await closingTask.value; return }
-        let opening = openingTask
+    func closeDisplay(package: String? = nil) async {
+        if let closingTask {
+            await closingTask.value
+            if package == nil || displaySessions[package!] == nil {
+                return
+            }
+        }
+        let opening = (package == nil || openingDisplayPackage == package) ? openingTask : nil
         opening?.cancel()
         let task = Task { [self] in
             _ = try? await opening?.value
-            await closeDisplayResources()
+            if let package {
+                await closeDisplayResources(forPackage: package)
+            } else {
+                await closeDisplayResources()
+            }
             closingTask = nil
-            if state == .running, displayEndpoint == nil, openingTask == nil { updateState(.ready) }
+            if state == .running, displaySessions.isEmpty, openingTask == nil {
+                updateState(.ready)
+            }
         }
         closingTask = task
         await task.value
@@ -2734,6 +2837,7 @@ final class RuntimeController: SystemPluginHostBridge {
                             }
                             try await prepareGuestEnvironmentForApp(
                                 package: DefaultApp.package,
+                                updateDefaultDisplayGeometry: true,
                                 operationGeneration: operationGeneration
                             )
                             guard isOperationCurrent(operationGeneration), !isStopping else {
@@ -3025,6 +3129,11 @@ final class RuntimeController: SystemPluginHostBridge {
             )
             try checkOperation()
         }
+        if let existingPort = inputForwardPort,
+           RuntimePorts.forwardPortIsReady(existingPort, localHostPortAvailable: hooks.localHostPortAvailable) {
+            try checkOperation()
+            return existingPort
+        }
         let port = try hooks.freePort()
         try await requireADB(["forward", "--no-rebind", "tcp:\(port)", "localabstract:androiduse_ime_v1"], operation: "连接本地文字输入")
         inputForwardPort = port
@@ -3101,6 +3210,9 @@ final class RuntimeController: SystemPluginHostBridge {
 
     private func prepareGuestEnvironmentForApp(
         package: String,
+        resolutionPreset: String? = nil,
+        tabletMode: Bool? = nil,
+        updateDefaultDisplayGeometry: Bool = false,
         operationGeneration: UInt64
     ) async throws {
         if let existingTask = guestEnvironmentTask {
@@ -3109,19 +3221,29 @@ final class RuntimeController: SystemPluginHostBridge {
         guard isOperationCurrent(operationGeneration), adbServerProcess?.isRunning == true else {
             throw CancellationError()
         }
-        let isHorizontal = containerPreferences.tabletMode
+        let globalPref = containerPreferences
+        let desiredPref = globalPref.displayPreference(for: package)
+        let resolvedPreset = resolutionPreset ?? (updateDefaultDisplayGeometry ? globalPref.resolutionPreset : desiredPref.resolutionPreset)
+        let isHorizontal = tabletMode ?? (updateDefaultDisplayGeometry ? globalPref.tabletMode : desiredPref.tabletMode)
         let ignoreOrientation = "true"
         let compatAction = "enable"
-        let d0Size = isHorizontal ? "1920x1200" : "1200x1920"
-        let d0Density = "240"
+        let pixelSize = ContainerPreferences.pixelSize(for: resolvedPreset, tabletMode: isHorizontal)
+        let dpi = ContainerPreferences.dpi(for: resolvedPreset, tabletMode: isHorizontal)
+        let d0Size = "\(Int(pixelSize.width))x\(Int(pixelSize.height))"
+        let d0Density = "\(dpi)"
+        let d0Commands = updateDefaultDisplayGeometry
+            ? """
+            wm size \(d0Size) -d 0 >/dev/null 2>&1 || true
+            wm density \(d0Density) -d 0 >/dev/null 2>&1 || true
+            """
+            : ""
         let identityScript = RuntimeSoftwareDefaults.guestDeviceIdentityScript()
         let script = """
         \(identityScript)
         \(RuntimeSoftwareDefaults.guestSetupScript)
         wm dismiss-keyguard >/dev/null 2>&1 || true
         wm set-ignore-orientation-request \(ignoreOrientation) >/dev/null 2>&1 || true
-        wm size \(d0Size) -d 0 >/dev/null 2>&1 || true
-        wm density \(d0Density) -d 0 >/dev/null 2>&1 || true
+        \(d0Commands)
         am compat \(compatAction) --no-kill FORCE_RESIZE_APP \(package) >/dev/null 2>&1 || true
         am compat \(compatAction) --no-kill OVERRIDE_ANY_ORIENTATION \(package) >/dev/null 2>&1 || true
         am compat \(compatAction) --no-kill OVERRIDE_ANY_ORIENTATION_TO_USER \(package) >/dev/null 2>&1 || true
@@ -3157,7 +3279,12 @@ final class RuntimeController: SystemPluginHostBridge {
         guard isPrepared, state == .ready || state == .running, adbServerProcess?.isRunning == true else { return false }
         let pkg = activeDisplayPackage ?? DefaultApp.package
         do {
-            try await prepareGuestEnvironmentForApp(package: pkg, operationGeneration: generation)
+            try await prepareGuestEnvironmentForApp(
+                package: pkg,
+                tabletMode: tabletMode,
+                updateDefaultDisplayGeometry: displaySessions.isEmpty,
+                operationGeneration: generation
+            )
             return true
         } catch {
             return false
@@ -3256,12 +3383,30 @@ final class RuntimeController: SystemPluginHostBridge {
     }
 
     private func handleServerExit(serial: UInt64, exit: ProcessExit) {
-        guard serial == serverSerial else { return }
-        serverProcess = nil
-        let hadDisplay = displayEndpoint != nil
-        displayEndpoint = nil
-        if hadDisplay {
-            onDisplayTerminated?()
+        guard let matched = displaySessions.values.first(where: { $0.serverSerial == serial }) else {
+            return
+        }
+        displaySessions.removeValue(forKey: matched.package)
+        let allocation = matched.allocation
+        let remainingEmpty = displaySessions.isEmpty
+        let imePortToRemove: UInt16? = remainingEmpty ? inputForwardPort : nil
+        if remainingEmpty {
+            inputForwardPort = nil
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let imePortToRemove {
+                _ = try? await self.runADB(["forward", "--remove", "tcp:\(imePortToRemove)"], operation: "关闭文字输入通道", timeout: 3)
+            }
+            try? await self.environmentProvider.removeForward(
+                adbURL: self.paths.adbURL,
+                environment: self.runtimeEnvironment(),
+                allocation: allocation
+            )
+        }
+        onPackageDisplayTerminated?(matched.package)
+        onDisplayTerminated?()
+        if displaySessions.isEmpty {
             if state == .running {
                 updateState(.ready)
             } else if state == .starting {
@@ -3270,28 +3415,45 @@ final class RuntimeController: SystemPluginHostBridge {
         }
     }
 
-    private func closeDisplayResources() async {
-        // Detach the entire session before the first suspension. A later session
+    private func closeDisplayResources(forPackage package: String? = nil) async {
+        // Detach the requested session(s) before the first suspension. A later session
         // never becomes the resource set of a previously requested close.
-        let port = inputForwardPort; let allocation = forwardAllocation; let server = serverProcess
-        inputForwardPort = nil; forwardAllocation = nil; serverProcess = nil; displayEndpoint = nil
-        activeDisplayTabletMode = nil; activeDisplayResolutionPreset = nil
+        let sessionsToClose: [ActiveDisplaySession]
+        if let package {
+            if let removed = displaySessions.removeValue(forKey: package) {
+                sessionsToClose = [removed]
+            } else {
+                sessionsToClose = []
+            }
+        } else {
+            sessionsToClose = Array(displaySessions.values)
+            displaySessions.removeAll()
+        }
+        let portToRemove: UInt16?
+        if displaySessions.isEmpty {
+            portToRemove = inputForwardPort
+            inputForwardPort = nil
+        } else {
+            portToRemove = nil
+        }
         serverSerial &+= 1
-        if let port {
+        if let port = portToRemove {
             _ = try? await runADB(["forward", "--remove", "tcp:\(port)"], operation: "关闭文字输入通道", timeout: 3)
         }
-        if let server {
-            await stopProcessesWithoutBlockingMainActor([server])
+        let servers = sessionsToClose.map(\.serverProcess)
+        if !servers.isEmpty {
+            await stopProcessesWithoutBlockingMainActor(servers)
         }
-        guard let allocation else { return }
-        do {
-            try await environmentProvider.removeForward(
-                adbURL: paths.adbURL,
-                environment: runtimeEnvironment(),
-                allocation: allocation
-            )
-        } catch {
-            // The server is already gone if the private ADB forward could not be removed.
+        for session in sessionsToClose {
+            do {
+                try await environmentProvider.removeForward(
+                    adbURL: paths.adbURL,
+                    environment: runtimeEnvironment(),
+                    allocation: session.allocation
+                )
+            } catch {
+                // The server is already gone if the private ADB forward could not be removed.
+            }
         }
     }
 

@@ -249,6 +249,49 @@ struct ContainerApp: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+struct DisplayResolutionOption: Equatable, Sendable {
+    let preset: String
+    let title: String
+    let shortTitle: String
+    let subtitle: String
+    let landscapeSize: CGSize
+    let portraitSize: CGSize
+    let landscapeDPI: Int
+    let portraitDPI: Int
+
+    func pixelSize(tabletMode: Bool) -> CGSize {
+        tabletMode ? landscapeSize : portraitSize
+    }
+
+    func dpi(tabletMode: Bool) -> Int {
+        tabletMode ? landscapeDPI : portraitDPI
+    }
+
+    func dimensionLabel(tabletMode: Bool) -> String {
+        let size = pixelSize(tabletMode: tabletMode)
+        return "\(Int(size.width)) × \(Int(size.height))"
+    }
+
+    func scrcpyNewDisplaySpec(tabletMode: Bool) -> String {
+        let size = pixelSize(tabletMode: tabletMode)
+        return "\(Int(size.width))x\(Int(size.height))/\(dpi(tabletMode: tabletMode))"
+    }
+
+    func menuTitle(tabletMode: Bool) -> String {
+        "\(title) (\(dimensionLabel(tabletMode: tabletMode)) · \(dpi(tabletMode: tabletMode)) DPI)"
+    }
+}
+
+struct AppDisplayPreference: Codable, Equatable, Sendable {
+    var resolutionPreset: String
+    var tabletMode: Bool
+
+    init(resolutionPreset: String, tabletMode: Bool) {
+        self.resolutionPreset = resolutionPreset
+        self.tabletMode = tabletMode
+    }
+}
+
 struct ContainerPreferences: Codable, Equatable, Sendable {
     var resolutionPreset: String
     var targetFPS: Int
@@ -259,6 +302,7 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
     /// Legacy persistence name retained for compatibility. This now controls
     /// only the display layout; the guest hardware identity is always tablet.
     var tabletMode: Bool
+    var appDisplayOverrides: [String: AppDisplayPreference]
 
     init(
         resolutionPreset: String = "1080p",
@@ -267,7 +311,8 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         clipboardSyncEnabled: Bool = true,
         directIMEEnabled: Bool = true,
         cameraEnabled: Bool = true,
-        tabletMode: Bool = true
+        tabletMode: Bool = true,
+        appDisplayOverrides: [String: AppDisplayPreference] = [:]
     ) {
         self.resolutionPreset = resolutionPreset
         self.targetFPS = targetFPS
@@ -276,6 +321,7 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         self.directIMEEnabled = directIMEEnabled
         self.cameraEnabled = cameraEnabled
         self.tabletMode = tabletMode
+        self.appDisplayOverrides = appDisplayOverrides
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -286,6 +332,7 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         case directIMEEnabled
         case cameraEnabled
         case tabletMode
+        case appDisplayOverrides
     }
 
     init(from decoder: Decoder) throws {
@@ -297,6 +344,7 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         directIMEEnabled = try container.decodeIfPresent(Bool.self, forKey: .directIMEEnabled) ?? true
         cameraEnabled = try container.decodeIfPresent(Bool.self, forKey: .cameraEnabled) ?? true
         tabletMode = try container.decodeIfPresent(Bool.self, forKey: .tabletMode) ?? true
+        appDisplayOverrides = try container.decodeIfPresent([String: AppDisplayPreference].self, forKey: .appDisplayOverrides) ?? [:]
     }
 
     static let `default` = ContainerPreferences(
@@ -306,37 +354,138 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         clipboardSyncEnabled: true,
         directIMEEnabled: true,
         cameraEnabled: true,
-        tabletMode: true
+        tabletMode: true,
+        appDisplayOverrides: [:]
     )
 
-    var resolutionDisplayLabel: String {
+    static let resolutionOptions: [DisplayResolutionOption] = [
+        DisplayResolutionOption(
+            preset: "960x600",
+            title: "紧凑大字 · 960×600",
+            shortTitle: "紧凑大字",
+            subtitle: "界面放大 60%，适合多窗口并排与高可读性办公",
+            landscapeSize: CGSize(width: 960, height: 600),
+            portraitSize: CGSize(width: 540, height: 960),
+            landscapeDPI: 200,
+            portraitDPI: 240
+        ),
+        DisplayResolutionOption(
+            preset: "1280x800_comfortable",
+            title: "舒适大字 · 1280×800 (推荐办公/微信)",
+            shortTitle: "舒适大字",
+            subtitle: "提升像素密度使 OA 与微信字体清晰饱满，告别平板模式小字",
+            landscapeSize: CGSize(width: 1280, height: 800),
+            portraitSize: CGSize(width: 720, height: 1280),
+            landscapeDPI: 213,
+            portraitDPI: 320
+        ),
+        DisplayResolutionOption(
+            preset: "1440x900",
+            title: "适中均衡 · 1440×900",
+            shortTitle: "适中均衡",
+            subtitle: "兼顾内容视野与文字可读性的黄金比例",
+            landscapeSize: CGSize(width: 1440, height: 900),
+            portraitSize: CGSize(width: 900, height: 1600),
+            landscapeDPI: 240,
+            portraitDPI: 360
+        ),
+        DisplayResolutionOption(
+            preset: "1920x1200_hidpi",
+            title: "高清大字 · 1920×1200 HiDPI",
+            shortTitle: "高清大字",
+            subtitle: "1080p 级精细渲染 + 320/420 DPI 放大界面，文字边缘锐利且不显小",
+            landscapeSize: CGSize(width: 1920, height: 1200),
+            portraitSize: CGSize(width: 1080, height: 1920),
+            landscapeDPI: 320,
+            portraitDPI: 420
+        ),
+        DisplayResolutionOption(
+            preset: "720p",
+            title: "标准 720p · 1280×800",
+            shortTitle: "720p 标准",
+            subtitle: "原生平板密度 (160 DPI)，低资源开销",
+            landscapeSize: CGSize(width: 1280, height: 800),
+            portraitSize: CGSize(width: 800, height: 1280),
+            landscapeDPI: 160,
+            portraitDPI: 160
+        ),
+        DisplayResolutionOption(
+            preset: "1080p",
+            title: "标准 1080p · 1920×1200",
+            shortTitle: "1080p 标准",
+            subtitle: "原生平板密度 (240 DPI)，大屏宽广视野",
+            landscapeSize: CGSize(width: 1920, height: 1200),
+            portraitSize: CGSize(width: 1200, height: 1920),
+            landscapeDPI: 240,
+            portraitDPI: 240
+        ),
+        DisplayResolutionOption(
+            preset: "1440p",
+            title: "超清 1440p · 2560×1600",
+            shortTitle: "1440p 超清",
+            subtitle: "原生平板密度 (320 DPI)，适合大尺寸外接显示器",
+            landscapeSize: CGSize(width: 2560, height: 1600),
+            portraitSize: CGSize(width: 1600, height: 2560),
+            landscapeDPI: 320,
+            portraitDPI: 320
+        )
+    ]
+
+    static func resolutionOption(for preset: String) -> DisplayResolutionOption {
+        if let match = resolutionOptions.first(where: { $0.preset == preset }) {
+            return match
+        }
+        return resolutionOptions.first(where: { $0.preset == "1080p" })!
+    }
+
+    static func pixelSize(for preset: String, tabletMode: Bool) -> CGSize {
+        resolutionOption(for: preset).pixelSize(tabletMode: tabletMode)
+    }
+
+    static func dpi(for preset: String, tabletMode: Bool) -> Int {
+        resolutionOption(for: preset).dpi(tabletMode: tabletMode)
+    }
+
+    static func scrcpyNewDisplaySpec(for preset: String, tabletMode: Bool) -> String {
+        resolutionOption(for: preset).scrcpyNewDisplaySpec(tabletMode: tabletMode)
+    }
+
+    static func displayLabel(for preset: String, tabletMode: Bool) -> String {
+        let option = resolutionOption(for: preset)
+        let sizeText = option.dimensionLabel(tabletMode: tabletMode)
         if tabletMode {
-            switch resolutionPreset {
+            switch option.preset {
             case "720p": return "1280 × 800 · 横屏布局"
+            case "1080p": return "1920 × 1200 · 横屏布局"
             case "1440p": return "2560 × 1600 · 横屏超清"
-            default: return "1920 × 1200 · 横屏布局"
+            default: return "\(sizeText) · 横屏\(option.shortTitle)"
             }
         }
-        switch resolutionPreset {
+        switch option.preset {
         case "720p": return "800 × 1280 · 竖屏布局"
+        case "1080p": return "1200 × 1920 · 竖屏布局"
         case "1440p": return "1600 × 2560 · 竖屏超清"
-        default: return "1200 × 1920 · 竖屏布局"
+        default: return "\(sizeText) · 竖屏\(option.shortTitle)"
         }
     }
 
+    func displayPreference(for package: String?) -> AppDisplayPreference {
+        if let package, let override = appDisplayOverrides[package] {
+            return override
+        }
+        return AppDisplayPreference(resolutionPreset: resolutionPreset, tabletMode: tabletMode)
+    }
+
+    var resolutionDisplayLabel: String {
+        Self.displayLabel(for: resolutionPreset, tabletMode: tabletMode)
+    }
+
     var preferredPixelSize: CGSize {
-        if tabletMode {
-            switch resolutionPreset {
-            case "720p": return CGSize(width: 1280, height: 800)
-            case "1440p": return CGSize(width: 2560, height: 1600)
-            default: return CGSize(width: 1920, height: 1200)
-            }
-        }
-        switch resolutionPreset {
-        case "720p": return CGSize(width: 800, height: 1280)
-        case "1440p": return CGSize(width: 1600, height: 2560)
-        default: return CGSize(width: 1200, height: 1920)
-        }
+        Self.pixelSize(for: resolutionPreset, tabletMode: tabletMode)
+    }
+
+    var preferredDPI: Int {
+        Self.dpi(for: resolutionPreset, tabletMode: tabletMode)
     }
 }
 
