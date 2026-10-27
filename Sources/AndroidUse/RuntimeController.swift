@@ -1395,6 +1395,15 @@ final class RuntimeController: SystemPluginHostBridge {
         ]
     }
 
+    var hostServiceEnvironment: [String: String] {
+        [
+            "MACDORA_ADB_PATH": paths.adbURL.path,
+            "MACDORA_ADB_SERIAL": "emulator-\(Self.emulatorPort)",
+            "ANDROID_ADB_SERVER_PORT": String(Self.adbPort),
+            "ADB_SERVER_SOCKET": "tcp:127.0.0.1:\(Self.adbPort)"
+        ]
+    }
+
     func executeGuestShell(_ script: String, operation: String, timeout: TimeInterval) async -> Bool {
         guard (state == .ready || state == .running || state == .starting),
               adbServerProcess?.isRunning == true else {

@@ -358,6 +358,15 @@ protocol HotPluggableSystemPlugin: AnyObject {
     func onRuntimeStopping(bridge: SystemPluginHostBridge) async
 }
 
+extension HotPluggableSystemPlugin {
+    // Legacy drivers report an unconfirmed stop only through isEnabled. Host
+    // services may still own a process while disabled, so they override this.
+    func confirmStoppedWithoutBridge() async -> Bool {
+        await setEnabledWithoutBridge(false)
+        return !isEnabled
+    }
+}
+
 // A stopped plugin must finish outstanding guest work before cleanup can run.
 @MainActor
 final class SystemPluginActivity {
@@ -950,6 +959,29 @@ enum SystemPluginPackageFactory {
                 throw SystemPluginPackageError.incompatibleManifest("missing guest.shell capability for hook scripts")
             }
         }
+        if manifest.driverType == "host_service" {
+            guard manifest.capabilities.contains("host.service"),
+                  let relativePath = manifest.entrypoints.hostService,
+                  !relativePath.isEmpty,
+                  !relativePath.contains(".."),
+                  !relativePath.hasPrefix("."),
+                  !relativePath.contains("/.") else {
+                throw SystemPluginPackageError.incompatibleManifest(
+                    "host_service requires host.service capability and entrypoints.hostService"
+                )
+            }
+            let serviceURL = root.appendingPathComponent(relativePath).standardizedFileURL
+            guard serviceURL.path.hasPrefix(root.path + "/") else {
+                throw SystemPluginPackageError.unsafePackageContent
+            }
+            do {
+                _ = try HostServicePackageSnapshotter().snapshot(serviceURL: serviceURL)
+            } catch {
+                throw SystemPluginPackageError.incompatibleManifest(
+                    "hostService must be a signed executable"
+                )
+            }
+        }
 
         // 2. Enumerate ALL files (including hidden files) and enforce file count / size / symlink safety
         var actualRelativeFiles = Set<String>()
@@ -1306,12 +1338,15 @@ final class SystemPluginManager {
     private static let enabledPluginsDefaultsKey = "AndroidUse.SystemPluginManager.enabledPluginIDs"
 
     let pluginsRootURL: URL
+    private let runtimeRootURL: URL
 
     weak var hostBridge: SystemPluginHostBridge? {
         didSet {
             for plugin in installedPlugins.values {
                 if let loc = plugin as? DeveloperLocationPlugin {
                     loc.hostBridge = hostBridge
+                } else if let hostService = plugin as? HostServiceSystemPlugin {
+                    hostService.setNotificationBridge(hostBridge)
                 }
             }
         }
@@ -1325,6 +1360,10 @@ final class SystemPluginManager {
     private let packageFetcher: any SystemPluginPackageFetching
     private let additionalTrustedPublicKeys: [String: String]
     private let locationConsoleTransport: (any LocationConsoleTransport)?
+    private let hostServiceProcessExecuter: any ProcessExecuting
+    private let hostServiceProcessTerminator: (any OwnedProcessTerminating)?
+    private let hostServiceSupervisor: HostServiceSupervisorRegistry?
+    private let hostServiceHealthClient: HostServiceHealthProbe?
     private var installedPlugins: [String: any HotPluggableSystemPlugin] = [:]
     private var downloadStates: [String: SystemPluginInstallState] = [:]
     private var lastOperationErrors: [String: String] = [:]
@@ -1340,14 +1379,24 @@ final class SystemPluginManager {
         defaults: UserDefaults = .standard,
         packageFetcher: any SystemPluginPackageFetching = DefaultSystemPluginPackageFetcher(),
         additionalTrustedPublicKeys: [String: String] = [:],
-        locationConsoleTransport: (any LocationConsoleTransport)? = nil
+        locationConsoleTransport: (any LocationConsoleTransport)? = nil,
+        hostServiceProcessExecuter: any ProcessExecuting = ProcessRunner(),
+        hostServiceProcessTerminator: (any OwnedProcessTerminating)? = nil,
+        hostServiceSupervisor: HostServiceSupervisorRegistry? = nil,
+        hostServiceHealthClient: HostServiceHealthProbe? = nil
     ) {
-        self.pluginsRootURL = rootURL.resolvingSymlinksInPath().appendingPathComponent("plugins", isDirectory: true)
+        let canonicalRoot = rootURL.resolvingSymlinksInPath()
+        self.pluginsRootURL = canonicalRoot.appendingPathComponent("plugins", isDirectory: true)
+        self.runtimeRootURL = canonicalRoot
         self.fileManager = fileManager
         self.defaults = defaults
         self.packageFetcher = packageFetcher
         self.additionalTrustedPublicKeys = additionalTrustedPublicKeys
         self.locationConsoleTransport = locationConsoleTransport
+        self.hostServiceProcessExecuter = hostServiceProcessExecuter
+        self.hostServiceProcessTerminator = hostServiceProcessTerminator
+        self.hostServiceSupervisor = hostServiceSupervisor
+        self.hostServiceHealthClient = hostServiceHealthClient
         reloadInstalledPluginsFromDisk()
     }
 
@@ -1375,6 +1424,10 @@ final class SystemPluginManager {
 
     func externalScriptPlugin(for id: String) -> ExternalDeveloperSystemPlugin? {
         installedPlugins[id] as? ExternalDeveloperSystemPlugin
+    }
+
+    func hostServicePlugin(for id: String) -> HostServiceSystemPlugin? {
+        installedPlugins[id] as? HostServiceSystemPlugin
     }
 
     func pluginHealthStatus(for id: String) -> SystemPluginHealthState {
@@ -1687,13 +1740,15 @@ final class SystemPluginManager {
             runtimeCapabilityReservations[id] = capabilities
         }
         notifyChanged()
-        if let existing = previousPlugin, existing.isEnabled {
-            if let bridge = hostBridge {
+        if let existing = previousPlugin {
+            if existing.isEnabled, let bridge = hostBridge {
                 guard await existing.deactivate(bridge: bridge) else {
                     throw SystemPluginPackageError.operationFailed("未能停用插件，请重试后再更新。")
                 }
             } else {
-                await existing.setEnabledWithoutBridge(false)
+                guard await existing.confirmStoppedWithoutBridge() else {
+                    throw SystemPluginPackageError.operationFailed("未能停用插件，请重试后再更新。")
+                }
             }
         }
 
@@ -1704,6 +1759,7 @@ final class SystemPluginManager {
 
         var movedOldToBackup = false
         var movedNewIntoPlace = false
+        var stagedPrivateState: URL?
         do {
             if fileManager.fileExists(atPath: destinationURL.path) {
                 try fileManager.moveItem(at: destinationURL, to: backupURL)
@@ -1711,12 +1767,23 @@ final class SystemPluginManager {
             }
             try fileManager.moveItem(at: stagedDirectoryURL, to: destinationURL)
             movedNewIntoPlace = true
+            stagedPrivateState = try stagePrivateStateForDriverChangeIfNeeded(
+                id: id,
+                previousPlugin: previousPlugin,
+                newDriverType: manifest.driverType
+            )
             let newPlugin = createPluginInstance(manifest: manifest, bundleURL: destinationURL)
             installedPlugins[id] = newPlugin
             if shouldEnable {
                 guard await setPluginEnabledInternal(
                     id: id, enabled: true, generation: expectedGeneration, waitForRuntime: true
                 ) else {
+                    try HostServicePrivateStateStore.restoreStaged(
+                        stagedPrivateState,
+                        rootURL: runtimeRootURL,
+                        pluginID: id,
+                        fileManager: fileManager
+                    )
                     throw SystemPluginPackageError.operationFailed(lastOperationErrors[id] ?? "更新后未能恢复启用，已保留原设置。")
                 }
             } else {
@@ -1724,8 +1791,17 @@ final class SystemPluginManager {
             }
             // Keep the old instance and package recoverable until activation commits.
             previousPlugin?.retire()
+            try? HostServicePrivateStateStore.discardStaged(stagedPrivateState, fileManager: fileManager)
             if movedOldToBackup { try? fileManager.removeItem(at: backupURL) }
         } catch {
+            if let stagedPrivateState {
+                try? HostServicePrivateStateStore.restoreStaged(
+                    stagedPrivateState,
+                    rootURL: runtimeRootURL,
+                    pluginID: id,
+                    fileManager: fileManager
+                )
+            }
             if let provisional = installedPlugins[id], provisional !== previousPlugin {
                 if provisional.isEnabled {
                     if let bridge = hostBridge {
@@ -1733,36 +1809,47 @@ final class SystemPluginManager {
                             throw SystemPluginPackageError.operationFailed("更新未完成，插件暂时无法停用，设置已保留，请重试。")
                         }
                     } else {
-                        await provisional.setEnabledWithoutBridge(false)
+                        guard await provisional.confirmStoppedWithoutBridge() else {
+                            throw SystemPluginPackageError.operationFailed("更新未完成，插件暂时无法停用，设置已保留，请重试。")
+                        }
                     }
                 }
                 provisional.retire()
-            }
-            if movedNewIntoPlace { try? fileManager.removeItem(at: destinationURL) }
-            if movedOldToBackup { try? fileManager.moveItem(at: backupURL, to: destinationURL) }
-            if let prev = previousPlugin {
-                let policy: SystemPluginTrustPolicy = id.hasPrefix("builtin.") ? .officialRepository : .developerLocalImport
-                let restored = try? SystemPluginPackageFactory.verifyPluginDirectory(
-                    destinationURL, trustPolicy: policy,
-                    additionalTrustedPublicKeys: additionalTrustedPublicKeys, fileManager: fileManager
-                )
-                guard restored == prev.manifest else {
-                    prev.retire()
+                if movedNewIntoPlace { try? fileManager.removeItem(at: destinationURL) }
+                if movedOldToBackup { try? fileManager.moveItem(at: backupURL, to: destinationURL) }
+                if let prev = previousPlugin {
+                    let policy: SystemPluginTrustPolicy = id.hasPrefix("builtin.") ? .officialRepository : .developerLocalImport
+                    let restored = try? SystemPluginPackageFactory.verifyPluginDirectory(
+                        destinationURL, trustPolicy: policy,
+                        additionalTrustedPublicKeys: additionalTrustedPublicKeys, fileManager: fileManager
+                    )
+                    guard restored == prev.manifest else {
+                        prev.retire()
+                        installedPlugins.removeValue(forKey: id)
+                        persistEnabled(id: id, enabled: false)
+                        throw SystemPluginPackageError.operationFailed("更新未完成，设置已保留，请重新下载插件。")
+                    }
+                    installedPlugins[id] = prev
+                    if wasPreviouslyEnabled {
+                        if let bridge = hostBridge {
+                            await prev.activate(bridge: bridge)
+                        } else {
+                            await prev.setEnabledWithoutBridge(true)
+                        }
+                    }
+                } else {
                     installedPlugins.removeValue(forKey: id)
                     persistEnabled(id: id, enabled: false)
-                    throw SystemPluginPackageError.operationFailed("更新未完成，设置已保留，请重新下载插件。")
                 }
+            } else if wasPreviouslyEnabled, let prev = previousPlugin {
+                // A failure before the provisional instance exists still leaves
+                // the old persisted enable intent to be restored.
                 installedPlugins[id] = prev
-                if wasPreviouslyEnabled {
-                    if let bridge = hostBridge {
-                        await prev.activate(bridge: bridge)
-                    } else {
-                        await prev.setEnabledWithoutBridge(true)
-                    }
+                if let bridge = hostBridge {
+                    await prev.activate(bridge: bridge)
+                } else {
+                    await prev.setEnabledWithoutBridge(true)
                 }
-            } else {
-                installedPlugins.removeValue(forKey: id)
-                persistEnabled(id: id, enabled: false)
             }
             throw error
         }
@@ -1795,7 +1882,9 @@ final class SystemPluginManager {
     // MARK: - Enable / Disable / Delete / Hot-Reload
 
     func setPluginEnabled(id: String, enabled: Bool) async {
-        guard !activeOperationIDs.contains(id), let plugin = installedPlugins[id], plugin.isEnabled != enabled else { return }
+        guard !activeOperationIDs.contains(id), let plugin = installedPlugins[id] else { return }
+        let persistedEnabled = persistedEnabledPluginIDs().contains(id)
+        guard plugin.isEnabled != enabled || persistedEnabled != enabled else { return }
         activeOperationIDs.insert(id)
         runtimeCapabilityReservations[id] = Set(plugin.manifest.capabilities).intersection(SystemPluginManifest.exclusiveCapabilities)
         defer { finishOperation(id: id) }
@@ -1835,8 +1924,7 @@ final class SystemPluginManager {
                 if let bridge = hostBridge {
                     stopped = await otherPlugin.deactivate(bridge: bridge)
                 } else {
-                    await otherPlugin.setEnabledWithoutBridge(false)
-                    stopped = true
+                    stopped = await otherPlugin.confirmStoppedWithoutBridge()
                 }
                 if stopped {
                     persistEnabled(id: otherID, enabled: false)
@@ -1866,7 +1954,20 @@ final class SystemPluginManager {
                 }
             }
         } else {
-            await plugin.setEnabledWithoutBridge(enabled)
+            if enabled {
+                await plugin.setEnabledWithoutBridge(true)
+            } else {
+                guard await plugin.confirmStoppedWithoutBridge() else {
+                    lastOperationErrors[id] = "停用失败，数据已保留，请重试。"
+                    notifyChanged()
+                    return false
+                }
+            }
+            if plugin.isEnabled != enabled {
+                lastOperationErrors[id] = "停用失败，数据已保留，请重试。"
+                notifyChanged()
+                return false
+            }
         }
         guard pluginGenerations[id] == generation else { return false }
         persistEnabled(id: id, enabled: plugin.isEnabled)
@@ -1900,7 +2001,11 @@ final class SystemPluginManager {
                     throw SystemPluginPackageError.operationFailed(message)
                 }
             } else {
-                await plugin.setEnabledWithoutBridge(false)
+                guard await plugin.confirmStoppedWithoutBridge() else {
+                    let message = "未能停用插件，尚未删除，请重试。"
+                    lastOperationErrors[id] = message
+                    throw SystemPluginPackageError.operationFailed(message)
+                }
             }
         }
 
@@ -1908,6 +2013,14 @@ final class SystemPluginManager {
             throw CancellationError()
         }
         try validatePluginStorage(id: id)
+        do {
+            try HostServicePrivateStateStore.preflightRemoval(
+                rootURL: runtimeRootURL,
+                pluginID: id
+            )
+        } catch HostServiceHealthError.socketUnsafe {
+            throw SystemPluginPackageError.unsafePackageContent
+        }
 
         let dir = pluginsRootURL.appendingPathComponent(id, isDirectory: true)
         let trashStagingURL = pluginsRootURL.appendingPathComponent(".delete-\(id)-\(UUID().uuidString)", isDirectory: true)
@@ -1933,8 +2046,9 @@ final class SystemPluginManager {
                             await plugin.setEnabledWithoutBridge(true)
                         }
                     } else {
-                        await plugin.setEnabledWithoutBridge(false)
-                        persistEnabled(id: id, enabled: false)
+                        if await plugin.confirmStoppedWithoutBridge() {
+                            persistEnabled(id: id, enabled: false)
+                        }
                     }
                 }
                 let msg = "删除失败，请重试：\(error.localizedDescription)"
@@ -1947,6 +2061,7 @@ final class SystemPluginManager {
         }
 
         existingPlugin?.deletePersistentData()
+        try removePrivateState(id: id)
         // The ID can have used another driver in an earlier package version.
         DeveloperLocationPlugin.deleteStoredConfiguration(id: id, defaults: defaults)
         installedPlugins.removeValue(forKey: id)
@@ -2005,7 +2120,7 @@ final class SystemPluginManager {
                     if let bridge {
                         await oldPlugin.deactivate(bridge: bridge)
                     } else {
-                        await oldPlugin.setEnabledWithoutBridge(false)
+                        _ = await oldPlugin.confirmStoppedWithoutBridge()
                     }
                 }
             }
@@ -2074,6 +2189,18 @@ final class SystemPluginManager {
                 }
             }
             return loc
+        } else if manifest.driverType == "host_service" {
+            let plugin = HostServiceSystemPlugin(
+                manifest: manifest,
+                bundleDirectoryURL: bundleURL,
+                rootURL: runtimeRootURL,
+                processExecuter: hostServiceProcessExecuter,
+                processTerminator: hostServiceProcessTerminator ?? ProcessRunner(),
+                supervisor: hostServiceSupervisor,
+                healthClient: hostServiceHealthClient
+            )
+            plugin.setNotificationBridge(hostBridge)
+            return plugin
         } else {
             return ExternalDeveloperSystemPlugin(manifest: manifest, bundleDirectoryURL: bundleURL)
         }
@@ -2163,6 +2290,47 @@ final class SystemPluginManager {
                 throw SystemPluginPackageError.unsafePackageContent
             }
             try fileManager.removeItem(at: entry)
+        }
+    }
+
+    private func stagePrivateStateForDriverChangeIfNeeded(
+        id: String,
+        previousPlugin: (any HotPluggableSystemPlugin)?,
+        newDriverType: String
+    ) throws -> URL? {
+        guard let previousPlugin,
+              previousPlugin.manifest.driverType != newDriverType else {
+            return nil
+        }
+        guard HostServicePrivateStateStore.canStageForDriverSwitch(
+            rootURL: runtimeRootURL,
+            pluginID: id,
+            supervisor: hostServiceSupervisor,
+            fileManager: fileManager
+        ) else {
+            throw SystemPluginPackageError.operationFailed("宿主服务尚未确认停止，已保留原有私有状态，请重试。")
+        }
+        return try HostServicePrivateStateStore.stageForDriverSwitch(
+            rootURL: runtimeRootURL,
+            pluginID: id,
+            supervisor: hostServiceSupervisor,
+            fileManager: fileManager
+        )
+    }
+
+    private func removePrivateState(id: String) throws {
+        do {
+            let outcome = try HostServicePrivateStateStore.remove(
+                rootURL: runtimeRootURL,
+                pluginID: id,
+                supervisor: hostServiceSupervisor,
+                fileManager: fileManager
+            )
+            guard outcome != .retained else {
+                throw SystemPluginPackageError.operationFailed("宿主服务私有状态仍被占用，尚未完成删除，请重试。")
+            }
+        } catch HostServiceHealthError.socketUnsafe {
+            throw SystemPluginPackageError.unsafePackageContent
         }
     }
 

@@ -666,6 +666,101 @@ struct SystemPluginFrameworkTests {
         #expect(!catalogItem.hasDedicatedWorkspace)
     }
 
+    @Test("Cross-driver update clears the previous host service state")
+    @MainActor
+    func crossDriverUpdateClearsHostServiceState() async throws {
+        let (root, defaults, suite) = try makeIsolatedContext()
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let hostServiceID = "dev.host.driver-switch"
+        let stateDirectory = root
+            .appendingPathComponent("private/plugin-state", isDirectory: true)
+            .appendingPathComponent(hostServiceID, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: stateDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: Int(0o700))]
+        )
+        let marker = stateDirectory.appendingPathComponent("private.txt")
+        try Data("private".utf8).write(to: marker)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int(0o600))],
+            ofItemAtPath: marker.path
+        )
+
+        let (locationSource, locationHarness) = try SignedArchiveTestHarness.buildSignedLocationPackage(
+            in: root,
+            pluginID: hostServiceID
+        )
+        let hostManifest = SystemPluginManifest(
+            schemaVersion: 1,
+            id: hostServiceID,
+            name: "Host",
+            subtitle: "",
+            version: "1.0.0",
+            author: "test",
+            category: "test",
+            iconSymbol: "server.rack",
+            accentHex: 0,
+            minHostVersion: "0.2.0",
+            capabilities: ["host.service"],
+            driverType: "host_service",
+            entrypoints: SystemPluginEntrypoints(hostService: "bin/service")
+        )
+        let hostBundle = root.appendingPathComponent("host-source", isDirectory: true)
+        let hostBin = hostBundle.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: hostBin, withIntermediateDirectories: true)
+        let hostServiceURL = hostBin.appendingPathComponent("service")
+        let hostServiceSourceURL = hostBin.appendingPathComponent("service.c")
+        try Data("int main(void) { return 0; }\n".utf8).write(to: hostServiceSourceURL)
+        let compile = Process()
+        compile.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compile.arguments = [
+            "clang",
+            hostServiceSourceURL.path,
+            "-o",
+            hostServiceURL.path
+        ]
+        try compile.run()
+        compile.waitUntilExit()
+        #expect(compile.terminationStatus == 0)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int(0o700))],
+            ofItemAtPath: hostServiceURL.path
+        )
+        let sign = Process()
+        sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        sign.arguments = ["--force", "--sign", "-", hostServiceURL.path]
+        sign.standardOutput = FileHandle.nullDevice
+        sign.standardError = FileHandle.nullDevice
+        try sign.run()
+        sign.waitUntilExit()
+        #expect(sign.terminationStatus == 0)
+        try JSONEncoder().encode(hostManifest).write(
+            to: hostBundle.appendingPathComponent("manifest.json")
+        )
+        try SystemPluginPackageFactory.writeSignature(
+            forPluginDirectory: hostBundle,
+            pluginID: hostServiceID,
+            version: hostManifest.version
+        )
+
+        let manager = SystemPluginManager(
+            rootURL: root,
+            defaults: defaults,
+            additionalTrustedPublicKeys: [
+                locationHarness.keyID: locationHarness.publicKeyBase64
+            ]
+        )
+        _ = try await manager.importDeveloperPlugin(from: hostBundle)
+        _ = try await manager.importDeveloperPlugin(from: locationSource)
+        #expect(manager.externalScriptPlugin(for: hostServiceID) == nil)
+        #expect(manager.locationPlugin(for: hostServiceID) != nil)
+        #expect(!FileManager.default.fileExists(atPath: stateDirectory.path))
+    }
+
     @Test("Real GitHub live repository download installs, verifies Ed25519 signature, and drives hardware GNSS location", .enabled(if: ProcessInfo.processInfo.environment["MACDORA_LIVE_PLUGIN_QA"] == "1", "Set MACDORA_LIVE_PLUGIN_QA=1 for release acceptance."))
     @MainActor
     func liveGitHubDownloadAndInstallLifecycle() async throws {
