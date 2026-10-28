@@ -178,54 +178,73 @@ final class ManagementInteractionTests: XCTestCase {
     }
 
 
-    func testOneClickResolutionSwitchInSettingsTopBarAndAppWindow() throws {
+    func testDisplaySizeAndQualityControlsAreIndependentAndRestoreAppOverrides() throws {
         _ = NSApplication.shared
         let manager = ManagementWindow()
         let window = try XCTUnwrap(manager.window)
         defer { window.orderOut(nil) }
         var updatedPrefs: ContainerPreferences?
         manager.onUpdatePreferences = { updatedPrefs = $0 }
-        manager.updatePreferences(
-            cameraEnabled: true,
-            canChangeCamera: true,
-            rootPath: "/tmp/macdora",
-            preferences: .default,
-            readiness: []
-        )
-
-        manager.selectSection(.apps)
+        var preferences = ContainerPreferences.default
+        preferences.appDisplayOverrides["com.example.notes"] = AppDisplayPreference(resolutionPreset: "720p", tabletMode: false, interfaceScale: .large)
+        manager.updateApps([ContainerApp.metadata(for: "com.example.notes")], activePackage: "com.example.notes")
+        manager.updatePreferences(cameraEnabled: true, canChangeCamera: true, rootPath: "/tmp/macdora", preferences: preferences, readiness: [])
+        manager.selectSection(.settings)
         manager.presentWindow()
         let root = try XCTUnwrap(window.contentView)
-        let runtimeResBtn = try XCTUnwrap(
-            descendants(root).first { $0.identifier?.rawValue == "runtime-bar-resolution-switch" } as? TFButton
-        )
-        XCTAssertEqual(runtimeResBtn.title, "1080p 标准 ▾")
+        let scale = try XCTUnwrap(descendants(root).first { $0.identifier?.rawValue == "settings-interface-scale" })
+        let larger = try XCTUnwrap(descendants(scale).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "较大 125%" })
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(larger.action), to: larger.target, from: larger))
+        XCTAssertEqual(updatedPrefs?.interfaceScale, .large)
+        XCTAssertEqual(updatedPrefs?.resolutionPreset, "1080p")
 
-        manager.selectSection(.settings)
-        let settingsMenuBtn = try XCTUnwrap(
-            descendants(root).first { $0.identifier?.rawValue == "settings-resolution-menu-button" } as? TFButton
-        )
-        XCTAssertTrue(settingsMenuBtn.isAccessibilityElement())
-
-        manager.selectResolutionPreset("1280x800_comfortable")
-        XCTAssertEqual(updatedPrefs?.resolutionPreset, "1280x800_comfortable")
+        let quality = try XCTUnwrap(descendants(root).first { $0.identifier?.rawValue == "settings-display-quality" })
+        let finer = try XCTUnwrap(descendants(quality).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "精细" })
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(finer.action), to: finer.target, from: finer))
+        XCTAssertEqual(updatedPrefs?.resolutionPreset, "1440p")
+        XCTAssertEqual(updatedPrefs?.interfaceScale, .large)
+        let restore = try XCTUnwrap(descendants(root).first { $0.identifier?.rawValue == "settings-display-restore" } as? TFButton)
+        XCTAssertTrue(restore.accessibilityPerformPress())
+        XCTAssertEqual(updatedPrefs?.resolutionPreset, "1080p")
+        XCTAssertEqual(updatedPrefs?.interfaceScale, .standard)
+        XCTAssertEqual(updatedPrefs?.appDisplayOverrides["com.example.notes"], AppDisplayPreference(resolutionPreset: "1080p", tabletMode: false))
 
         manager.selectSection(.apps)
-        let refreshedRuntimeResBtn = try XCTUnwrap(
-            descendants(root).first { $0.identifier?.rawValue == "runtime-bar-resolution-switch" } as? TFButton
-        )
-        XCTAssertEqual(refreshedRuntimeResBtn.title, "舒适大字 ▾")
+        let runtimeDisplay = try XCTUnwrap(descendants(root).first { $0.identifier?.rawValue == "runtime-bar-resolution-switch" } as? TFButton)
+        XCTAssertEqual(runtimeDisplay.title, "显示 · 100% ▾")
+    }
 
-        let appWin = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
-        defer { appWin.performExplicitClose() }
-        var selectedWindowPreset: String?
-        appWin.onSelectResolutionPreset = { selectedWindowPreset = $0 }
-        XCTAssertEqual(appWin.resolutionSwitchButton.identifier?.rawValue, "app-window-resolution-switch")
-        appWin.selectResolutionPreset("960x600")
-        XCTAssertEqual(selectedWindowPreset, "960x600")
-        XCTAssertEqual(appWin.currentResolutionPreset, "960x600")
-        XCTAssertEqual(appWin.resolutionSwitchButton.title, "紧凑大字")
-        XCTAssertEqual(appWin.surface.pixelSize, CGSize(width: 960, height: 600))
+    func testWindowDisplayMenuAppliesSizeQualityAndRecommendedSettingsSeparately() throws {
+        _ = NSApplication.shared
+        let app = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        defer { app.performExplicitClose() }
+        app.applyDisplayMode(tabletMode: false, preferredPixelSize: CGSize(width: 1200, height: 1920))
+        var selectedScale: DisplayInterfaceScale?
+        var selectedQuality: String?
+        var restoreCalls = 0
+        app.onSelectInterfaceScale = { selectedScale = $0 }
+        app.onSelectResolutionPreset = { selectedQuality = $0 }
+        app.onRestoreRecommendedDisplay = { restoreCalls += 1 }
+        let beforeSize = app.surface.pixelSize
+        var menu = app.makeDisplaySettingsMenu()
+        XCTAssertEqual(menu.items.first?.title, "仅当前应用")
+        let sizeIndex = try XCTUnwrap(menu.items.firstIndex { $0.representedObject as? String == "large" })
+        menu.performActionForItem(at: sizeIndex)
+        XCTAssertEqual(selectedScale, .large)
+        XCTAssertEqual(app.surface.pixelSize, beforeSize)
+        menu = app.makeDisplaySettingsMenu()
+        let qualityIndex = try XCTUnwrap(menu.items.firstIndex { $0.representedObject as? String == "720p" })
+        menu.performActionForItem(at: qualityIndex)
+        XCTAssertEqual(selectedQuality, "720p")
+        XCTAssertEqual(app.currentInterfaceScale, .large)
+        XCTAssertEqual(app.surface.pixelSize, beforeSize, "坐标须等显示服务确认后再更新")
+        menu = app.makeDisplaySettingsMenu()
+        menu.performActionForItem(at: menu.items.count - 1)
+        XCTAssertEqual(restoreCalls, 1)
+        XCTAssertEqual(app.currentInterfaceScale, .standard)
+        XCTAssertEqual(app.currentResolutionPreset, "1080p")
+        XCTAssertFalse(app.isHorizontalLayout)
+        XCTAssertEqual(app.surface.pixelSize, beforeSize)
     }
 
     func testMultiAppConcurrentActiveRowsProvideIndependentCloseAndSwitchControls() throws {
@@ -256,6 +275,93 @@ final class ManagementInteractionTests: XCTestCase {
             XCTAssertTrue(closeBtn.accessibilityPerformPress())
         }
         XCTAssertEqual(Set(closedPackages), activeSet)
+    }
+
+    func testRunningInterfaceSizeCanBeCancelledBeforePreferencesChange() async throws {
+        _ = NSApplication.shared
+        let manager = ManagementWindow()
+        let window = try XCTUnwrap(manager.window)
+        defer { window.orderOut(nil) }
+        manager.update(.running)
+        manager.updateApps([ContainerApp.metadata(for: "dev.example.notes")], activePackage: "dev.example.notes")
+        manager.presentWindow()
+        var updated: ContainerPreferences?
+        manager.onUpdatePreferences = { updated = $0 }
+
+        manager.selectInterfaceScale(.large)
+        XCTAssertNil(updated, "未确认时不能写入设置或触发页面重建")
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        let cancel = try XCTUnwrap(descendants(try XCTUnwrap(sheet.contentView)).compactMap { $0 as? NSButton }.first { $0.title == "取消" })
+        cancel.performClick(nil)
+        for _ in 0..<20 where window.attachedSheet != nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNil(updated)
+        manager.selectSection(.settings)
+        let scale = try XCTUnwrap(descendants(try XCTUnwrap(window.contentView)).first { $0.identifier?.rawValue == "settings-interface-scale" } as? TFSegmentedControl)
+        XCTAssertEqual(scale.selectedValue, "standard")
+
+        manager.selectResolutionPreset("720p")
+        XCTAssertNil(window.attachedSheet, "单独更改清晰度不会重建应用页面")
+        XCTAssertEqual(updated?.resolutionPreset, "720p")
+    }
+
+    func testRunningWindowScaleAndRecommendedRestoreWaitForConfirmation() async throws {
+        _ = NSApplication.shared
+        let app = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        let window = try XCTUnwrap(app.window)
+        defer { app.performExplicitClose() }
+        app.applyDisplayMode(tabletMode: true, preferredPixelSize: CGSize(width: 1920, height: 1200), resolutionPreset: "1080p", interfaceScale: .standard)
+        app.presentWindow()
+        app.ready()
+        var changes: [DisplayInterfaceScale] = []
+        app.onSelectInterfaceScale = { changes.append($0) }
+
+        app.selectInterfaceScale(.large)
+        XCTAssertTrue(changes.isEmpty)
+        XCTAssertEqual(app.currentInterfaceScale, .standard)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        let confirm = try XCTUnwrap(descendants(try XCTUnwrap(sheet.contentView)).compactMap { $0 as? NSButton }.first { $0.title == "仍然调整" })
+        confirm.performClick(nil)
+        for _ in 0..<20 where changes.isEmpty {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(changes, [.large])
+        XCTAssertEqual(app.currentInterfaceScale, .large)
+        XCTAssertEqual(app.surface.pixelSize, CGSize(width: 1920, height: 1200))
+
+        var restores = 0
+        app.onRestoreRecommendedDisplay = { restores += 1 }
+        app.restoreRecommendedDisplay()
+        XCTAssertEqual(restores, 0)
+        let restoreSheet = try XCTUnwrap(window.attachedSheet)
+        let cancel = try XCTUnwrap(descendants(try XCTUnwrap(restoreSheet.contentView)).compactMap { $0 as? NSButton }.first { $0.title == "取消" })
+        cancel.performClick(nil)
+        for _ in 0..<20 where window.attachedSheet != nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(restores, 0)
+        XCTAssertEqual(app.currentInterfaceScale, .large)
+    }
+
+    func testDisplayUpdateInputPauseCannotBypassLayoutConfirmation() throws {
+        _ = NSApplication.shared
+        let app = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        let window = try XCTUnwrap(app.window)
+        defer {
+            if let sheet = window.attachedSheet { window.endSheet(sheet, returnCode: .alertFirstButtonReturn) }
+            app.performExplicitClose()
+        }
+        app.presentWindow()
+        app.ready()
+        app.surface.inputEnabled = false
+        var requested = false
+        app.onSelectInterfaceScale = { _ in requested = true }
+
+        app.selectInterfaceScale(.large)
+        XCTAssertFalse(requested, "显示更新暂停输入时也不能绕过未保存内容保护")
+        XCTAssertNotNil(window.attachedSheet)
+        XCTAssertEqual(app.currentInterfaceScale, .standard)
     }
 
     private func descendants(_ root: NSView) -> [NSView] {

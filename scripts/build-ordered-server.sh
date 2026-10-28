@@ -23,7 +23,7 @@ JAVA_HOME="${JAVA_HOME:-$JAVA_HOME_DEFAULT}"
 SOURCE_SHA256="a0d699fc7388b8252416c49e6293639de39ab76a03e7302ddced56c284d45200"
 SERVER_SHA256="764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536"
 MANUAL_BUILDER_SHA256="1d3df77343f35c6b2a82bd782bb265ecaca8431d9e09cae0e79b93756738f748"
-PATCH_SHA256="b406d74c3968f4c366a0293cd1b5d3ebbb7a0ff79dfff19f92adaccc9d7dbb67"
+PATCH_SHA256="0a95edaed02b78f249cff01e38f259ed2b30406f16bfa4d4fa660ff954c10d03"
 PLATFORM_ZIP_SHA256="37607369a28c5b640b3a7998868d45898ebcb777565a0e85f9acf36f29631d2e"
 BUILD_TOOLS_ZIP_SHA256="04e7f3a72044de4926fa038fa0e251a37bba1e1c3fb8beab6f8401bfd9eb4bf3"
 
@@ -91,10 +91,16 @@ for path in \
     server/src/main/java/com/genymobile/scrcpy/control/Controller.java \
     server/src/main/java/com/genymobile/scrcpy/control/DeviceMessage.java \
     server/src/main/java/com/genymobile/scrcpy/control/DeviceMessageWriter.java \
+    server/src/main/java/com/genymobile/scrcpy/control/DisplayConfigurationCoordinator.java \
+    server/src/main/java/com/genymobile/scrcpy/control/DisplayStreamConfiguration.java \
     server/src/main/java/com/genymobile/scrcpy/control/TouchFinishedPolicy.java \
+    server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java \
+    server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java \
+    server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java \
     server/src/test/java/com/genymobile/scrcpy/control/ControlMessageReaderTest.java \
     server/src/test/java/com/genymobile/scrcpy/control/ControllerTouchOrderedTest.java \
-    server/src/test/java/com/genymobile/scrcpy/control/DeviceMessageWriterTest.java; do
+    server/src/test/java/com/genymobile/scrcpy/control/DeviceMessageWriterTest.java \
+    server/src/test/java/com/genymobile/scrcpy/control/DisplayConfigurationProtocolTest.java; do
     [[ -f "$BUILD_DIR/source/$path" ]] || die "Patch did not produce $path"
 done
 
@@ -185,17 +191,19 @@ JAVA_SRC="$SOURCE_DIR/src/main/java"
 TEST_SRC="$SOURCE_DIR/src/test/java/com/genymobile/scrcpy/control"
 "$JAVAC" -Xlint:-options -encoding UTF-8 -source 1.8 -target 1.8 \
     -bootclasspath "$PLATFORM_DIR/android.jar" \
-    -cp "$FOCUSED_CLASSES:$JUNIT:$HAMCREST" \
+    -cp "$FOCUSED_CLASSES:$JUNIT:$HAMCREST:$BUILD_TOOLS_DIR/core-lambda-stubs.jar" \
     -d "$FOCUSED_TESTS" \
     "$TEST_SRC/ControlMessageReaderTest.java" \
     "$TEST_SRC/DeviceMessageWriterTest.java" \
-    "$TEST_SRC/ControllerTouchOrderedTest.java"
+    "$TEST_SRC/ControllerTouchOrderedTest.java" \
+    "$TEST_SRC/DisplayConfigurationProtocolTest.java"
 
 "$JAVA" -cp "$FOCUSED_CLASSES:$FOCUSED_TESTS:$JUNIT:$HAMCREST" \
     org.junit.runner.JUnitCore \
     com.genymobile.scrcpy.control.ControlMessageReaderTest \
     com.genymobile.scrcpy.control.DeviceMessageWriterTest \
-    com.genymobile.scrcpy.control.ControllerTouchOrderedTest
+    com.genymobile.scrcpy.control.ControllerTouchOrderedTest \
+    com.genymobile.scrcpy.control.DisplayConfigurationProtocolTest
 
 mkdir -p "$BUILD_DIR/upstream-build"
 ANDROID_HOME="$SDK_DIR" \
@@ -216,6 +224,8 @@ unzip -p "$SERVER" classes.dex > "$CHECK_DIR/classes.dex"
 [[ -f "$CHECK_DIR/classes.dex" ]] || die "scrcpy-server does not contain classes.dex"
 grep -aFq "TouchFinishedPolicy" "$CHECK_DIR/classes.dex" \
     || die "Patched touch policy missing from DEX"
+grep -aFq "DisplayConfigurationCoordinator" "$CHECK_DIR/classes.dex" \
+    || die "Display reconfiguration coordinator missing from DEX"
 server_sha="$(sha256 "$SERVER")"
 
 cat > "$BUILD_DIR/BUILD-MANIFEST.json" <<EOF
@@ -236,6 +246,13 @@ cat > "$BUILD_DIR/BUILD-MANIFEST.json" <<EOF
     "requestSize": 9,
     "responseType": 3,
     "responseSize": 14
+  },
+  "displayConfigurationProtocol": {
+    "requestType": 129,
+    "requestSize": 25,
+    "responseType": 4,
+    "responseSize": 6,
+    "ackTimeoutMilliseconds": 5000
   },
   "serverSHA256": "$server_sha"
 }

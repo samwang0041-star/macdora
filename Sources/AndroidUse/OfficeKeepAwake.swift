@@ -95,11 +95,23 @@ enum OfficeKeepAwakeCommands {
         ["shell", "su 0 sh -c '" + script.replacingOccurrences(of: "'", with: "'\\''") + "'"]
     }
 
+    private static let freezerState = """
+    freezer_state() {
+      snapshot=$(dumpsys activity cao | sed -n '/^[[:space:]]*use_freezer=/p; /^[[:space:]]*Apps frozen:/p')
+      if printf '%s\\n' "$snapshot" | grep -q '^[[:space:]]*use_freezer=\\(true\\|false\\)[[:space:]]*$'; then
+        printf '%s\\n' "$snapshot"
+      else
+        dumpsys activity -a | sed -n '/^[[:space:]]*use_freezer=/p; /^[[:space:]]*Apps frozen:/p'
+      fi
+    }
+    """
+
     static let inspect = """
     # macdora-office-awake:inspect
     set -eu
+    \(freezerState)
     value=$(settings get global cached_apps_freezer)
-    state=$(dumpsys activity -a | sed -n 's/^[[:space:]]*use_freezer=\\([a-z]*\\)[[:space:]]*$/\\1/p')
+    state=$(freezer_state | sed -n 's/^[[:space:]]*use_freezer=\\([a-z]*\\)[[:space:]]*$/\\1/p')
     [ "$state" = true ] || [ "$state" = false ] || exit 1
     printf '%s\\n%s\\n' "$value" "$state"
     """
@@ -107,10 +119,11 @@ enum OfficeKeepAwakeCommands {
     static let apply = """
     # macdora-office-awake:apply
     set -eu
+    \(freezerState)
     settings put global cached_apps_freezer disabled >/dev/null
     ready=false
     for attempt in 1 2 3 4 5 6 7 8 9 10; do
-      if dumpsys activity -a | grep -q '^[[:space:]]*use_freezer=false[[:space:]]*$'; then
+      if freezer_state | grep '^[[:space:]]*use_freezer=false[[:space:]]*$' >/dev/null; then
         ready=true
         break
       fi
@@ -129,7 +142,7 @@ enum OfficeKeepAwakeCommands {
       am unfreeze "$name" >/dev/null 2>&1 || true
     done
     for attempt in 1 2 3 4 5 6 7 8 9 10; do
-      state=$(dumpsys activity -a)
+      state=$(freezer_state; dumpsys activity -a processes | sed -n '/isPendingFreeze=/p')
       if printf '%s\\n' "$state" | grep -q '^[[:space:]]*use_freezer=false[[:space:]]*$' &&
          printf '%s\\n' "$state" | grep -q '^[[:space:]]*Apps frozen: 0[[:space:]]*$' &&
          printf '%s\\n' "$state" | grep -q 'isPendingFreeze=' &&
@@ -149,6 +162,7 @@ enum OfficeKeepAwakeCommands {
         return """
         # macdora-office-awake:restore
         set -eu
+        \(freezerState)
         current=$(settings get global cached_apps_freezer)
         if [ "$current" != disabled ]; then
           printf 'MACDORA_OFFICE_AWAKE_EXTERNAL\\n'
@@ -157,7 +171,7 @@ enum OfficeKeepAwakeCommands {
         \(command) >/dev/null
         [ "$(settings get global cached_apps_freezer)" = \(original.setting.rawValue) ] || exit 1
         for attempt in 1 2 3 4 5 6 7 8 9 10; do
-          if dumpsys activity -a | grep -q '^[[:space:]]*use_freezer=\(original.inUse ? "true" : "false")[[:space:]]*$'; then
+          if freezer_state | grep '^[[:space:]]*use_freezer=\(original.inUse ? "true" : "false")[[:space:]]*$' >/dev/null; then
             printf 'MACDORA_OFFICE_AWAKE_RESTORED\\n'
             exit 0
           fi

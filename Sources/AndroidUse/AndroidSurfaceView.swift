@@ -375,7 +375,14 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
         frameLock.lock(); sessionID = identifier; pendingFrame = nil; frameLock.unlock()
         backgroundRenderQueue?.beginSession(identifier)
         firstFrame = true; firstPresentationRetryUsed = false; lastFrame = nil; lastFrameSequence = 0; isTouching = false
+        expectedVideoSize = nil
         awaitingPointerFocus = false; pointerSequence = 0; trustedInputLease = nil; requestedHostInputSource = nil; setInputFocus(nil)
+    }
+
+    private var expectedVideoSize: CGSize?
+
+    func expectVideoSize(_ size: CGSize) {
+        expectedVideoSize = size
     }
 
     func accept(_ frame: DecodedFrame, session: UUID? = nil) {
@@ -396,6 +403,8 @@ final class AndroidSurfaceView: NSView, NSTextInputClient {
         renderingScheduled = false
         frameLock.unlock()
         guard let frame else { return }
+        let decodedSize = CGSize(width: CVPixelBufferGetWidth(frame.buffer), height: CVPixelBufferGetHeight(frame.buffer))
+        guard expectedVideoSize == nil || expectedVideoSize == decodedSize else { return }
         lastFrameSequence &+= 1
         installAsLatestFrame(frame)
         if let backgroundRenderQueue {

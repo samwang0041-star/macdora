@@ -46,12 +46,12 @@ final class ProtocolTests: XCTestCase {
         prefs.tabletMode = false
         XCTAssertEqual(prefs.preferredPixelSize, CGSize(width: 1200, height: 1920))
         let phoneCmd = RuntimePorts.commandLine(scid: 0x12345678, resolutionPreset: "1080p", targetFPS: 60, tabletMode: false)
-        XCTAssertTrue(phoneCmd.contains("new_display=1200x1920/240"))
+        XCTAssertTrue(phoneCmd.contains("new_display=1600x2560/320 max_size=1920"))
 
         prefs.tabletMode = true
         XCTAssertEqual(prefs.preferredPixelSize, CGSize(width: 1920, height: 1200))
         let tabletCmd = RuntimePorts.commandLine(scid: 0x12345678, resolutionPreset: "1080p", targetFPS: 60, tabletMode: true)
-        XCTAssertTrue(tabletCmd.contains("new_display=1920x1200/240"))
+        XCTAssertTrue(tabletCmd.contains("new_display=2560x1600/320 max_size=1920"))
     }
 
     func testBothDisplayLayoutsRetainTabletLogicalScreenSizeAtEveryResolution() throws {
@@ -103,71 +103,75 @@ final class ProtocolTests: XCTestCase {
         }
     }
 
-    func testResolutionPresetsAndPerAppDisplayOverrides() throws {
-        XCTAssertEqual(ContainerPreferences.resolutionOptions.map(\.preset), [
-            "960x600",
-            "1280x800_comfortable",
-            "1440x900",
-            "1920x1200_hidpi",
-            "720p",
-            "1080p",
-            "1440p"
-        ])
+    func testQualityChangesPreserveLogicalSizeAndOrientationAtEveryScale() throws {
+        for scale in DisplayInterfaceScale.allCases {
+            var logicalSizes: [CGSize] = []
+            for preset in ContainerPreferences.resolutionOptions.map(\.preset) {
+                for horizontal in [true, false] {
+                    let command = RuntimePorts.commandLine(scid: 1, resolutionPreset: preset, tabletMode: horizontal, interfaceScale: scale)
+                    let argument = try XCTUnwrap(command.split(separator: " ").first { $0.hasPrefix("new_display=") })
+                    let parts = argument.dropFirst("new_display=".count).split(separator: "/")
+                    let axes = parts[0].split(separator: "x")
+                    let width = try XCTUnwrap(Double(axes[0]))
+                    let height = try XCTUnwrap(Double(axes[1]))
+                    let density = try XCTUnwrap(Double(parts[1]))
+                    XCTAssertEqual(density, 320, "界面大小与清晰度切换都必须保持资源密度。")
+                    let output = ContainerPreferences.pixelSize(for: preset, tabletMode: horizontal)
+                    XCTAssertTrue(command.contains("max_size=\(Int(max(output.width, output.height)))"))
+                    let logical = CGSize(width: min(width, height) * 160 / density, height: max(width, height) * 160 / density)
+                    XCTAssertEqual(width > height, horizontal)
+                    XCTAssertGreaterThanOrEqual(logical.width, 600, "受支持的放大档位必须保留平板布局宽度。")
+                    logicalSizes.append(logical)
+                }
+            }
+            for logical in logicalSizes {
+                XCTAssertEqual(logical.width, logicalSizes[0].width, accuracy: 0.01)
+                XCTAssertEqual(logical.height, logicalSizes[0].height, accuracy: 0.01)
+            }
+        }
+    }
 
-        let comfortableCmdLandscape = RuntimePorts.commandLine(
-            scid: 0x21,
-            resolutionPreset: "1280x800_comfortable",
-            targetFPS: 60,
-            tabletMode: true
-        )
-        XCTAssertTrue(comfortableCmdLandscape.contains("new_display=1280x800/213"))
+    func testInterfaceScaleKeepsDensityAndVideoNeverExceedsTheDisplay() {
+        XCTAssertEqual(Set(DisplayInterfaceScale.allCases.map(\.nativeDPI)), [320])
+        XCTAssertEqual(DisplayInterfaceScale.large.nativePixelSize(tabletMode: true), CGSize(width: 2048, height: 1280))
+        XCTAssertEqual(ContainerPreferences.pixelSize(for: "1440p", tabletMode: true, interfaceScale: .large), CGSize(width: 2048, height: 1280))
+        XCTAssertEqual(ContainerPreferences.pixelSize(for: "1440p", tabletMode: false, interfaceScale: .standard), CGSize(width: 1600, height: 2560))
+        XCTAssertEqual(ContainerPreferences.pixelSize(for: "1080p", tabletMode: false, interfaceScale: .large), CGSize(width: 1200, height: 1920))
+        XCTAssertEqual(ContainerPreferences.resolutionOption(for: "1440p").menuTitle(tabletMode: true, interfaceScale: .large), "精细 · 2048 × 1280")
+    }
 
-        let comfortableCmdPortrait = RuntimePorts.commandLine(
-            scid: 0x22,
-            resolutionPreset: "1280x800_comfortable",
-            targetFPS: 60,
-            tabletMode: false
-        )
-        XCTAssertTrue(comfortableCmdPortrait.contains("new_display=720x1280/320"))
+    func testLegacyDisplayPreferencesMigrateWithoutLosingAppOverrides() throws {
+        for preset in ["960x600", "1280x800_comfortable", "1440x900", "1920x1200_hidpi"] {
+            let legacy = Data("""
+            {"resolutionPreset":"\(preset)","tabletMode":false,"targetFPS":45,
+             "appDisplayOverrides":{
+               "com.example.notes":{"resolutionPreset":"1920x1200_hidpi","tabletMode":false},
+               "com.example.browser":{"resolutionPreset":"1080p","tabletMode":true}}}
+            """.utf8)
+            let decoded = try JSONDecoder().decode(ContainerPreferences.self, from: legacy)
+            XCTAssertEqual(decoded.resolutionPreset, ["960x600", "1280x800_comfortable"].contains(preset) ? "720p" : "1080p")
+            XCTAssertEqual(decoded.interfaceScale, .large)
+            XCTAssertFalse(decoded.tabletMode)
+            XCTAssertEqual(decoded.targetFPS, 45)
+            XCTAssertEqual(decoded.displayPreference(for: "com.example.notes"), AppDisplayPreference(resolutionPreset: "1080p", tabletMode: false, interfaceScale: .large))
+            XCTAssertEqual(decoded.displayPreference(for: "com.example.browser"), AppDisplayPreference(resolutionPreset: "1080p", tabletMode: true))
+            XCTAssertEqual(try JSONDecoder().decode(ContainerPreferences.self, from: JSONEncoder().encode(decoded)), decoded)
+        }
+    }
 
-        let compactCmd = RuntimePorts.commandLine(
-            scid: 0x23,
-            resolutionPreset: "960x600",
-            targetFPS: 60,
-            tabletMode: true
-        )
-        XCTAssertTrue(compactCmd.contains("new_display=960x600/200"))
-
-        let hidpiCmd = RuntimePorts.commandLine(
-            scid: 0x24,
-            resolutionPreset: "1920x1200_hidpi",
-            targetFPS: 60,
-            tabletMode: true
-        )
-        XCTAssertTrue(hidpiCmd.contains("new_display=1920x1200/320"))
-
-        var prefs = ContainerPreferences.default
-        prefs.appDisplayOverrides["com.tencent.mm"] = AppDisplayPreference(
-            resolutionPreset: "1280x800_comfortable",
-            tabletMode: true
-        )
-        prefs.appDisplayOverrides["com.icbc.im"] = AppDisplayPreference(
-            resolutionPreset: "960x600",
-            tabletMode: false
-        )
-        let data = try JSONEncoder().encode(prefs)
-        let decoded = try JSONDecoder().decode(ContainerPreferences.self, from: data)
-        XCTAssertEqual(
-            decoded.displayPreference(for: "com.tencent.mm"),
-            AppDisplayPreference(resolutionPreset: "1280x800_comfortable", tabletMode: true)
-        )
-        XCTAssertEqual(
-            decoded.displayPreference(for: "com.icbc.im"),
-            AppDisplayPreference(resolutionPreset: "960x600", tabletMode: false)
-        )
-        XCTAssertEqual(
-            decoded.displayPreference(for: "com.android.settings"),
-            AppDisplayPreference(resolutionPreset: "1080p", tabletMode: true)
-        )
+    func testScalePreferencesRoundTripAndRecommendedDisplayPreservesOtherSettings() throws {
+        var prefs = ContainerPreferences(resolutionPreset: "1440p", targetFPS: 45, tabletMode: false, interfaceScale: .small)
+        let override = AppDisplayPreference(resolutionPreset: "720p", tabletMode: true, interfaceScale: .large)
+        prefs.appDisplayOverrides["com.example.notes"] = override
+        let decoded = try JSONDecoder().decode(ContainerPreferences.self, from: JSONEncoder().encode(prefs))
+        XCTAssertEqual(decoded, prefs)
+        XCTAssertEqual(decoded.displayPreference(for: "com.example.browser").interfaceScale, .small)
+        XCTAssertEqual(decoded.displayPreference(for: "com.example.notes"), override)
+        prefs.restoreRecommendedDisplay()
+        XCTAssertEqual(prefs.resolutionPreset, "1080p")
+        XCTAssertEqual(prefs.interfaceScale, .standard)
+        XCTAssertFalse(prefs.tabletMode)
+        XCTAssertEqual(prefs.targetFPS, 45)
+        XCTAssertEqual(prefs.appDisplayOverrides["com.example.notes"], override)
     }
 }

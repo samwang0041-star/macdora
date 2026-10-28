@@ -102,6 +102,7 @@ final class RuntimeDependencyInstallerTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
         defer { defaults.removePersistentDomain(forName: defaultsName) }
         let controller = RuntimeController(rootURL: workspace.appendingPathComponent("runtime"), defaults: defaults,
+            connectionPorts: RuntimeConnectionPorts(adb: 5051, emulator: 5590),
             seed: RuntimeSeed(directoryURL: seedDirectory, scrcpyServerURL: resource.appendingPathComponent("scrcpy-server-v5.0.1")))
         controller.cameraEnabled = false
         do {

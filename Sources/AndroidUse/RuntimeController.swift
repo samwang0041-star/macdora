@@ -786,11 +786,21 @@ protocol ControllerEnvironment: Sendable {
     func portIsAvailable(_ port: UInt16) -> Bool
 }
 
+struct RuntimeConnectionPorts: Sendable {
+    let adb: UInt16
+    let emulator: UInt16
+
+    static let `default` = RuntimeConnectionPorts(adb: 5043, emulator: 5584)
+    var serial: String { "emulator-\(emulator)" }
+}
+
 struct SystemControllerEnvironment: ControllerEnvironment {
     private let runner: any ProcessExecuting
+    private let ports: RuntimeConnectionPorts
 
-    init(runner: any ProcessExecuting = ProcessRunner()) {
+    init(runner: any ProcessExecuting = ProcessRunner(), ports: RuntimeConnectionPorts = .default) {
         self.runner = runner
+        self.ports = ports
     }
 
     func environment() -> [String: String] {
@@ -813,7 +823,7 @@ struct SystemControllerEnvironment: ControllerEnvironment {
         let result = try await runner.run(ProcessInvocation(
             executableURL: adbURL,
             arguments: [
-                "-H", "127.0.0.1", "-P", "5043", "-s", "emulator-5584",
+                "-H", "127.0.0.1", "-P", String(ports.adb), "-s", ports.serial,
                 "forward", "--no-rebind", "tcp:\(requestedPort)", "localabstract:\(socketName)"
             ],
             environment: environment,
@@ -823,7 +833,7 @@ struct SystemControllerEnvironment: ControllerEnvironment {
         guard result.exitCode == 0, !result.timedOut else {
             throw RuntimeError.adbCommandFailed("配置显示通道")
         }
-        return ForwardAllocation(localPort: requestedPort, serial: "emulator-5584", scid: scid)
+        return ForwardAllocation(localPort: requestedPort, serial: ports.serial, scid: scid)
     }
 
     func removeForward(
@@ -834,7 +844,7 @@ struct SystemControllerEnvironment: ControllerEnvironment {
         let result = try await runner.run(ProcessInvocation(
             executableURL: adbURL,
             arguments: [
-                "-H", "127.0.0.1", "-P", "5043", "-s", "emulator-5584",
+                "-H", "127.0.0.1", "-P", String(ports.adb), "-s", ports.serial,
                 "forward", "--remove", "tcp:\(allocation.localPort)"
             ],
             environment: environment,
@@ -855,7 +865,7 @@ struct SystemControllerEnvironment: ControllerEnvironment {
         let result = try await runner.run(ProcessInvocation(
             executableURL: adbURL,
             arguments: [
-                "-H", "127.0.0.1", "-P", "5043", "-s", "emulator-5584",
+                "-H", "127.0.0.1", "-P", String(ports.adb), "-s", ports.serial,
                 "push", localURL.path, remotePath
             ],
             environment: environment,
@@ -998,12 +1008,13 @@ enum RuntimePorts {
         scid: UInt32,
         resolutionPreset: String = "1080p",
         targetFPS: Int = 60,
-        tabletMode: Bool = true
+        tabletMode: Bool = true,
+        interfaceScale: DisplayInterfaceScale = .standard
     ) -> String {
         let scidHex = String(format: "%08x", scid)
         let displaySpec = ContainerPreferences.scrcpyNewDisplaySpec(
-            for: resolutionPreset,
-            tabletMode: tabletMode
+            tabletMode: tabletMode,
+            interfaceScale: interfaceScale
         )
         let pixelSize = ContainerPreferences.pixelSize(
             for: resolutionPreset,
@@ -1026,7 +1037,7 @@ enum RuntimePorts {
             + " tunnel_forward=true audio=false control=true"
             + " video_codec=h264 video_bit_rate=\(bitRate) max_fps=\(clampedFPS)"
             + " video_codec_options=low-latency=1"
-            + " new_display=\(displaySpec) vd_system_decorations=false"
+            + " new_display=\(displaySpec) max_size=\(Int(maxAxis)) vd_system_decorations=false"
             + " display_ime_policy=local clipboard_autosync=false"
             + " send_device_meta=false send_dummy_byte=false"
             + " send_frame_meta=true send_stream_meta=true keep_active=true"
@@ -1129,8 +1140,9 @@ final class RuntimeController: SystemPluginHostBridge {
 
     private static let cameraDefaultsKey = "AndroidUse.RuntimeController.cameraEnabled"
     private static let preferencesDefaultsKey = "AndroidUse.RuntimeController.containerPreferences"
-    private static let adbPort: UInt16 = 5043
-    private static let emulatorPort: UInt16 = 5584
+    private let connectionPorts: RuntimeConnectionPorts
+    private var adbPort: UInt16 { connectionPorts.adb }
+    private var emulatorPort: UInt16 { connectionPorts.emulator }
 
     let paths: RuntimePaths
 
@@ -1177,8 +1189,10 @@ final class RuntimeController: SystemPluginHostBridge {
         let allocation: ForwardAllocation
         let serverProcess: any OwnedProcessHandle
         let serverSerial: UInt64
-        let tabletMode: Bool
-        let resolutionPreset: String
+        var tabletMode: Bool
+        var resolutionPreset: String
+        var interfaceScale: DisplayInterfaceScale
+        var targetFPS: Int
         let openedOrder: UInt64
     }
     private var displaySessions: [String: ActiveDisplaySession] = [:]
@@ -1222,9 +1236,31 @@ final class RuntimeController: SystemPluginHostBridge {
         displaySessions[package]?.endpoint
     }
 
-    func displaySessionConfig(for package: String) -> (resolutionPreset: String, tabletMode: Bool)? {
+    func displaySessionConfig(for package: String) -> (resolutionPreset: String, tabletMode: Bool, interfaceScale: DisplayInterfaceScale, targetFPS: Int)? {
         guard let session = displaySessions[package] else { return nil }
-        return (session.resolutionPreset, session.tabletMode)
+        return (session.resolutionPreset, session.tabletMode, session.interfaceScale, session.targetFPS)
+    }
+
+    func confirmDisplayConfiguration(package: String, endpoint: DisplayEndpoint, preference: AppDisplayPreference, targetFPS: Int) -> Bool {
+        guard var session = displaySessions[package], session.endpoint.port == endpoint.port,
+              session.serverProcess.isRunning, state == .running else { return false }
+        session.resolutionPreset = preference.resolutionPreset
+        session.tabletMode = preference.tabletMode
+        session.interfaceScale = preference.interfaceScale
+        session.targetFPS = targetFPS
+        displaySessions[package] = session
+        return true
+    }
+
+    func ensureDirectInputEnabled() async throws {
+        guard state == .ready || state == .running else { return }
+        let operationGeneration = generation
+        _ = try await prepareDirectInput(operationGeneration: operationGeneration)
+        guard isOperationCurrent(operationGeneration), adbServerProcess?.isRunning == true else { throw CancellationError() }
+        try await requireADB(["shell", "ime", "enable", "local.androiduse.ime/.DirectCommitImeService"], operation: "启用中文输入组件")
+        guard isOperationCurrent(operationGeneration), adbServerProcess?.isRunning == true else { throw CancellationError() }
+        try await requireADB(["shell", "ime", "set", "local.androiduse.ime/.DirectCommitImeService"], operation: "选择中文输入组件")
+        guard isOperationCurrent(operationGeneration) else { throw CancellationError() }
     }
 
     private var officeKeepAwakePreferences: OfficeKeepAwakePreferences {
@@ -1529,7 +1565,8 @@ final class RuntimeController: SystemPluginHostBridge {
         runner: any ProcessExecuting = ProcessRunner(),
         processTerminator: any OwnedProcessTerminating = ProcessRunner(),
         digester: any SecureDigesting = SHA256Digester(),
-        environment: any ControllerEnvironment = SystemControllerEnvironment(),
+        environment: (any ControllerEnvironment)? = nil,
+        connectionPorts: RuntimeConnectionPorts = .default,
         seed: RuntimeSeed = .bundle(),
         dependencyInstaller: RuntimeDependencyInstaller? = nil,
         hooks: RuntimeControllerHooks = RuntimeControllerHooks(),
@@ -1543,7 +1580,8 @@ final class RuntimeController: SystemPluginHostBridge {
         self.runner = runner
         self.processTerminator = processTerminator
         self.digester = digester
-        self.environmentProvider = environment
+        self.connectionPorts = connectionPorts
+        self.environmentProvider = environment ?? SystemControllerEnvironment(ports: connectionPorts)
         self.seed = seed
         self.dependencyInstaller = dependencyInstaller
         self.hooks = hooks
@@ -1561,7 +1599,7 @@ final class RuntimeController: SystemPluginHostBridge {
 
     var currentRuntimeState: RuntimeState { state }
     var currentActivePackage: String? { activeDisplayPackage }
-    var emulatorConsolePort: UInt16 { Self.emulatorPort }
+    var emulatorConsolePort: UInt16 { emulatorPort }
 
     var emulatorAuthTokenURLs: [URL] {
         [
@@ -1573,9 +1611,9 @@ final class RuntimeController: SystemPluginHostBridge {
     var hostServiceEnvironment: [String: String] {
         [
             "MACDORA_ADB_PATH": paths.adbURL.path,
-            "MACDORA_ADB_SERIAL": "emulator-\(Self.emulatorPort)",
-            "ANDROID_ADB_SERVER_PORT": String(Self.adbPort),
-            "ADB_SERVER_SOCKET": "tcp:127.0.0.1:\(Self.adbPort)"
+            "MACDORA_ADB_SERIAL": "emulator-\(emulatorPort)",
+            "ANDROID_ADB_SERVER_PORT": String(adbPort),
+            "ADB_SERVER_SOCKET": "tcp:127.0.0.1:\(adbPort)"
         ]
     }
 
@@ -1714,12 +1752,12 @@ final class RuntimeController: SystemPluginHostBridge {
               Self.canStart(from: state) else {
             throw CancellationError()
         }
-        if !environmentProvider.portIsAvailable(Self.emulatorPort),
+        if !environmentProvider.portIsAvailable(emulatorPort),
            environmentProvider is SystemControllerEnvironment {
             await reclaimStaleOwnedEmulatorIfNeeded()
         }
-        guard environmentProvider.portIsAvailable(Self.emulatorPort) else {
-            throw RuntimeError.portInUse(Self.emulatorPort)
+        guard environmentProvider.portIsAvailable(emulatorPort) else {
+            throw RuntimeError.portInUse(emulatorPort)
         }
         let operation = UUID()
         let prepared = try makePreparedRuntime()
@@ -2042,12 +2080,13 @@ final class RuntimeController: SystemPluginHostBridge {
         package: String = DefaultApp.package,
         resolutionPreset: String? = nil,
         tabletMode: Bool? = nil,
+        interfaceScale: DisplayInterfaceScale? = nil,
         replaceExisting: Bool = true
     ) async throws -> DisplayEndpoint {
         guard ContainerApp.isValidPackageIdentifier(package) else { throw RuntimeError.displayUnavailable }
         if let closingTask { await closingTask.value }
         if let openingTask {
-            if !openingTask.isCancelled, openingDisplayPackage == package, resolutionPreset == nil, tabletMode == nil {
+            if !openingTask.isCancelled, openingDisplayPackage == package, resolutionPreset == nil, tabletMode == nil, interfaceScale == nil {
                 return try await openingTask.value
             }
             if replaceExisting || openingDisplayPackage == package {
@@ -2063,6 +2102,7 @@ final class RuntimeController: SystemPluginHostBridge {
                     package: package,
                     resolutionPreset: resolutionPreset,
                     tabletMode: tabletMode,
+                    interfaceScale: interfaceScale,
                     replaceExisting: replaceExisting
                 )
                 openingTask = nil
@@ -2084,20 +2124,23 @@ final class RuntimeController: SystemPluginHostBridge {
         package: String,
         resolutionPreset: String?,
         tabletMode: Bool?,
+        interfaceScale: DisplayInterfaceScale?,
         replaceExisting: Bool
     ) async throws -> DisplayEndpoint {
         guard state == .ready || state == .running else {
             throw RuntimeError.runtimeNotReady
         }
         let desiredAppPref = containerPreferences.displayPreference(for: package)
-        let targetPreset = resolutionPreset ?? desiredAppPref.resolutionPreset
+        let targetPreset = ContainerPreferences.canonicalResolutionPreset(resolutionPreset ?? desiredAppPref.resolutionPreset)
         let targetTabletMode = tabletMode ?? desiredAppPref.tabletMode
+        let targetInterfaceScale = interfaceScale ?? desiredAppPref.interfaceScale
 
         if replaceExisting {
             if displaySessions.count == 1,
                let existing = displaySessions[package],
                existing.tabletMode == targetTabletMode,
-               existing.resolutionPreset == targetPreset {
+               existing.resolutionPreset == targetPreset,
+               existing.interfaceScale == targetInterfaceScale {
                 return existing.endpoint
             }
             if !displaySessions.isEmpty {
@@ -2106,7 +2149,8 @@ final class RuntimeController: SystemPluginHostBridge {
         } else {
             if let existing = displaySessions[package] {
                 if existing.tabletMode == targetTabletMode,
-                   existing.resolutionPreset == targetPreset {
+                   existing.resolutionPreset == targetPreset,
+                   existing.interfaceScale == targetInterfaceScale {
                     return existing.endpoint
                 }
                 await closeDisplayResources(forPackage: package)
@@ -2140,7 +2184,7 @@ final class RuntimeController: SystemPluginHostBridge {
             requestedPort: localPort,
             scid: scid
         )
-        guard allocation.serial == "emulator-5584",
+        guard allocation.serial == connectionPorts.serial,
               RuntimePorts.forwardPortIsReady(
                   allocation.localPort,
                   localHostPortAvailable: hooks.localHostPortAvailable
@@ -2160,8 +2204,8 @@ final class RuntimeController: SystemPluginHostBridge {
             }
             try await prepareGuestEnvironmentForApp(
                 package: package,
-                resolutionPreset: targetPreset,
                 tabletMode: targetTabletMode,
+                interfaceScale: targetInterfaceScale,
                 operationGeneration: operationGeneration
             )
             guard isOperationCurrent(operationGeneration) else { throw CancellationError() }
@@ -2194,7 +2238,8 @@ final class RuntimeController: SystemPluginHostBridge {
                 scid: scid,
                 resolutionPreset: targetPreset,
                 targetFPS: prefs.targetFPS,
-                tabletMode: targetTabletMode
+                tabletMode: targetTabletMode,
+                interfaceScale: targetInterfaceScale
             )
             let handle = try await runner.launch(
                 ProcessInvocation(
@@ -2262,6 +2307,8 @@ final class RuntimeController: SystemPluginHostBridge {
                             serverSerial: serverSerial,
                             tabletMode: targetTabletMode,
                             resolutionPreset: targetPreset,
+                            interfaceScale: targetInterfaceScale,
+                            targetFPS: prefs.targetFPS,
                             openedOrder: displaySessionOrderCounter
                         )
                         updateState(.running)
@@ -2575,14 +2622,14 @@ final class RuntimeController: SystemPluginHostBridge {
             _ = Darwin.kill(item.pid, SIGTERM)
         }
         for _ in 0..<25 {
-            if environmentProvider.portIsAvailable(Self.emulatorPort) { return }
+            if environmentProvider.portIsAvailable(emulatorPort) { return }
             try? await Task.sleep(for: .milliseconds(120))
         }
         for item in stale {
             _ = Darwin.kill(item.pid, SIGKILL)
         }
         for _ in 0..<15 {
-            if environmentProvider.portIsAvailable(Self.emulatorPort) { return }
+            if environmentProvider.portIsAvailable(emulatorPort) { return }
             try? await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -2596,14 +2643,14 @@ final class RuntimeController: SystemPluginHostBridge {
             _ = Darwin.kill(item.pid, SIGTERM)
         }
         for _ in 0..<20 {
-            if environmentProvider.portIsAvailable(Self.adbPort) { return }
+            if environmentProvider.portIsAvailable(adbPort) { return }
             try? await Task.sleep(for: .milliseconds(100))
         }
         for item in stale {
             _ = Darwin.kill(item.pid, SIGKILL)
         }
         for _ in 0..<15 {
-            if environmentProvider.portIsAvailable(Self.adbPort) { return }
+            if environmentProvider.portIsAvailable(adbPort) { return }
             try? await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -2736,7 +2783,7 @@ final class RuntimeController: SystemPluginHostBridge {
         emulatorEnvironment["MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS"] = "0"
         var launchArguments = [
             "-avd", "android-use",
-            "-port", String(Self.emulatorPort),
+            "-port", String(emulatorPort),
             "-no-window",
             "-gpu", "host",
             "-no-metrics",
@@ -3034,12 +3081,12 @@ final class RuntimeController: SystemPluginHostBridge {
            ) {
             self.adbServerProcess = nil
         }
-        if !environmentProvider.portIsAvailable(Self.adbPort),
+        if !environmentProvider.portIsAvailable(adbPort),
            environmentProvider is SystemControllerEnvironment {
             await reclaimStaleOwnedADBIfNeeded()
         }
-        guard environmentProvider.portIsAvailable(Self.adbPort) else {
-            throw RuntimeError.portInUse(Self.adbPort)
+        guard environmentProvider.portIsAvailable(adbPort) else {
+            throw RuntimeError.portInUse(adbPort)
         }
         let serial = adbServerSerial + 1
         adbServerSerial = serial
@@ -3047,7 +3094,7 @@ final class RuntimeController: SystemPluginHostBridge {
             ProcessInvocation(
                 executableURL: paths.adbURL,
                 arguments: [
-                    "-L", "tcp:5043",
+                    "-L", "tcp:\(adbPort)",
                     "server", "nodaemon"
                 ],
                 environment: environment,
@@ -3075,7 +3122,7 @@ final class RuntimeController: SystemPluginHostBridge {
                 adbServerProcess = nil
                 throw RuntimeError.adbCommandFailed("启动私有 ADB")
             }
-            if !environmentProvider.portIsAvailable(Self.adbPort) {
+            if !environmentProvider.portIsAvailable(adbPort) {
                 return
             }
             try await Task.sleep(for: .milliseconds(100))
@@ -3105,15 +3152,15 @@ final class RuntimeController: SystemPluginHostBridge {
         environment["ANDROID_USER_HOME"] = paths.androidUserHomeURL.path
         environment["ANDROID_EMULATOR_HOME"] = paths.androidEmulatorHomeURL.path
         environment["ANDROID_AVD_HOME"] = paths.avdHomeURL.path
-        environment["ADB_SERVER_SOCKET"] = "tcp:127.0.0.1:5043"
-        environment["ANDROID_ADB_SERVER_PORT"] = "5043"
+        environment["ADB_SERVER_SOCKET"] = "tcp:127.0.0.1:\(adbPort)"
+        environment["ANDROID_ADB_SERVER_PORT"] = String(adbPort)
         return environment
     }
 
     func adbPrefix() -> [String] {
         // An explicit host makes the client fail if the owned server is gone,
         // instead of auto-starting an unowned daemon during cancellation/exit.
-        ["-H", "127.0.0.1", "-P", "5043", "-s", "emulator-5584"]
+        ["-H", "127.0.0.1", "-P", String(adbPort), "-s", connectionPorts.serial]
     }
 
     private func prepareDirectInput(operationGeneration: UInt64) async throws -> UInt16 {
@@ -3210,8 +3257,8 @@ final class RuntimeController: SystemPluginHostBridge {
 
     private func prepareGuestEnvironmentForApp(
         package: String,
-        resolutionPreset: String? = nil,
         tabletMode: Bool? = nil,
+        interfaceScale: DisplayInterfaceScale? = nil,
         updateDefaultDisplayGeometry: Bool = false,
         operationGeneration: UInt64
     ) async throws {
@@ -3223,12 +3270,12 @@ final class RuntimeController: SystemPluginHostBridge {
         }
         let globalPref = containerPreferences
         let desiredPref = globalPref.displayPreference(for: package)
-        let resolvedPreset = resolutionPreset ?? (updateDefaultDisplayGeometry ? globalPref.resolutionPreset : desiredPref.resolutionPreset)
         let isHorizontal = tabletMode ?? (updateDefaultDisplayGeometry ? globalPref.tabletMode : desiredPref.tabletMode)
         let ignoreOrientation = "true"
         let compatAction = "enable"
-        let pixelSize = ContainerPreferences.pixelSize(for: resolvedPreset, tabletMode: isHorizontal)
-        let dpi = ContainerPreferences.dpi(for: resolvedPreset, tabletMode: isHorizontal)
+        let resolvedScale = interfaceScale ?? (updateDefaultDisplayGeometry ? globalPref.interfaceScale : desiredPref.interfaceScale)
+        let pixelSize = resolvedScale.nativePixelSize(tabletMode: isHorizontal)
+        let dpi = resolvedScale.nativeDPI
         let d0Size = "\(Int(pixelSize.width))x\(Int(pixelSize.height))"
         let d0Density = "\(dpi)"
         let d0Commands = updateDefaultDisplayGeometry

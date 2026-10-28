@@ -12,7 +12,7 @@ Macdora's original host application and original helper code are provided under 
 | Vulkan-Headers | [KhronosGroup/Vulkan-Headers, e3b1eec](https://github.com/KhronosGroup/Vulkan-Headers/tree/e3b1eec08173d6b825cd3ac88c885a63b621504a) | [Apache-2.0 or MIT, per file](Vendor/MoltenVK-1.4.2/licenses/Vulkan-Headers-LICENSE.md). |
 | cereal | [USCiLab/cereal, a56bad8](https://github.com/USCiLab/cereal/tree/a56bad8bbb770ee266e930c95d37fff2a5be7fea) | [BSD-3-Clause](Vendor/MoltenVK-1.4.2/licenses/cereal-LICENSE). |
 
-The scrcpy build applies Macdora's ordered input acknowledgments and related touch handling changes. The replacement Android input controller is in `Guest/OrderedScrcpy`; its use with the upstream server remains under Apache-2.0. The server's upstream license and a modification notice are included in the app's `Contents/Resources/Notices` directory.
+The scrcpy build applies Macdora's ordered input acknowledgments, related touch handling changes, and an in-place display/encoder reconfiguration protocol with bounded output polling for reset and shutdown. The replacement Android input controller is in `Guest/OrderedScrcpy`; its use with the upstream server remains under Apache-2.0. The server's upstream license and a modification notice are included in the app's `Contents/Resources/Notices` directory.
 
 The public preview builds MoltenVK and SPIRV-Cross from the unmodified upstream sources described in [the fixed build manifest](Vendor/MoltenVK-1.4.2/manifest.json). It uses public Metal APIs and defaults to Android Emulator's host GL translator. This release does not include downstream dynamic topology or signed zero patches. Experimental Guest ANGLE selection is a development option and is not a promise of GLES feature parity.
 

@@ -35,31 +35,39 @@ final class OfficeKeepAwakeTests: XCTestCase {
         }
     }
 
-    func testSettingsExposeADisabledByDefaultOfficeKeepAwakeSwitch() throws {
+    func testGlobalSettingsNeverExposePluginKeepAwake() throws {
         _ = NSApplication.shared
         let manager = ManagementWindow()
         let window = try XCTUnwrap(manager.window)
         defer { window.orderOut(nil) }
-        manager.updatePreferences(cameraEnabled: true, canChangeCamera: true,
-                                  rootPath: "/tmp/example-office", preferences: .default, readiness: [])
         manager.selectSection(.settings)
-        let root = try XCTUnwrap(window.contentView)
-        let toggle = try XCTUnwrap(descendants(root).first {
-            $0.identifier?.rawValue == "office-keep-awake-toggle"
+        for status in [OfficeKeepAwakeStatus.off, .init(enabled: true, phase: .active), .init(enabled: false, phase: .failed)] {
+            manager.updatePreferences(cameraEnabled: true, canChangeCamera: true,
+                rootPath: "/tmp/example-office", preferences: .default, readiness: [], officeKeepAwake: status)
+            let controls = descendants(try XCTUnwrap(window.contentView))
+            XCTAssertFalse(controls.contains { $0 is PluginKeepAwakeView })
+            XCTAssertFalse(controls.contains { ($0 as? NSTextField)?.stringValue.contains("唤醒") == true })
+            XCTAssertFalse(controls.contains { $0.identifier?.rawValue.contains("keep-awake") == true })
+        }
+    }
+
+    func testPluginKeepAwakeStartsOffAndBlocksChangesWhileApplyingOrRuntimeBusy() throws {
+        _ = NSApplication.shared
+        let view = PluginKeepAwakeView()
+        let toggle = try XCTUnwrap(descendants(view).first {
+            $0.identifier?.rawValue == "plugin-keep-awake-toggle"
         } as? TFToggleSwitch)
         XCTAssertFalse(toggle.isOn)
         XCTAssertTrue(toggle.isAccessibilityElement())
-        XCTAssertFalse((toggle.accessibilityLabel() ?? "").isEmpty)
         var selected: Bool?
-        manager.onToggleOfficeKeepAwake = { selected = $0 }
+        view.update(status: .off, runtimeBusy: false) { selected = $0 }
         XCTAssertTrue(toggle.accessibilityPerformPress())
         XCTAssertEqual(selected, true)
-        manager.update(.starting)
-        let disabled = try XCTUnwrap(descendants(root).first {
-            $0.identifier?.rawValue == "office-keep-awake-toggle"
-        } as? TFToggleSwitch)
-        XCTAssertFalse(disabled.isEnabled)
-        XCTAssertFalse(disabled.accessibilityPerformPress())
+        for (status, busy) in [(OfficeKeepAwakeStatus.off, true), (.init(enabled: true, phase: .applying), false)] {
+            view.update(status: status, runtimeBusy: busy) { selected = $0 }
+            XCTAssertFalse(toggle.isEnabled)
+            XCTAssertFalse(toggle.accessibilityPerformPress())
+        }
     }
 
     func testGuestCommandsUnfreezeAndRestoreThroughIsolatedShellStubs() async throws {
@@ -83,31 +91,34 @@ final class OfficeKeepAwakeTests: XCTestCase {
         XCTAssertEqual(try fixture.read("setting"), "enabled")
     }
 
-    func testFailedSettingsRetryKeepsOriginalIntentAndToggleCanStillCancelIt() throws {
+    func testFailedPluginRetryKeepsOriginalIntentAndToggleCanStillCancelIt() throws {
         _ = NSApplication.shared
-        let manager = ManagementWindow()
-        let window = try XCTUnwrap(manager.window)
-        defer { window.orderOut(nil) }
-        manager.selectSection(.settings)
+        let view = PluginKeepAwakeView()
         for enabled in [true, false] {
-            manager.updatePreferences(cameraEnabled: true, canChangeCamera: true,
-                rootPath: "/tmp/example-office", preferences: .default, readiness: [],
-                officeKeepAwake: .init(enabled: enabled, phase: .failed))
-            let root = try XCTUnwrap(window.contentView)
-            let retry = try XCTUnwrap(descendants(root).first {
-                $0.identifier?.rawValue == "office-keep-awake-retry"
-            } as? TFButton)
             var requested: Bool?
-            manager.onToggleOfficeKeepAwake = { requested = $0 }
+            view.update(status: .init(enabled: enabled, phase: .failed), runtimeBusy: false) { requested = $0 }
+            let retry = try XCTUnwrap(descendants(view).first {
+                $0.identifier?.rawValue == "plugin-keep-awake-retry"
+            } as? TFButton)
+            XCTAssertFalse(retry.isHidden)
             XCTAssertTrue(retry.accessibilityPerformPress())
-            XCTAssertEqual(requested, enabled, "Retry must repeat the failed enable OR restore.")
-            let toggle = try XCTUnwrap(descendants(root).first {
-                $0.identifier?.rawValue == "office-keep-awake-toggle"
+            XCTAssertEqual(requested, enabled, "重试必须保留原来的开启或恢复意图。")
+            let toggle = try XCTUnwrap(descendants(view).first {
+                $0.identifier?.rawValue == "plugin-keep-awake-toggle"
             } as? TFToggleSwitch)
             XCTAssertEqual(toggle.isOn, enabled)
             XCTAssertTrue(toggle.accessibilityPerformPress())
-            XCTAssertEqual(requested, !enabled, "The normal toggle must still allow changing the saved intent.")
+            XCTAssertEqual(requested, !enabled)
         }
+    }
+
+    func testGuestCommandsHandleLargeProcessDumpWithoutArgumentOverflow() async throws {
+        let fixture = try OfficeGuestShellFixture()
+        defer { fixture.remove() }
+        try fixture.write("largeDump", "1")
+        let applied = try await fixture.run(OfficeKeepAwakeCommands.apply)
+        XCTAssertEqual(applied.exitCode, 0)
+        XCTAssertEqual(String(decoding: applied.stdout, as: UTF8.self), "MACDORA_OFFICE_AWAKE_APPLIED\n")
     }
 
     func testGuestCommandsRejectFrozenOrPendingRendererAndMissingDumpSupport() async throws {
@@ -121,7 +132,7 @@ final class OfficeKeepAwakeTests: XCTestCase {
         }
     }
 
-    func testExportOfficeSettingsScreenshotsWhenRequested() throws {
+    func testExportPluginSettingsScreenshotsWhenRequested() throws {
         guard let path = ProcessInfo.processInfo.environment["MACDORA_OFFICE_QA_SNAPSHOTS"] else { return }
         let directory = URL(fileURLWithPath: path, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -130,29 +141,27 @@ final class OfficeKeepAwakeTests: XCTestCase {
         defer { TFTheme.isDark = oldTheme }
         for dark in [false, true] {
             TFTheme.isDark = dark
-            let manager = ManagementWindow()
-            let window = try XCTUnwrap(manager.window)
+            let view = PluginKeepAwakeView()
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 180), styleMask: [.titled], backing: .buffered, defer: false)
             defer { window.orderOut(nil) }
             window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-            window.setContentSize(NSSize(width: 1060, height: 700))
-            manager.updatePreferences(cameraEnabled: true, canChangeCamera: true,
-                rootPath: "/tmp/example-office", preferences: .default, readiness: [],
-                officeKeepAwake: .init(enabled: dark, phase: dark ? .active : .off))
-            manager.selectSection(.settings)
-            let root = try XCTUnwrap(window.contentView)
-            root.layoutSubtreeIfNeeded()
-            let bitmap = try XCTUnwrap(root.bitmapImageRepForCachingDisplay(in: root.bounds))
-            root.cacheDisplay(in: root.bounds, to: bitmap)
-            try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                .write(to: directory.appendingPathComponent(dark ? "office-settings-dark.png" : "office-settings-light.png"))
-            manager.updatePreferences(cameraEnabled: true, canChangeCamera: true,
-                rootPath: "/tmp/example-office", preferences: .default, readiness: [],
-                officeKeepAwake: .init(enabled: dark, phase: .failed))
-            root.layoutSubtreeIfNeeded()
-            let failedBitmap = try XCTUnwrap(root.bitmapImageRepForCachingDisplay(in: root.bounds))
-            root.cacheDisplay(in: root.bounds, to: failedBitmap)
-            try XCTUnwrap(failedBitmap.representation(using: .png, properties: [:]))
-                .write(to: directory.appendingPathComponent(dark ? "office-settings-failed-dark.png" : "office-settings-failed-light.png"))
+            let root = NSView(frame: NSRect(x: 0, y: 0, width: 660, height: 180))
+            root.addSubview(view)
+            NSLayoutConstraint.activate([
+                view.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+                view.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+                view.topAnchor.constraint(equalTo: root.topAnchor, constant: 12)
+            ])
+            window.contentView = root
+            window.orderFront(nil)
+            for failed in [false, true] {
+                view.update(status: .init(enabled: dark, phase: failed ? .failed : (dark ? .active : .off)), runtimeBusy: false, onToggle: { _ in })
+                root.layoutSubtreeIfNeeded()
+                let bitmap = try XCTUnwrap(root.bitmapImageRepForCachingDisplay(in: root.bounds))
+                root.cacheDisplay(in: root.bounds, to: bitmap)
+                try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                    .write(to: directory.appendingPathComponent("plugin-awake-\(dark ? "dark" : "light")-\(failed ? "failed" : "normal").png"))
+            }
         }
     }
 
@@ -190,6 +199,9 @@ private struct OfficeGuestShellFixture {
             """,
             "dumpsys": """
             if [ "$(cat "$OFFICE_FIXTURE_STATE/unsupported")" = 1 ]; then exit 0; fi
+            if [ -f "$OFFICE_FIXTURE_STATE/largeDump" ]; then
+              awk 'BEGIN { for (i = 0; i < 10000; i++) print "synthetic unrelated activity manager diagnostic padding line" }'
+            fi
             setting=$(cat "$OFFICE_FIXTURE_STATE/setting")
             main=$(cat "$OFFICE_FIXTURE_STATE/mainFrozen")
             child=$(cat "$OFFICE_FIXTURE_STATE/childFrozen")

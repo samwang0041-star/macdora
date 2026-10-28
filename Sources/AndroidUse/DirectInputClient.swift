@@ -436,7 +436,12 @@ final class DirectInputClient {
     }
 
     private func clearWaiting() { acknowledgement.lock(); waiting = nil; outcome = nil; acknowledgement.unlock() }
-    private func wakeFailure() { acknowledgement.lock(); outcome = DirectInputReply(status: -1, focus: nil); acknowledgement.broadcast(); acknowledgement.unlock() }
+    private func wakeFailure() {
+        acknowledgement.lock(); defer { acknowledgement.unlock() }
+        guard waiting != nil, outcome == nil else { return }
+        outcome = DirectInputReply(status: -1, focus: nil)
+        acknowledgement.broadcast()
+    }
 
     func stop() {
         stateLock.lock()

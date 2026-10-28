@@ -8,4 +8,4 @@ a8b6fe982d0d157a347004064d5fbf048950c6a9a5282ae66237f65ec4c31524  .cache/upstrea
 ebdc39903b137c88817d6767d83e3362733d63886f746d015f1f6662bc72af04  .cache/upstream/scrcpy-5.0.1/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessageWriter.java
 baafe7c0593b8dc72a3541f5cf39b5102c9edcbf4edbc67bdf60a53ba12c78ce  .cache/upstream/scrcpy-5.0.1/server/src/main/java/android/content/IContentProvider.java
 e6785c9b1f17e8daaf62b4a68fc4c3489bd9e38b5b494181d8aad2d8371881c8  .cache/upstream/scrcpy-5.0.1/server/src/main/AndroidManifest.xml
-b406d74c3968f4c366a0293cd1b5d3ebbb7a0ff79dfff19f92adaccc9d7dbb67  ordered-touch.patch
+0a95edaed02b78f249cff01e38f259ed2b30406f16bfa4d4fa660ff954c10d03  ordered-touch.patch

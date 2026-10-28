@@ -8,8 +8,10 @@ API, expose application data, or enable an Agent by itself.
 ## Responsibilities
 
 - Macdora owns the selected Android environment, display, input focus and
-  plugin process lifecycle. Keep-awake intent belongs to that canonical
-  environment directory, and remains off by default.
+  plugin process lifecycle. Keep-awake control appears only inside a plugin
+  that explicitly declares `runtime.keep-awake`, never in global preferences.
+  Its effect and recovery record belong to that canonical Android environment
+  directory, and it remains off by default.
 - A connector owns its application protocol, current account/session checks,
   operation permissions and business result verification. Application-specific
   connectors and their data remain outside this public source tree.

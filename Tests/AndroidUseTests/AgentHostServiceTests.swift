@@ -1456,6 +1456,66 @@ struct AgentHostServiceTests {
         #expect(replacement !== workspace)
     }
 
+    @Test("Keep-awake control belongs only to an explicitly opted-in plugin workspace")
+    @MainActor
+    func keepAwakeControlIsPluginScoped() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaults = try #require(UserDefaults(suiteName: "AgentKeepAwake.\(UUID().uuidString)"))
+        let manager = SystemPluginManager(rootURL: root, defaults: defaults, hostServiceHealthClient: { _, _, _ in .success(()) })
+        let opted = try makeAgentPackage(root: root, id: "dev.agent.awake", capabilities: ["host.service", "agent.readonly", "guest.shell", "runtime.keep-awake"], agentPath: "bin/agent", createExecutable: true)
+        let ordinary = try makeAgentPackage(root: root, id: "dev.agent.ordinary", agentPath: "bin/agent", createExecutable: true)
+        _ = try await manager.importDeveloperPlugin(from: opted)
+        _ = try await manager.importDeveloperPlugin(from: ordinary)
+        await manager.setPluginEnabled(id: "dev.agent.awake", enabled: true)
+        await manager.setPluginEnabled(id: "dev.agent.ordinary", enabled: true)
+        let window = ManagementWindow()
+        defer { window.window?.orderOut(nil) }
+        window.bindPluginManager(manager)
+        window.updatePreferences(cameraEnabled: false, canChangeCamera: false, rootPath: root.path, preferences: .default, readiness: [], officeKeepAwake: .init(enabled: true, phase: .active))
+        let content = try #require(window.window?.contentView)
+        window.selectSection(.settings)
+        #expect(!descendants(of: content).contains { $0 is PluginKeepAwakeView })
+        window.openPluginDetailPage(id: "dev.agent.ordinary")
+        #expect(!descendants(of: content).contains { $0 is PluginKeepAwakeView })
+        window.openPluginDetailPage(id: "dev.agent.awake")
+        let toggle = try #require(descendants(of: content).first { $0.identifier?.rawValue == "plugin-keep-awake-toggle" } as? TFToggleSwitch)
+        #expect(toggle.isOn)
+        var requested: (String, Bool)?
+        window.onTogglePluginKeepAwake = { requested = ($0, $1) }
+        #expect(toggle.accessibilityPerformPress())
+        #expect(requested?.0 == "dev.agent.awake")
+        #expect(requested?.1 == false)
+        window.update(.starting)
+        #expect(!toggle.isEnabled)
+        #expect(!toggle.accessibilityPerformPress())
+        window.update(.ready)
+        window.updatePreferences(cameraEnabled: false, canChangeCamera: false, rootPath: root.path, preferences: .default, readiness: [], officeKeepAwake: .init(enabled: false, phase: .failed))
+        let retry = try #require(descendants(of: content).first { $0.identifier?.rawValue == "plugin-keep-awake-retry" } as? TFButton)
+        requested = nil
+        #expect(retry.accessibilityPerformPress())
+        #expect(requested?.1 == false)
+        await manager.setPluginEnabled(id: "dev.agent.awake", enabled: false)
+        window.refreshPluginsSection()
+        requested = nil
+        _ = toggle.accessibilityPerformPress()
+        #expect(requested == nil, "停用后遗留的控件不能修改运行策略。")
+        #expect(!descendants(of: content).contains { $0 is PluginKeepAwakeView })
+        window.updatePreferences(cameraEnabled: false, canChangeCamera: false, rootPath: root.path, preferences: .default, readiness: [], officeKeepAwake: .init(enabled: true, phase: .active))
+        let orphanedRestore = try #require(descendants(of: content).first { $0.identifier?.rawValue == "plugin-orphaned-keep-awake-restore" } as? TFButton)
+        var restored = false
+        window.onRestoreOrphanedKeepAwake = { restored = true }
+        #expect(orphanedRestore.accessibilityPerformPress())
+        #expect(restored)
+        try await manager.deletePlugin(id: "dev.agent.awake")
+        window.refreshPluginsSection()
+        #expect(descendants(of: content).contains { $0.identifier?.rawValue == "plugin-orphaned-keep-awake-restore" })
+        window.updatePreferences(cameraEnabled: false, canChangeCamera: false, rootPath: root.path, preferences: .default, readiness: [], officeKeepAwake: .off)
+        #expect(!descendants(of: content).contains { $0.identifier?.rawValue == "plugin-orphaned-keep-awake-restore" })
+        window.selectSection(.settings)
+        #expect(!descendants(of: content).contains { $0.identifier?.rawValue.contains("keep-awake") == true })
+    }
+
     @Test("Hot reload replaces a same-ID package and the old Agent view identity")
     @MainActor
     func hotReloadKeepsPackageIdentity() async throws {

@@ -19,22 +19,38 @@ final class AppWindowSession {
     var presentationTimes: [Double] = []
     var usingHardwareDecoder = true
     var isOpening = false
+    var endpoint: DisplayEndpoint?
+    var appliedDisplayPreference: AppDisplayPreference?
+    var appliedTargetFPS: Int?
+    var displayUpdateTask: Task<Void, Never>?
+    var displayUpdateRevision: UInt64 = 0
+    var directInputConnected = false
     var resolutionPreset: String
     var tabletMode: Bool
+    var interfaceScale: DisplayInterfaceScale
 
     init(
         package: String,
         window: ApplicationWindow,
         resolutionPreset: String,
-        tabletMode: Bool
+        tabletMode: Bool,
+        interfaceScale: DisplayInterfaceScale = .standard
     ) {
         self.package = package
         self.window = window
         self.resolutionPreset = resolutionPreset
         self.tabletMode = tabletMode
+        self.interfaceScale = interfaceScale
     }
 
     func stopStreamAndTimers() {
+        displayUpdateRevision &+= 1
+        displayUpdateTask?.cancel()
+        displayUpdateTask = nil
+        endpoint = nil
+        appliedDisplayPreference = nil
+        appliedTargetFPS = nil
+        directInputConnected = false
         presenceTimer?.invalidate()
         presenceTimer = nil
         presenceQueryInProgress = false
@@ -46,7 +62,7 @@ final class AppWindowSession {
 
 @MainActor
 final class ProductAppDelegate: NSObject, NSApplicationDelegate {
-    private let runtime = RuntimeController()
+    private let runtime: RuntimeController
     private var manager: ManagementWindow!
     private var injectedApplicationWindow: ApplicationWindow?
     private var appSessions: [String: AppWindowSession] = [:]
@@ -59,7 +75,8 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     private var activePackage: String = DefaultApp.package
     private let dockPresentation = AppDockPresentation(mode: AppDockIconMode.parse(arguments: ProcessInfo.processInfo.arguments))
 
-    init(manager: ManagementWindow? = nil, applicationWindow: ApplicationWindow? = nil) {
+    init(manager: ManagementWindow? = nil, applicationWindow: ApplicationWindow? = nil, runtime: RuntimeController? = nil) {
+        self.runtime = runtime ?? RuntimeController()
         self.manager = manager
         self.injectedApplicationWindow = applicationWindow
         super.init()
@@ -116,12 +133,24 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         manager.onSettings = { [weak self] in self?.showSettings() }
         manager.onToggleCamera = { [weak self] enabled in self?.setCameraEnabled(enabled) }
         manager.onUpdatePreferences = { [weak self] prefs in self?.updateContainerPreferences(prefs) }
-        manager.onToggleOfficeKeepAwake = { [weak self] enabled in
+        manager.onTogglePluginKeepAwake = { [weak self] pluginID, enabled in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self,
+                      let plugin = self.runtime.pluginManager.hostServicePlugin(for: pluginID),
+                      plugin.manifest.supportsKeepAwakeControl,
+                      self.runtime.pluginManager.isPluginEnabled(pluginID),
+                      !self.runtime.pluginManager.isPluginBusy(pluginID) else { return }
                 let applied = await self.runtime.setOfficeKeepAwakeEnabled(enabled)
                 self.syncPreferencesToManager()
                 if !applied { self.manager.show(detail: "未能确认办公环境唤醒设置生效，请稍后重试。") }
+            }
+        }
+        manager.onRestoreOrphanedKeepAwake = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let restored = await self.runtime.setOfficeKeepAwakeEnabled(false)
+                self.syncPreferencesToManager()
+                if !restored { self.manager.show(detail: "未能确认冻结策略恢复，请在插件页重试。") }
             }
         }
         manager.onClearCache = { [weak self] in self?.clearContainerCache() }
@@ -347,11 +376,9 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func explicitCloseAppCommand() { applicationWindow?.performExplicitClose() }
     @objc private func toggleTabletModeCommand() {
         if let session = activeSession {
-            toggleWindowOrientation(for: session.package)
+            session.window.requestOrientationChange()
         } else {
-            var prefs = runtime.containerPreferences
-            prefs.tabletMode.toggle()
-            updateContainerPreferences(prefs)
+            manager.selectTabletMode(!runtime.containerPreferences.tabletMode)
         }
     }
     @objc private func settingsCommand() { showSettings() }
@@ -608,6 +635,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             defer {
                 if session.generation == generation {
                     session.isOpening = false
+                    self.scheduleDisplayUpdate(for: session)
                 }
             }
             do {
@@ -661,6 +689,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                     package: package,
                     resolutionPreset: session.resolutionPreset,
                     tabletMode: session.tabletMode,
+                    interfaceScale: session.interfaceScale,
                     replaceExisting: false
                 )
                 guard session.generation == generation, !Task.isCancelled else {
@@ -690,6 +719,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         if let existing = appSessions[app.package] {
             existing.resolutionPreset = appPref.resolutionPreset
             existing.tabletMode = appPref.tabletMode
+            existing.interfaceScale = appPref.interfaceScale
             session = existing
             isNewWindow = false
         } else {
@@ -713,11 +743,18 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             window.onSelectResolutionPreset = { [weak self] preset in
                 self?.selectWindowResolutionPreset(preset, for: pkg)
             }
+            window.onSelectInterfaceScale = { [weak self] scale in
+                self?.selectWindowInterfaceScale(scale, for: pkg)
+            }
+            window.onRestoreRecommendedDisplay = { [weak self] in
+                self?.restoreWindowRecommendedDisplay(for: pkg)
+            }
             let created = AppWindowSession(
                 package: pkg,
                 window: window,
                 resolutionPreset: appPref.resolutionPreset,
-                tabletMode: appPref.tabletMode
+                tabletMode: appPref.tabletMode,
+                interfaceScale: appPref.interfaceScale
             )
             appSessions[pkg] = created
             session = created
@@ -726,12 +763,14 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
 
         let targetPixels = ContainerPreferences.pixelSize(
             for: session.resolutionPreset,
-            tabletMode: session.tabletMode
+            tabletMode: session.tabletMode,
+            interfaceScale: session.interfaceScale
         )
         session.window.applyDisplayMode(
             tabletMode: session.tabletMode,
             preferredPixelSize: targetPixels,
-            resolutionPreset: session.resolutionPreset
+            resolutionPreset: session.resolutionPreset,
+            interfaceScale: session.interfaceScale
         )
         session.window.configureForApp(app)
         if isNewWindow && appSessions.count > 1 {
@@ -753,54 +792,128 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func toggleWindowOrientation(for package: String) {
-        var prefs = runtime.containerPreferences
-        let currentPref = prefs.displayPreference(for: package)
-        let nextTabletMode = !currentPref.tabletMode
-        prefs.appDisplayOverrides[package] = AppDisplayPreference(
-            resolutionPreset: currentPref.resolutionPreset,
-            tabletMode: nextTabletMode
-        )
-        runtime.containerPreferences = prefs
-        if let session = appSessions[package] {
-            session.tabletMode = nextTabletMode
-            let pixels = ContainerPreferences.pixelSize(for: session.resolutionPreset, tabletMode: nextTabletMode)
-            session.window.applyDisplayMode(
-                tabletMode: nextTabletMode,
-                preferredPixelSize: pixels,
-                resolutionPreset: session.resolutionPreset
-            )
-        }
-        syncPreferencesToManager()
-        let label = ContainerPreferences.displayLabel(for: currentPref.resolutionPreset, tabletMode: nextTabletMode)
-        manager.show(detail: "已切换 \(resolvedAppMetadata(for: package).title) 至 \(label)。")
-        if runtime.state == .running {
-            openApp(package: package, forceReconfigureDisplay: true)
-        }
+        var preference = runtime.containerPreferences.displayPreference(for: package)
+        preference.tabletMode.toggle()
+        updateWindowDisplayPreference(preference, for: package)
     }
 
     private func selectWindowResolutionPreset(_ preset: String, for package: String) {
-        let option = ContainerPreferences.resolutionOption(for: preset)
+        var preference = runtime.containerPreferences.displayPreference(for: package)
+        preference.resolutionPreset = ContainerPreferences.canonicalResolutionPreset(preset)
+        updateWindowDisplayPreference(preference, for: package)
+    }
+
+    private func selectWindowInterfaceScale(_ scale: DisplayInterfaceScale, for package: String) {
+        var preference = runtime.containerPreferences.displayPreference(for: package)
+        preference.interfaceScale = scale
+        updateWindowDisplayPreference(preference, for: package)
+    }
+
+    private func restoreWindowRecommendedDisplay(for package: String) {
+        var preference = runtime.containerPreferences.displayPreference(for: package)
+        preference.resolutionPreset = "1080p"
+        preference.interfaceScale = .standard
+        updateWindowDisplayPreference(preference, for: package)
+    }
+
+    private func updateWindowDisplayPreference(_ preference: AppDisplayPreference, for package: String) {
         var prefs = runtime.containerPreferences
-        let currentPref = prefs.displayPreference(for: package)
-        prefs.appDisplayOverrides[package] = AppDisplayPreference(
-            resolutionPreset: option.preset,
-            tabletMode: currentPref.tabletMode
-        )
+        prefs.appDisplayOverrides[package] = preference
         runtime.containerPreferences = prefs
         if let session = appSessions[package] {
-            session.resolutionPreset = option.preset
-            let pixels = option.pixelSize(tabletMode: session.tabletMode)
-            session.window.applyDisplayMode(
-                tabletMode: session.tabletMode,
-                preferredPixelSize: pixels,
-                resolutionPreset: option.preset
-            )
+            session.resolutionPreset = preference.resolutionPreset
+            session.tabletMode = preference.tabletMode
+            session.interfaceScale = preference.interfaceScale
+            scheduleDisplayUpdate(for: session)
         }
         syncPreferencesToManager()
-        let label = ContainerPreferences.displayLabel(for: option.preset, tabletMode: currentPref.tabletMode)
-        manager.show(detail: "已切换 \(resolvedAppMetadata(for: package).title) 分辨率至 \(label)。")
-        if runtime.state == .running {
-            openApp(package: package, forceReconfigureDisplay: true)
+    }
+
+    private func scheduleDisplayUpdate(for session: AppWindowSession) {
+        session.displayUpdateRevision &+= 1
+        guard !session.isOpening, session.stream != nil,
+              session.hasPresentedFrame, session.hasObservedTarget,
+              session.displayUpdateTask == nil else { return }
+        let generation = session.generation
+        session.displayUpdateTask = Task { @MainActor [weak self, weak session] in
+            guard let self, let session else { return }
+            defer {
+                if session.generation == generation { session.displayUpdateTask = nil }
+            }
+            while !Task.isCancelled, session.generation == generation,
+                  let stream = session.stream, let endpoint = session.endpoint {
+                let preference = self.runtime.containerPreferences.displayPreference(for: session.package)
+                let fps = self.runtime.containerPreferences.targetFPS
+                guard session.appliedDisplayPreference != preference || session.appliedTargetFPS != fps else { return }
+                let revision = session.displayUpdateRevision
+                let size = preference.interfaceScale.nativePixelSize(tabletMode: preference.tabletMode)
+                let quality = ContainerPreferences.pixelSize(for: preference.resolutionPreset, tabletMode: preference.tabletMode)
+                let output = ContainerPreferences.pixelSize(for: preference.resolutionPreset, tabletMode: preference.tabletMode, interfaceScale: preference.interfaceScale)
+                let configuration = DisplayStreamConfiguration(
+                    nativeWidth: Int(size.width), nativeHeight: Int(size.height),
+                    density: preference.interfaceScale.nativeDPI,
+                    maxSize: Int(max(quality.width, quality.height)), maxFPS: fps
+                )
+                session.window.surface.inputEnabled = false
+                session.window.surface.beginPointerInteraction()
+                session.window.surface.setInputFocus(nil)
+                self.manager.show(detail: "正在调整 \(self.resolvedAppMetadata(for: session.package).title) 的显示…")
+                let succeeded = await withCheckedContinuation { continuation in
+                    stream.updateDisplay(configuration) { continuation.resume(returning: $0) }
+                }
+                guard !Task.isCancelled, session.generation == generation, session.stream === stream else { return }
+                guard succeeded, self.runtime.confirmDisplayConfiguration(package: session.package, endpoint: endpoint, preference: preference, targetFPS: fps) else {
+                    if let applied = session.appliedDisplayPreference {
+                        session.window.applyDisplayMode(tabletMode: applied.tabletMode, preferredPixelSize: session.window.surface.pixelSize, resolutionPreset: applied.resolutionPreset, interfaceScale: applied.interfaceScale)
+                    }
+                    session.window.surface.inputEnabled = true
+                    session.window.showInputIssue("显示调整未获确认，请重试或恢复推荐。")
+                    self.manager.show(detail: "显示调整未完成，请重试或恢复推荐。")
+                    return
+                }
+                session.appliedDisplayPreference = preference
+                session.appliedTargetFPS = fps
+                session.window.applyDisplayMode(tabletMode: preference.tabletMode, preferredPixelSize: output, resolutionPreset: preference.resolutionPreset, interfaceScale: preference.interfaceScale)
+                session.window.surface.inputEnabled = true
+                if revision == session.displayUpdateRevision {
+                    self.manager.show(detail: "已应用显示设置：\(ContainerPreferences.resolutionOption(for: preference.resolutionPreset).shortTitle) · 界面\(preference.interfaceScale.percentage)% · \(fps)Hz。")
+                    return
+                }
+            }
+        }
+    }
+
+    private func configureDirectInput(for session: AppWindowSession, enabled: Bool) {
+        let surface = session.window.surface
+        guard let stream = session.stream, let port = session.endpoint?.imePort else {
+            surface.sendDirectText = nil
+            return
+        }
+        let wasDisabled = session.directInputConnected && surface.sendDirectText == nil
+        if !session.directInputConnected {
+            let generation = session.generation
+            stream.enableDirectInput(port: port) { [weak session] focus in
+                DispatchQueue.main.async { [weak session] in
+                    guard let session, session.generation == generation else { return }
+                    session.window.surface.setInputFocus(focus)
+                }
+            }
+            session.directInputConnected = true
+        }
+        if enabled {
+            if wasDisabled {
+                // A lease or composition gathered while Chinese input was off
+                // must not become committable; a fresh tap grants a new one.
+                surface.beginPointerInteraction()
+            }
+            surface.sendDirectText = { [weak session, weak stream] text, lease in
+                stream?.sendText(text, lease: lease) { message in
+                    DispatchQueue.main.async { [weak session] in session?.window.showInputIssue(message ?? "") }
+                }
+            }
+        } else {
+            surface.sendDirectText = nil
+            surface.beginPointerInteraction()
         }
     }
 
@@ -808,6 +921,19 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         let window = session.window
         let stream = VideoStream()
         session.stream = stream
+        session.endpoint = endpoint
+        if let actual = runtime.displaySessionConfig(for: session.package) {
+            session.appliedDisplayPreference = AppDisplayPreference(resolutionPreset: actual.resolutionPreset, tabletMode: actual.tabletMode, interfaceScale: actual.interfaceScale)
+            session.appliedTargetFPS = actual.targetFPS
+            // A choice made while the display was being created is already in
+            // `actual`; the window must show it even if no update follows.
+            window.applyDisplayMode(
+                tabletMode: actual.tabletMode,
+                preferredPixelSize: ContainerPreferences.pixelSize(for: actual.resolutionPreset, tabletMode: actual.tabletMode, interfaceScale: actual.interfaceScale),
+                resolutionPreset: actual.resolutionPreset,
+                interfaceScale: actual.interfaceScale
+            )
+        }
         session.hasObservedTarget = false
         session.hasPresentedFrame = false
         session.hasDecodedFrame = false
@@ -844,17 +970,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 window?.surface.confirmInputFocus(focus, pointerSequence: pointer)
             }
         }
-        if runtime.containerPreferences.directIMEEnabled, let imePort = endpoint.imePort {
-            stream.enableDirectInput(port: imePort) { [weak session, weak window] focus in
-                DispatchQueue.main.async { [weak session, weak window] in
-                    guard session?.generation == generation else { return }
-                    window?.surface.setInputFocus(focus)
-                }
-            }
-            window.surface.sendDirectText = { [weak stream] text, lease in
-                stream?.sendText(text, lease: lease) { inputIssue($0 ?? "") }
-            }
-        }
+        configureDirectInput(for: session, enabled: runtime.containerPreferences.directIMEEnabled)
         stream.onClipboard = { [weak self, weak session] text in
             DispatchQueue.main.async { [weak self, weak session] in
                 guard let self, session?.generation == generation,
@@ -875,6 +991,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { [weak session, weak window] in
                 guard session?.generation == generation else { return }
                 let newSize = CGSize(width: width, height: height)
+                window?.surface.expectVideoSize(newSize)
                 window?.surface.pixelSize = newSize
                 window?.syncToPixelSize(newSize)
             }
@@ -888,7 +1005,10 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         window.surface.onFirstFrame = { [weak self, weak session] in
             guard let self, let session, session.generation == generation else { return }
             session.hasPresentedFrame = true
-            if session.hasObservedTarget { session.window.ready() }
+            if session.hasObservedTarget {
+                session.window.ready()
+                self.scheduleDisplayUpdate(for: session)
+            }
             let isHorizontal = session.tabletMode
             Task { @MainActor [weak self] in
                 await self?.runtime.configureVirtualDisplayOrientation(tabletMode: isHorizontal)
@@ -956,7 +1076,10 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                     if !session.hasObservedTarget {
                         session.hasObservedTarget = true
                         session.window.awaitFirstPresentation()
-                        if session.hasPresentedFrame { session.window.ready() }
+                        if session.hasPresentedFrame {
+                            session.window.ready()
+                            self.scheduleDisplayUpdate(for: session)
+                        }
                         self.refreshTelemetry()
                         if let snapDir = ProcessInfo.processInfo.environment["ANDROID_USE_SNAPSHOT_DIR"] {
                             let dirURL = URL(fileURLWithPath: snapDir, isDirectory: true)
@@ -1026,17 +1149,18 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             dockPresentation.update(app: nil)
         }
 
-        let noRemainingWindows = appSessions.isEmpty
-        Task { [weak self] in
+        let previousOperation = operation
+        operation = Task { @MainActor [weak self] in
+            await previousOperation?.value
             guard let self else { return }
             await self.runtime.closeDisplay(package: package)
-            if noRemainingWindows && !self.runtime.shouldKeepRuntimeInBackground {
+            if self.appSessions.isEmpty && !self.runtime.shouldKeepRuntimeInBackground {
                 _ = await self.runtime.stop()
             }
             if !self.terminating {
                 self.syncManagerApps()
                 self.manager.update(self.runtime.state)
-                if noRemainingWindows {
+                if self.appSessions.isEmpty {
                     self.manager.presentWindow()
                 }
             }
@@ -1168,7 +1292,10 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     private func updateContainerPreferences(_ prefs: ContainerPreferences) {
         let previous = runtime.containerPreferences
         var updatedPrefs = prefs
-        if previous.resolutionPreset != prefs.resolutionPreset || previous.tabletMode != prefs.tabletMode {
+        let displayChanged = previous.resolutionPreset != prefs.resolutionPreset
+            || previous.tabletMode != prefs.tabletMode
+            || previous.interfaceScale != prefs.interfaceScale
+        if displayChanged {
             for pkg in appSessions.keys {
                 var override = updatedPrefs.displayPreference(for: pkg)
                 if previous.resolutionPreset != prefs.resolutionPreset {
@@ -1177,6 +1304,9 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 if previous.tabletMode != prefs.tabletMode {
                     override.tabletMode = prefs.tabletMode
                 }
+                if previous.interfaceScale != prefs.interfaceScale {
+                    override.interfaceScale = prefs.interfaceScale
+                }
                 updatedPrefs.appDisplayOverrides[pkg] = override
             }
         }
@@ -1184,44 +1314,45 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
 
         for session in appSessions.values {
             session.window.surface.clipboardSyncEnabled = updatedPrefs.clipboardSyncEnabled
-            if !updatedPrefs.directIMEEnabled {
-                session.window.surface.sendDirectText = nil
+            configureDirectInput(for: session, enabled: updatedPrefs.directIMEEnabled)
+            let preference = updatedPrefs.displayPreference(for: session.package)
+            session.resolutionPreset = preference.resolutionPreset
+            session.tabletMode = preference.tabletMode
+            session.interfaceScale = preference.interfaceScale
+        }
+        if !previous.directIMEEnabled && updatedPrefs.directIMEEnabled {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.runtime.ensureDirectInputEnabled()
+                    for session in self.appSessions.values {
+                        self.configureDirectInput(for: session, enabled: self.runtime.containerPreferences.directIMEEnabled)
+                    }
+                } catch {
+                    self.manager.show(detail: "中文输入未能启用，请重试。")
+                }
             }
-            if previous.resolutionPreset != updatedPrefs.resolutionPreset {
-                session.resolutionPreset = updatedPrefs.resolutionPreset
-            }
-            if previous.tabletMode != updatedPrefs.tabletMode {
-                session.tabletMode = updatedPrefs.tabletMode
-            }
-            let targetPixels = ContainerPreferences.pixelSize(
-                for: session.resolutionPreset,
-                tabletMode: session.tabletMode
-            )
-            session.window.applyDisplayMode(
-                tabletMode: session.tabletMode,
-                preferredPixelSize: targetPixels,
-                resolutionPreset: session.resolutionPreset
-            )
         }
 
         syncPreferencesToManager()
-        if (previous.tabletMode != updatedPrefs.tabletMode || previous.resolutionPreset != updatedPrefs.resolutionPreset),
-           runtime.state == .running,
-           !appSessions.isEmpty {
-            manager.show(detail: "已切换至\(updatedPrefs.resolutionDisplayLabel) · \(updatedPrefs.targetFPS)Hz。")
-            let packagesToReconfigure = Array(appSessions.keys)
+        let packagesToReconfigure = appSessions.keys.filter {
+            previous.displayPreference(for: $0) != updatedPrefs.displayPreference(for: $0)
+                || previous.targetFPS != updatedPrefs.targetFPS
+        }
+        if !packagesToReconfigure.isEmpty {
+            manager.show(detail: "已保存显示选择，正在应用到打开的窗口…")
             for pkg in packagesToReconfigure {
-                openApp(package: pkg, forceReconfigureDisplay: true)
+                if let session = appSessions[pkg] { scheduleDisplayUpdate(for: session) }
             }
-        } else if (previous.tabletMode != updatedPrefs.tabletMode || previous.resolutionPreset != updatedPrefs.resolutionPreset),
+        } else if displayChanged,
                   runtime.state == .ready {
-            let expectedTabletMode = updatedPrefs.tabletMode
-            let summary = "\(updatedPrefs.resolutionDisplayLabel) · \(updatedPrefs.targetFPS)Hz"
-            manager.show(detail: "正在切换至\(updatedPrefs.resolutionDisplayLabel) · \(updatedPrefs.targetFPS)Hz…")
+            let expectedDisplay = updatedPrefs.displayPreference(for: nil)
+            let summary = "\(updatedPrefs.displaySummary) · \(updatedPrefs.targetFPS)Hz"
+            manager.show(detail: "正在切换至\(updatedPrefs.displaySummary) · \(updatedPrefs.targetFPS)Hz…")
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let applied = await self.runtime.applyGuestDeviceFormFactor(tabletMode: expectedTabletMode)
-                guard self.runtime.containerPreferences.tabletMode == expectedTabletMode else { return }
+                let applied = await self.runtime.applyGuestDeviceFormFactor(tabletMode: expectedDisplay.tabletMode)
+                guard self.runtime.containerPreferences.displayPreference(for: nil) == expectedDisplay else { return }
                 if applied {
                     self.manager.show(detail: "已切换至\(summary)。")
                 } else {
@@ -1229,7 +1360,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         } else {
-            manager.show(detail: "已切换至\(updatedPrefs.resolutionDisplayLabel) · \(updatedPrefs.targetFPS)Hz。")
+            manager.show(detail: "已切换至\(updatedPrefs.displaySummary) · \(updatedPrefs.targetFPS)Hz。")
         }
     }
 

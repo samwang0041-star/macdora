@@ -237,6 +237,109 @@ final class H264Decoder {
     }
 }
 
+final class DisplayUpdateRegistry {
+    private struct Pending {
+        let sequence: UInt32
+        let completion: (Bool) -> Void
+        let timeout: DispatchWorkItem
+        let expectedVideoSize: CGSize?
+        var receivedVideoSize = false
+        var acknowledged = false
+    }
+
+    private let lock = NSLock()
+    private let timeout: TimeInterval
+    private let callbackQueue: DispatchQueue
+    private var nextSequence: UInt32 = 0
+    private var pending: Pending?
+    private var isStopped = false
+
+    init(timeout: TimeInterval, callbackQueue: DispatchQueue) {
+        self.timeout = timeout
+        self.callbackQueue = callbackQueue
+    }
+
+    func begin(expectedVideoSize: CGSize? = nil, completion: @escaping (Bool) -> Void) -> UInt32? {
+        lock.lock()
+        guard !isStopped else {
+            lock.unlock()
+            callbackQueue.async { completion(false) }
+            return nil
+        }
+        guard pending == nil else {
+            lock.unlock()
+            callbackQueue.async { completion(false) }
+            return nil
+        }
+
+        nextSequence &+= 1
+        if nextSequence == 0 { nextSequence = 1 }
+        let sequence = nextSequence
+        let timeoutWorkItem = DispatchWorkItem { [weak self] in
+            _ = self?.finish(sequence: sequence, success: false)
+        }
+        pending = Pending(sequence: sequence, completion: completion, timeout: timeoutWorkItem, expectedVideoSize: expectedVideoSize)
+        lock.unlock()
+
+        callbackQueue.asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
+        return sequence
+    }
+
+    @discardableResult
+    func acknowledge(sequence: UInt32, success: Bool) -> Bool {
+        guard success else { return finish(sequence: sequence, success: false) }
+        lock.lock()
+        guard var current = pending, current.sequence == sequence else { lock.unlock(); return false }
+        current.acknowledged = true
+        pending = current
+        let ready = current.expectedVideoSize == nil || current.receivedVideoSize
+        lock.unlock()
+        if ready { return finish(sequence: sequence, success: true) }
+        return true
+    }
+
+    func receiveVideoSize(_ size: CGSize) {
+        lock.lock()
+        guard var current = pending, current.expectedVideoSize == size else { lock.unlock(); return }
+        current.receivedVideoSize = true
+        pending = current
+        let ready = current.acknowledged
+        lock.unlock()
+        if ready { _ = finish(sequence: current.sequence, success: true) }
+    }
+
+    @discardableResult
+    func cancel(sequence: UInt32) -> Bool {
+        finish(sequence: sequence, success: false)
+    }
+
+    func stop() {
+        lock.lock()
+        isStopped = true
+        let current = pending
+        pending = nil
+        current?.timeout.cancel()
+        lock.unlock()
+
+        if let current {
+            callbackQueue.async { current.completion(false) }
+        }
+    }
+
+    private func finish(sequence: UInt32, success: Bool) -> Bool {
+        lock.lock()
+        guard let current = pending, current.sequence == sequence else {
+            lock.unlock()
+            return false
+        }
+        pending = nil
+        current.timeout.cancel()
+        lock.unlock()
+        callbackQueue.async { current.completion(success) }
+        return true
+    }
+}
+
 final class VideoStream {
     private var video: LocalSocket?
     private var control: LocalSocket?
@@ -245,6 +348,7 @@ final class VideoStream {
     private let imeQueue = DispatchQueue(label: "local.androiduse.ime", qos: .userInteractive)
     private let deviceQueue = DispatchQueue(label: "local.androiduse.device-messages", qos: .userInitiated)
     private let stateLock = NSLock()
+    private let displayUpdates: DisplayUpdateRegistry
     let decoder: H264Decoder
     private var directInput: DirectInputClient?
     private var pointerSequence: UInt64 = 0
@@ -257,8 +361,9 @@ final class VideoStream {
     private var isStopped = false
     private var stopped: Bool { stateLock.lock(); defer { stateLock.unlock() }; return isStopped }
 
-    init(probeMarkers: Bool = false) {
+    init(probeMarkers: Bool = false, displayUpdateTimeout: TimeInterval = 5) {
         decoder = H264Decoder(probeMarkers: probeMarkers)
+        displayUpdates = DisplayUpdateRegistry(timeout: displayUpdateTimeout, callbackQueue: controlQueue)
         decoder.onError = { [weak self] error in self?.fail(error) }
     }
 
@@ -268,6 +373,7 @@ final class VideoStream {
         isStopped = true
         let video = self.video; let control = self.control
         stateLock.unlock()
+        displayUpdates.stop()
         video?.close(); control?.close()
         directInput?.stop()
         onError?(error)
@@ -363,7 +469,10 @@ final class VideoStream {
                         let width: UInt32 = Wire.read(header, at: 4)
                         let height: UInt32 = Wire.read(header, at: 8)
                         guard width > 0, width < 16384, height > 0, height < 16384 else { throw StreamFailure.invalid("resolution") }
-                        onSize?(Int(width), Int(height)); continue
+                        decoder.finish()
+                        onSize?(Int(width), Int(height))
+                        displayUpdates.receiveVideoSize(CGSize(width: Int(width), height: Int(height)))
+                        continue
                     }
                     let size: UInt32 = Wire.read(header, at: 8)
                     let payload = try video.receive(Int(size))
@@ -383,6 +492,34 @@ final class VideoStream {
         }
     }
 
+    func updateDisplay(_ configuration: DisplayStreamConfiguration, completion: @escaping (Bool) -> Void) {
+        guard configuration.isValid else {
+            controlQueue.async { completion(false) }
+            return
+        }
+        controlQueue.async { [weak self] in
+            guard let self else {
+                completion(false)
+                return
+            }
+            stateLock.lock()
+            let control = self.control
+            let active = !isStopped
+            stateLock.unlock()
+            guard active, let control,
+                  let sequence = displayUpdates.begin(expectedVideoSize: configuration.videoSize, completion: completion) else {
+                if !active || control == nil { completion(false) }
+                return
+            }
+            do {
+                try control.send(Wire.displayConfiguration(configuration, sequence: sequence))
+            } catch {
+                _ = displayUpdates.cancel(sequence: sequence)
+                fail(error)
+            }
+        }
+    }
+
     private func readDeviceMessages(_ socket: LocalSocket) {
         deviceQueue.async { [weak self] in
             do {
@@ -396,6 +533,14 @@ final class VideoStream {
                         if let text = String(data: bytes, encoding: .utf8) { self?.onClipboard?(text) }
                     case 1: _ = try socket.receive(8) // Clipboard acknowledgement.
                     case 3: self?.acknowledgeTouch(try TouchFinishedAcknowledgement(payload: socket.receive(13)))
+                    case Wire.displayConfigurationAckType:
+                        let acknowledgement = try DisplayConfigurationAcknowledgement(
+                            payload: Data([type]) + socket.receive(5)
+                        )
+                        _ = self?.displayUpdates.acknowledge(
+                            sequence: acknowledgement.sequence,
+                            success: acknowledgement.success
+                        )
                     default: throw StreamFailure.invalid("unexpected device message")
                     }
                 }
@@ -407,6 +552,7 @@ final class VideoStream {
 
     func stop() {
         stateLock.lock(); isStopped = true; let video = self.video; let control = self.control; stateLock.unlock()
+        displayUpdates.stop()
         video?.close(); control?.close()
         directInput?.stop()
     }

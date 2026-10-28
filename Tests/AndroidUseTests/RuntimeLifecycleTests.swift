@@ -556,14 +556,44 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(catalog.contains(where: { $0.package == "com.example.office" }))
     }
 
+    func testConfirmedDisplayUpdateKeepsOwnedServerAndRejectsRetiredEndpoint() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        let first = try await fixture.controller.openDisplay(package: "dev.example.notes", replaceExisting: false)
+        let second = try await fixture.controller.openDisplay(package: "dev.example.calendar", replaceExisting: false)
+        let serversBefore = fixture.registry.servers
+        let updated = AppDisplayPreference(resolutionPreset: "720p", tabletMode: false, interfaceScale: .large)
+
+        XCTAssertTrue(fixture.controller.confirmDisplayConfiguration(package: first.package, endpoint: first, preference: updated, targetFPS: 30))
+        let actual = try XCTUnwrap(fixture.controller.displaySessionConfig(for: first.package))
+        XCTAssertEqual(actual.resolutionPreset, "720p")
+        XCTAssertEqual(actual.interfaceScale, .large)
+        XCTAssertFalse(actual.tabletMode)
+        XCTAssertEqual(actual.targetFPS, 30)
+        XCTAssertEqual(fixture.controller.displayEndpoint(for: first.package)?.port, first.port)
+        XCTAssertEqual(fixture.controller.displayEndpoint(for: second.package)?.port, second.port)
+        XCTAssertEqual(fixture.controller.displaySessionConfig(for: second.package)?.targetFPS, 60)
+        XCTAssertEqual(fixture.registry.servers.count, serversBefore.count)
+        XCTAssertTrue(serversBefore.allSatisfy(\.isRunning))
+
+        let retired = DisplayEndpoint(port: first.port &+ 1, package: first.package, imePort: first.imePort)
+        XCTAssertFalse(fixture.controller.confirmDisplayConfiguration(package: first.package, endpoint: retired, preference: .init(resolutionPreset: "1440p", tabletMode: true), targetFPS: 45))
+        await fixture.controller.closeDisplay(package: first.package)
+        XCTAssertFalse(fixture.controller.confirmDisplayConfiguration(package: first.package, endpoint: first, preference: updated, targetFPS: 30))
+        XCTAssertEqual(fixture.controller.displayEndpoint(for: second.package)?.port, second.port)
+        _ = await fixture.controller.stop()
+    }
+
     func testFourConcurrentAppsOpenAndCloseIndependentlyInUnityMode() async throws {
         let fixture = try LifecycleFixture()
         defer { fixture.remove() }
         let packages = [
-            "com.tencent.mm",
-            "com.icbc.im",
-            "com.sankuai.meituan",
-            "com.coolapk.market"
+            "dev.example.notes",
+            "dev.example.calendar",
+            "dev.example.tasks",
+            "dev.example.scratch"
         ]
         fixture.registry.installedPackages = Set(packages + ["local.androiduse.ime"])
 
@@ -571,12 +601,14 @@ final class RuntimeLifecycleTests: XCTestCase {
         try await fixture.controller.start()
 
         var endpoints: [String: DisplayEndpoint] = [:]
-        let presets = ["1280x800_comfortable", "960x600", "1440x900", "1920x1200_hidpi"]
+        let presets = ["720p", "1080p", "1440p", "1080p"]
+        let scales: [DisplayInterfaceScale] = [.large, .standard, .small, .large]
         for (idx, pkg) in packages.enumerated() {
             let ep = try await fixture.controller.openDisplay(
                 package: pkg,
                 resolutionPreset: presets[idx],
                 tabletMode: idx % 2 == 0,
+                interfaceScale: scales[idx],
                 replaceExisting: false
             )
             endpoints[pkg] = ep
@@ -596,22 +628,32 @@ final class RuntimeLifecycleTests: XCTestCase {
             XCTAssertFalse(script.contains("wm density "), "Per-app virtual display setup must not mutate default display 0 density.")
         }
 
-        // Reconfiguring one window (e.g. com.icbc.im to 1920x1200_hidpi landscape) replaces only that session
-        // and leaves the other 3 sessions untouched with their original ports and configs.
-        let reconfiguredICBC = try await fixture.controller.openDisplay(
-            package: "com.icbc.im",
-            resolutionPreset: "1920x1200_hidpi",
+        // 调整一个窗口的大小与方向，只替换该应用的显示会话。
+        let reconfiguredCalendar = try await fixture.controller.openDisplay(
+            package: "dev.example.calendar",
+            resolutionPreset: "1080p",
             tabletMode: true,
+            interfaceScale: .large,
             replaceExisting: false
         )
-        XCTAssertNotEqual(reconfiguredICBC.port, endpoints["com.icbc.im"]?.port)
-        XCTAssertEqual(fixture.controller.displayEndpoint(for: "com.tencent.mm")?.port, endpoints["com.tencent.mm"]?.port)
-        XCTAssertEqual(fixture.controller.displayEndpoint(for: "com.sankuai.meituan")?.port, endpoints["com.sankuai.meituan"]?.port)
-        XCTAssertEqual(fixture.controller.displayEndpoint(for: "com.coolapk.market")?.port, endpoints["com.coolapk.market"]?.port)
-        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "com.icbc.im")?.resolutionPreset, "1920x1200_hidpi")
-        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "com.icbc.im")?.tabletMode, true)
-        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "com.tencent.mm")?.resolutionPreset, "1280x800_comfortable")
-        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "com.tencent.mm")?.tabletMode, true)
+        XCTAssertNotEqual(reconfiguredCalendar.port, endpoints["dev.example.calendar"]?.port)
+        XCTAssertEqual(fixture.controller.displayEndpoint(for: "dev.example.notes")?.port, endpoints["dev.example.notes"]?.port)
+        XCTAssertEqual(fixture.controller.displayEndpoint(for: "dev.example.tasks")?.port, endpoints["dev.example.tasks"]?.port)
+        XCTAssertEqual(fixture.controller.displayEndpoint(for: "dev.example.scratch")?.port, endpoints["dev.example.scratch"]?.port)
+        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "dev.example.calendar")?.resolutionPreset, "1080p")
+        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "dev.example.calendar")?.tabletMode, true)
+        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "dev.example.notes")?.resolutionPreset, "720p")
+        XCTAssertEqual(fixture.controller.displaySessionConfig(for: "dev.example.notes")?.tabletMode, true)
+        XCTAssertEqual(fixture.registry.servers.filter(\.isRunning).count, 4)
+
+        let firstPackage = "dev.example.notes"
+        let same = try await fixture.controller.openDisplay(package: firstPackage, resolutionPreset: "720p", tabletMode: true, interfaceScale: .large, replaceExisting: false)
+        XCTAssertEqual(same.port, endpoints[firstPackage]?.port, "相同显示参数应复用已有会话。")
+        let resized = try await fixture.controller.openDisplay(package: firstPackage, resolutionPreset: "720p", tabletMode: true, interfaceScale: .small, replaceExisting: false)
+        XCTAssertNotEqual(resized.port, same.port, "只调整界面大小也必须更新 Android 显示。")
+        XCTAssertEqual(fixture.controller.displaySessionConfig(for: firstPackage)?.interfaceScale, .small)
+        XCTAssertEqual(fixture.controller.displayEndpoint(for: "dev.example.calendar")?.port, reconfiguredCalendar.port)
+        XCTAssertTrue(try XCTUnwrap(fixture.registry.displayCommands.last).contains("new_display=3200x2000/320 max_size=1280"))
         XCTAssertEqual(fixture.registry.servers.filter(\.isRunning).count, 4)
 
         // Opening a 5th concurrent app must fail with maxConcurrentDisplaysReached(4)
@@ -626,14 +668,14 @@ final class RuntimeLifecycleTests: XCTestCase {
         }
 
         // Closing one app keeps the remaining 3 running
-        await fixture.controller.closeDisplay(package: "com.icbc.im")
-        XCTAssertNil(fixture.controller.displayEndpoint(for: "com.icbc.im"))
+        await fixture.controller.closeDisplay(package: "dev.example.calendar")
+        XCTAssertNil(fixture.controller.displayEndpoint(for: "dev.example.calendar"))
         XCTAssertEqual(fixture.controller.activeDisplayPackages.count, 3)
         XCTAssertEqual(fixture.controller.state, .running)
         XCTAssertEqual(fixture.registry.servers.filter(\.isRunning).count, 3)
 
         // Closing the remaining 3 apps transitions the runtime back to .ready
-        for pkg in ["com.tencent.mm", "com.sankuai.meituan", "com.coolapk.market"] {
+        for pkg in ["dev.example.notes", "dev.example.tasks", "dev.example.scratch"] {
             await fixture.controller.closeDisplay(package: pkg)
         }
         XCTAssertTrue(fixture.controller.activeDisplayPackages.isEmpty)
@@ -692,6 +734,7 @@ private final class LifecycleRegistry: @unchecked Sendable {
     var emulatorEnvironments: [[String: String]] = []
     var secureContentVisible = false
     var displayDefaultsAtLaunch: [Bool] = []
+    var displayCommands: [String] = []
     var guestEnvironmentScripts: [String] = []
     var zygoteRestartCommands = 0
     var guestZygoteModel: String?
@@ -724,6 +767,7 @@ private final class LifecycleRunner: ProcessExecuting, @unchecked Sendable {
                 registry.emulatorArguments.append(invocation.arguments)
                 registry.emulatorEnvironments.append(invocation.environment)
             case .display:
+                registry.displayCommands.append(invocation.arguments.joined(separator: " "))
                 registry.servers.append(handle)
                 registry.displayDefaultsAtLaunch.append(registry.secureContentVisible)
             }
@@ -858,7 +902,7 @@ private final class LifecycleRunner: ProcessExecuting, @unchecked Sendable {
                 return "Active default network: 100\nNetworkAgentInfo{network{100} ni{MOBILE[HSPA] CONNECTED} nc{[ Capabilities: INTERNET&NOT_RESTRICTED ]}}\n"
             }
         }
-        else if args.last == "/proc/net/unix" { reply = "@scrcpy_00000021\n@scrcpy_00000022\n@scrcpy_00000023\n@scrcpy_00000024\n@scrcpy_00000025\n" }
+        else if args.last == "/proc/net/unix" { reply = "@scrcpy_00000021\n@scrcpy_00000022\n@scrcpy_00000023\n@scrcpy_00000024\n@scrcpy_00000025\n@scrcpy_00000026\n" }
         else { reply = "Success\n" }
         return ProcessResult(exitCode: 0, stdout: Data(reply.utf8), timedOut: false)
     }
@@ -885,12 +929,12 @@ private extension LifecycleRegistry {
             line: line
         )
         XCTAssertTrue(
-            script.contains("wm size \(tabletMode ? "1920x1200" : "1200x1920") -d 0"),
+            script.contains("wm size \(tabletMode ? "2560x1600" : "1600x2560") -d 0"),
             file: file,
             line: line
         )
         XCTAssertTrue(
-            script.contains("wm density 240 -d 0"),
+            script.contains("wm density 320 -d 0"),
             file: file,
             line: line
         )

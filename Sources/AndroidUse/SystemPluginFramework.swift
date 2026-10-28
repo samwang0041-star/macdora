@@ -69,8 +69,18 @@ struct SystemPluginManifest: Codable, Equatable, Identifiable, Sendable {
         "guest.shell",
         "lifecycle.hooks",
         "host.service",
-        "agent.readonly"
+        "agent.readonly",
+        "runtime.keep-awake"
     ]
+    var supportsKeepAwakeControl: Bool {
+        driverType == "host_service"
+            && capabilities.contains("host.service")
+            && capabilities.contains("agent.readonly")
+            && capabilities.contains("guest.shell")
+            && capabilities.contains("runtime.keep-awake")
+            && entrypoints.agentMCP != nil
+    }
+
     static let exclusiveCapabilities: Set<String> = [
         "hardware.gnss",
         "qemu.console"
@@ -979,6 +989,9 @@ enum SystemPluginPackageFactory {
         }
         guard Set(manifest.capabilities).isSubset(of: SystemPluginManifest.supportedCapabilities) else {
             throw SystemPluginPackageError.incompatibleManifest("capabilities")
+        }
+        if manifest.capabilities.contains("runtime.keep-awake"), !manifest.supportsKeepAwakeControl {
+            throw SystemPluginPackageError.incompatibleManifest("runtime.keep-awake requires an Agent host service with guest.shell")
         }
         for (text, maximum) in [(manifest.agentInstructions, 16_384), (manifest.agentSummary, 240)] {
             if let text {

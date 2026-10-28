@@ -15,7 +15,7 @@ final class RuntimeControllerTests: XCTestCase {
         XCTAssertTrue(command.contains("video_bit_rate=24000000"))
         XCTAssertTrue(command.contains("max_fps=60"))
         XCTAssertTrue(command.contains("video_codec_options=low-latency=1"))
-        XCTAssertTrue(command.contains("new_display=1920x1200/240"))
+        XCTAssertTrue(command.contains("new_display=2560x1600/320 max_size=1920"))
         XCTAssertTrue(command.contains("send_device_meta=false"))
         XCTAssertTrue(command.contains("send_dummy_byte=false"))
         XCTAssertTrue(command.contains("send_frame_meta=true"))
@@ -842,12 +842,12 @@ final class RuntimeControllerTests: XCTestCase {
         XCTAssertEqual(preparedChecks.first(where: { $0.id == "direct-ime" })?.status, .review)
 
         let cmd720 = RuntimePorts.commandLine(scid: 73, resolutionPreset: "720p", targetFPS: 30)
-        XCTAssertTrue(cmd720.contains("new_display=1280x800/160"))
+        XCTAssertTrue(cmd720.contains("new_display=2560x1600/320 max_size=1280"))
         XCTAssertTrue(cmd720.contains("video_bit_rate=14000000"))
         XCTAssertTrue(cmd720.contains("max_fps=30"))
 
         let cmd1440 = RuntimePorts.commandLine(scid: 73, resolutionPreset: "1440p", targetFPS: 45)
-        XCTAssertTrue(cmd1440.contains("new_display=2560x1600/320"))
+        XCTAssertTrue(cmd1440.contains("new_display=2560x1600/320 max_size=2560"))
         XCTAssertTrue(cmd1440.contains("video_bit_rate=36000000"))
         XCTAssertTrue(cmd1440.contains("max_fps=45"))
     }

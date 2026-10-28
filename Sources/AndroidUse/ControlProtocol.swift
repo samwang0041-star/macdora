@@ -3,6 +3,8 @@ import CoreGraphics
 
 enum Wire {
     static let version = "5.0.1"
+    static let displayConfigurationType: UInt8 = 129
+    static let displayConfigurationAckType: UInt8 = 4
 
     static func integer<T: FixedWidthInteger>(_ value: T) -> Data {
         var bigEndian = value.bigEndian
@@ -36,6 +38,17 @@ enum Wire {
 
     static func touchFinished(_ sequence: UInt64) -> Data { Data([128]) + integer(sequence) }
 
+    static func displayConfiguration(_ configuration: DisplayStreamConfiguration, sequence: UInt32) -> Data {
+        precondition(configuration.isValid, "Invalid display configuration")
+        return Data([displayConfigurationType])
+            + integer(sequence)
+            + integer(UInt32(configuration.nativeWidth))
+            + integer(UInt32(configuration.nativeHeight))
+            + integer(UInt32(configuration.density))
+            + integer(UInt32(configuration.maxSize))
+            + integer(UInt32(configuration.maxFPS))
+    }
+
     static func scroll(x: UInt32, y: UInt32, width: UInt16, height: UInt16, dx: Double, dy: Double) -> Data {
         func fixed(_ v: Double) -> UInt16 {
             UInt16(bitPattern: Int16(max(-32768, min(32767, Int((v / 16 * 32768).rounded())))))
@@ -50,6 +63,29 @@ enum Wire {
     }
 }
 
+struct DisplayStreamConfiguration: Equatable, Sendable {
+    let nativeWidth: Int
+    let nativeHeight: Int
+    let density: Int
+    let maxSize: Int
+    let maxFPS: Int
+
+    var videoSize: CGSize {
+        let scale = min(1, Double(maxSize) / Double(max(nativeWidth, nativeHeight)))
+        let width = max(2, Int(Double(nativeWidth) * scale) & ~1)
+        let height = max(2, Int(Double(nativeHeight) * scale) & ~1)
+        return CGSize(width: width, height: height)
+    }
+
+    var isValid: Bool {
+        (320...4096).contains(nativeWidth)
+            && (320...4096).contains(nativeHeight)
+            && (density == 320 || density == 400)
+            && [1280, 1920, 2560].contains(maxSize)
+            && [30, 45, 60].contains(maxFPS)
+    }
+}
+
 struct TouchFinishedAcknowledgement: Equatable {
     let sequence: UInt64
     let displayId: Int32
@@ -60,6 +96,26 @@ struct TouchFinishedAcknowledgement: Equatable {
         displayId = Int32(bitPattern: Wire.read(payload, at: 8, as: UInt32.self))
         success = payload[12] == 1
         guard !success || displayId > 0 else { throw StreamFailure.invalid("touch display") }
+    }
+}
+
+struct DisplayConfigurationAcknowledgement: Equatable {
+    let sequence: UInt32
+    let success: Bool
+
+    init(sequence: UInt32, success: Bool) {
+        self.sequence = sequence
+        self.success = success
+    }
+
+    init(payload: Data) throws {
+        guard payload.count == 6,
+              payload[0] == Wire.displayConfigurationAckType,
+              payload[5] <= 1 else {
+            throw StreamFailure.invalid("display configuration acknowledgement")
+        }
+        sequence = Wire.read(payload, at: 1)
+        success = payload[5] == 0
     }
 }
 

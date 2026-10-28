@@ -54,6 +54,12 @@ health acceptance and by grant/configuration actions. Package contents are
 never modified at runtime, and hot reload compares package identity (bundle
 location plus manifest) rather than reusing a retired instance by ID alone.
 
+## 插件专属的后台保持唤醒
+
+只有显式声明 `runtime.keep-awake`，且同时声明 `host.service`、`agent.readonly`、`guest.shell` 与 `entrypoints.agentMCP` 的 `host_service` 插件，才在自己的详情页显示“后台保持唤醒”。全局偏好设置不显示该控制；未声明此能力的 Agent 插件也不显示。业务插件及其能力声明由独立插件包交付，不随基础客户端分发。
+
+这只提供人工操作入口，不向 Agent RPC/MCP 增加修改冻结策略的权限。设置选择与恢复记录继续属于当前 Android 环境，不会因入口迁移丢失。Android 冻结开关本身影响同一环境里的全部进程，插件页会显示这一范围；详情见 [OFFICE_KEEP_AWAKE.md](OFFICE_KEEP_AWAKE.md)。
+
 ## Environment
 
 The process receives only these plugin-specific variables:

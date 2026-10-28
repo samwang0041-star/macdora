@@ -1,56 +1,115 @@
+diff -ruN a/server/src/main/java/com/genymobile/scrcpy/Server.java b/server/src/main/java/com/genymobile/scrcpy/Server.java
+--- a/server/src/main/java/com/genymobile/scrcpy/Server.java	2026-10-28 09:51:03
++++ b/server/src/main/java/com/genymobile/scrcpy/Server.java	2026-10-28 09:51:03
+@@ -156,6 +156,7 @@
+ 
+                 if (controller != null) {
+                     controller.setSurfaceCapture(surfaceCapture);
++                    controller.setSurfaceEncoder(surfaceEncoder);
+                 }
+             }
+ 
 diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/ControlMessage.java b/server/src/main/java/com/genymobile/scrcpy/control/ControlMessage.java
---- a/server/src/main/java/com/genymobile/scrcpy/control/ControlMessage.java	2026-10-08 14:41:27
-+++ b/server/src/main/java/com/genymobile/scrcpy/control/ControlMessage.java	2026-10-25 11:44:38
-@@ -30,6 +30,7 @@
+--- a/server/src/main/java/com/genymobile/scrcpy/control/ControlMessage.java	2026-10-28 09:51:03
++++ b/server/src/main/java/com/genymobile/scrcpy/control/ControlMessage.java	2026-10-28 09:51:03
+@@ -30,6 +30,8 @@
      public static final int TYPE_CAMERA_ZOOM_OUT = 20;
      public static final int TYPE_RESIZE_DISPLAY = 21;
      public static final int TYPE_SCAN_FILE = 22;
 +    public static final int TYPE_REQUEST_TOUCH_FINISHED = 128;
++    public static final int TYPE_DISPLAY_CONFIGURATION = 129;
  
      public static final long SEQUENCE_INVALID = 0;
  
-@@ -192,6 +193,13 @@
-         ControlMessage msg = new ControlMessage();
-         msg.type = TYPE_SCAN_FILE;
-         msg.text = path;
-+        return msg;
-+    }
-+
+@@ -60,6 +62,7 @@
+     private int productId;
+     private int width;
+     private int height;
++    private DisplayStreamConfiguration displayConfiguration;
+ 
+     private ControlMessage() {
+     }
+@@ -195,6 +198,21 @@
+         return msg;
+     }
+ 
 +    public static ControlMessage createRequestTouchFinished(long sequence) {
 +        ControlMessage msg = new ControlMessage();
 +        msg.type = TYPE_REQUEST_TOUCH_FINISHED;
 +        msg.sequence = sequence;
-         return msg;
++        return msg;
++    }
++
++    public static ControlMessage createDisplayConfiguration(long sequence, DisplayStreamConfiguration configuration) {
++        ControlMessage msg = new ControlMessage();
++        msg.type = TYPE_DISPLAY_CONFIGURATION;
++        msg.sequence = sequence;
++        msg.displayConfiguration = configuration;
++        return msg;
++    }
++
+     public int getType() {
+         return type;
      }
- 
+@@ -286,4 +304,8 @@
+     public int getHeight() {
+         return height;
+     }
++
++    public DisplayStreamConfiguration getDisplayConfiguration() {
++        return displayConfiguration;
++    }
+ }
 diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/ControlMessageReader.java b/server/src/main/java/com/genymobile/scrcpy/control/ControlMessageReader.java
---- a/server/src/main/java/com/genymobile/scrcpy/control/ControlMessageReader.java	2026-10-08 14:41:27
-+++ b/server/src/main/java/com/genymobile/scrcpy/control/ControlMessageReader.java	2026-10-25 11:44:38
-@@ -64,6 +64,8 @@
+--- a/server/src/main/java/com/genymobile/scrcpy/control/ControlMessageReader.java	2026-10-28 09:51:03
++++ b/server/src/main/java/com/genymobile/scrcpy/control/ControlMessageReader.java	2026-10-28 09:51:03
+@@ -64,6 +64,10 @@
                  return parseResizeDisplay();
              case ControlMessage.TYPE_SCAN_FILE:
                  return parseScanFile();
 +            case ControlMessage.TYPE_REQUEST_TOUCH_FINISHED:
 +                return parseRequestTouchFinished();
++            case ControlMessage.TYPE_DISPLAY_CONFIGURATION:
++                return parseDisplayConfiguration();
              default:
                  throw new ControlProtocolException("Unknown event type: " + type);
          }
-@@ -188,6 +190,11 @@
-     private ControlMessage parseScanFile() throws IOException {
-         String path = parseString();
+@@ -190,6 +194,23 @@
          return ControlMessage.createScanFile(path);
-+    }
-+
+     }
+ 
 +    private ControlMessage parseRequestTouchFinished() throws IOException {
 +        long sequence = dis.readLong();
 +        return ControlMessage.createRequestTouchFinished(sequence);
-     }
- 
++    }
++
++    private ControlMessage parseDisplayConfiguration() throws IOException {
++        long sequence = Integer.toUnsignedLong(dis.readInt());
++        long nativeWidth = Integer.toUnsignedLong(dis.readInt());
++        long nativeHeight = Integer.toUnsignedLong(dis.readInt());
++        long density = Integer.toUnsignedLong(dis.readInt());
++        long maxSize = Integer.toUnsignedLong(dis.readInt());
++        long maxFps = Integer.toUnsignedLong(dis.readInt());
++        DisplayStreamConfiguration configuration = new DisplayStreamConfiguration(
++                nativeWidth, nativeHeight, density, maxSize, maxFps);
++        return ControlMessage.createDisplayConfiguration(sequence, configuration);
++    }
++
      private Position parsePosition() throws IOException {
+         int x = dis.readInt();
+         int y = dis.readInt();
 diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b/server/src/main/java/com/genymobile/scrcpy/control/Controller.java
---- a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java	2026-10-08 14:41:27
-+++ b/server/src/main/java/com/genymobile/scrcpy/control/Controller.java	2026-10-25 23:58:43
-@@ -103,6 +103,11 @@
+--- a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java	2026-10-28 09:51:03
++++ b/server/src/main/java/com/genymobile/scrcpy/control/Controller.java	2026-10-28 09:51:03
+@@ -16,6 +16,7 @@
+ import com.genymobile.scrcpy.video.CaptureControl;
+ import com.genymobile.scrcpy.video.NewDisplayCapture;
+ import com.genymobile.scrcpy.video.SurfaceCapture;
++import com.genymobile.scrcpy.video.SurfaceEncoder;
+ import com.genymobile.scrcpy.video.VideoSource;
+ import com.genymobile.scrcpy.video.VirtualDisplayListener;
+ import com.genymobile.scrcpy.wrappers.ClipboardManager;
+@@ -103,6 +104,11 @@
      private final Object displayDataAvailable = new Object(); // condition variable
  
      private long lastTouchDown;
@@ -62,7 +121,26 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
      private final PointersState pointersState = new PointersState();
      private final MotionEvent.PointerProperties[] pointerProperties = new MotionEvent.PointerProperties[PointersState.MAX_POINTERS];
      private final MotionEvent.PointerCoords[] pointerCoords = new MotionEvent.PointerCoords[PointersState.MAX_POINTERS];
-@@ -278,6 +283,10 @@
+@@ -111,6 +117,7 @@
+ 
+     // Used for resetting video encoding on RESET_VIDEO message or for sending camera controls
+     private SurfaceCapture surfaceCapture;
++    private SurfaceEncoder surfaceEncoder;
+ 
+     public Controller(ControlChannel controlChannel, CleanUp cleanUp, Options options) {
+         this.camera = options.getVideoSource() == VideoSource.CAMERA;
+@@ -177,6 +184,10 @@
+ 
+     public void setSurfaceCapture(SurfaceCapture surfaceCapture) {
+         this.surfaceCapture = surfaceCapture;
++    }
++
++    public void setSurfaceEncoder(SurfaceEncoder surfaceEncoder) {
++        this.surfaceEncoder = surfaceEncoder;
+     }
+ 
+     private UhidManager getUhidManager() {
+@@ -278,6 +289,10 @@
  
          thread = new Thread(() -> {
              try {
@@ -73,7 +151,7 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
                  control();
              } catch (IOException e) {
                  Ln.e("Controller error", e);
-@@ -354,11 +363,25 @@
+@@ -354,10 +369,24 @@
                      }
                      return true;
                  case ControlMessage.TYPE_INJECT_TOUCH_EVENT:
@@ -84,24 +162,34 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
                      if (supportsInputEvents) {
 -                        injectTouch(
 -                                msg.getAction(), msg.getPointerId(), msg.getPosition(), msg.getPressure(), msg.getActionButton(), msg.getButtons());
+-                    }
 +                        touchSuccess = injectTouch(
 +                                touchAction, touchPointerId, msg.getPosition(), msg.getPressure(), msg.getActionButton(), msg.getButtons());
 +                        touchWaitForFinish = lastTouchWaitForFinish;
-                     }
++                    }
 +                    int touchDisplayId = touchSuccess ? lastTargetDisplayId : Device.DISPLAY_ID_NONE;
 +                    touchFinishedPolicy.record(touchPointerId, touchAction, touchSuccess, touchWaitForFinish, touchDisplayId,
 +                            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP, Device.DISPLAY_ID_NONE);
 +                    lastTouchAction = touchAction;
 +                    lastTouchSuccess = touchSuccess;
 +                    lastTargetDisplayId = touchDisplayId;
-                     return true;
++                    return true;
 +                case ControlMessage.TYPE_REQUEST_TOUCH_FINISHED:
 +                    acknowledgeTouchFinished(msg.getSequence());
-+                    return true;
+                     return true;
                  case ControlMessage.TYPE_INJECT_SCROLL_EVENT:
                      if (supportsInputEvents) {
-                         injectScroll(msg.getPosition(), msg.getHScroll(), msg.getVScroll(), msg.getButtons());
-@@ -511,6 +534,8 @@
+@@ -412,6 +441,9 @@
+                     return true;
+                 case ControlMessage.TYPE_RESIZE_DISPLAY:
+                     resizeDisplay(msg.getWidth(), msg.getHeight());
++                    return true;
++                case ControlMessage.TYPE_DISPLAY_CONFIGURATION:
++                    updateDisplayConfiguration(msg.getSequence(), msg.getDisplayConfiguration());
+                     return true;
+                 case ControlMessage.TYPE_SCAN_FILE:
+                     scanFile(msg.getText());
+@@ -511,6 +543,8 @@
  
      private boolean injectTouch(int action, long pointerId, Position position, float pressure, int actionButton, int buttons) {
          long now = SystemClock.uptimeMillis();
@@ -110,7 +198,7 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
  
          Pair<Point, Integer> pair = getEventPointAndDisplayId(position);
          if (pair == null) {
-@@ -519,6 +544,7 @@
+@@ -519,6 +553,7 @@
  
          Point point = pair.first;
          int targetDisplayId = pair.second;
@@ -118,7 +206,7 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
  
          int pointerIndex = pointersState.getPointerIndex(pointerId);
          if (pointerIndex == -1) {
-@@ -545,6 +571,7 @@
+@@ -545,6 +580,7 @@
              pointer.setUp(action == MotionEvent.ACTION_UP);
          }
  
@@ -126,7 +214,7 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
          int pointerCount = pointersState.update(pointerProperties, pointerCoords);
          if (pointerCount == 1) {
              if (action == MotionEvent.ACTION_DOWN) {
-@@ -567,13 +594,18 @@
+@@ -567,13 +603,18 @@
           *
           * Otherwise, Chrome does not work properly: <https://github.com/Genymobile/scrcpy/issues/3635>
           */
@@ -146,7 +234,7 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
                          return false;
                      }
                  }
-@@ -584,7 +616,7 @@
+@@ -584,7 +625,7 @@
                  if (!InputManager.setActionButton(pressEvent, actionButton)) {
                      return false;
                  }
@@ -155,7 +243,7 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
                      return false;
                  }
  
-@@ -598,7 +630,7 @@
+@@ -598,7 +639,7 @@
                  if (!InputManager.setActionButton(releaseEvent, actionButton)) {
                      return false;
                  }
@@ -164,7 +252,7 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
                      return false;
                  }
  
-@@ -606,7 +638,7 @@
+@@ -606,7 +647,7 @@
                      // Last button released: ACTION_UP
                      MotionEvent upEvent = MotionEvent.obtain(lastTouchDown, now, MotionEvent.ACTION_UP, pointerCount, pointerProperties,
                              pointerCoords, 0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
@@ -173,7 +261,7 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
                          return false;
                      }
                  }
-@@ -617,7 +649,14 @@
+@@ -617,7 +658,14 @@
  
          MotionEvent event = MotionEvent.obtain(lastTouchDown, now, action, pointerCount, pointerProperties, pointerCoords, 0, buttons, 1f, 1f,
                  DEFAULT_DEVICE_ID, 0, source, 0);
@@ -189,26 +277,45 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
      }
  
      private boolean injectScroll(Position position, float hScroll, float vScroll, int buttons) {
+@@ -881,6 +929,15 @@
+         newDisplayCapture.requestResize(width, height);
+     }
+ 
++    private void updateDisplayConfiguration(long sequence, DisplayStreamConfiguration configuration) {
++        if (surfaceEncoder == null || !configuration.isValid()) {
++            sender.send(DeviceMessage.createDisplayConfiguration(sequence, false));
++            return;
++        }
++        surfaceEncoder.requestDisplayConfiguration(sequence, configuration,
++                (finishedSequence, success) -> sender.send(DeviceMessage.createDisplayConfiguration(finishedSequence, success)));
++    }
++
+     private void scanFile(String path) {
+         try {
+             @SuppressWarnings("deprecation")
 diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessage.java b/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessage.java
---- a/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessage.java	2026-10-08 14:41:27
-+++ b/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessage.java	2026-10-25 11:44:38
-@@ -5,10 +5,15 @@
+--- a/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessage.java	2026-10-28 09:51:03
++++ b/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessage.java	2026-10-28 09:51:03
+@@ -5,10 +5,18 @@
      public static final int TYPE_CLIPBOARD = 0;
      public static final int TYPE_ACK_CLIPBOARD = 1;
      public static final int TYPE_UHID_OUTPUT = 2;
 +    public static final int TYPE_TOUCH_FINISHED = 3;
- 
-+    public static final int TOUCH_FINISHED_SIZE = 14; // type: 1 byte; sequence: 8 bytes; display: 4 bytes; success: 1 byte
++    public static final int TYPE_DISPLAY_CONFIGURATION = 4;
 +
++    public static final int TOUCH_FINISHED_SIZE = 14; // type: 1 byte; sequence: 8 bytes; display: 4 bytes; success: 1 byte
++    public static final int DISPLAY_CONFIGURATION_SIZE = 6; // type: 1 byte; sequence: 4 bytes; status: 1 byte
+ 
      private int type;
      private String text;
      private long sequence;
 +    private int displayId;
 +    private boolean success;
++    private int status;
      private int id;
      private byte[] data;
  
-@@ -37,6 +42,15 @@
+@@ -37,6 +45,23 @@
          return event;
      }
  
@@ -221,28 +328,40 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessage.jav
 +        return event;
 +    }
 +
++    public static DeviceMessage createDisplayConfiguration(long sequence, boolean success) {
++        DeviceMessage event = new DeviceMessage();
++        event.type = TYPE_DISPLAY_CONFIGURATION;
++        event.sequence = sequence;
++        event.status = success ? 0 : 1;
++        return event;
++    }
++
      public int getType() {
          return type;
      }
-@@ -47,6 +61,14 @@
- 
-     public long getSequence() {
+@@ -49,6 +74,18 @@
          return sequence;
-+    }
-+
+     }
+ 
 +    public int getDisplayId() {
 +        return displayId;
 +    }
 +
 +    public boolean isSuccess() {
 +        return success;
-     }
- 
++    }
++
++    public int getStatus() {
++        return status;
++    }
++
      public int getId() {
+         return id;
+     }
 diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessageWriter.java b/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessageWriter.java
---- a/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessageWriter.java	2026-10-08 14:41:27
-+++ b/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessageWriter.java	2026-10-25 11:44:38
-@@ -39,6 +39,11 @@
+--- a/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessageWriter.java	2026-10-28 09:51:03
++++ b/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessageWriter.java	2026-10-28 09:51:03
+@@ -39,6 +39,15 @@
                  dos.writeShort(data.length);
                  dos.write(data);
                  break;
@@ -251,12 +370,211 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/DeviceMessageWrit
 +                dos.writeInt(msg.getDisplayId());
 +                dos.writeBoolean(msg.isSuccess());
 +                break;
++            case DeviceMessage.TYPE_DISPLAY_CONFIGURATION:
++                dos.writeInt((int) msg.getSequence());
++                dos.writeByte(msg.getStatus());
++                break;
              default:
                  throw new ControlProtocolException("Unknown event type: " + type);
          }
-diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/TouchFinishedPolicy.java b/server/src/main/java/com/genymobile/scrcpy/control/TouchFinishedPolicy.java
---- a/server/src/main/java/com/genymobile/scrcpy/control/TouchFinishedPolicy.java	1970-01-01 08:00:00
-+++ b/server/src/main/java/com/genymobile/scrcpy/control/TouchFinishedPolicy.java	2026-10-25 11:44:38
+diff -ruN /dev/null b/server/src/main/java/com/genymobile/scrcpy/control/DisplayConfigurationCoordinator.java
+--- /dev/null	1970-01-01 00:00:00
++++ b/server/src/main/java/com/genymobile/scrcpy/control/DisplayConfigurationCoordinator.java	2026-10-28 09:51:03
+@@ -0,0 +1,109 @@
++package com.genymobile.scrcpy.control;
++
++import java.util.concurrent.Executors;
++import java.util.concurrent.ScheduledExecutorService;
++import java.util.concurrent.ScheduledFuture;
++import java.util.concurrent.TimeUnit;
++
++public final class DisplayConfigurationCoordinator {
++
++    public interface Listener {
++        void onFinished(long sequence, boolean success);
++    }
++
++    private static final ScheduledExecutorService TIMEOUT_EXECUTOR = Executors.newSingleThreadScheduledExecutor(r -> {
++        Thread thread = new Thread(r, "display-config-timeout");
++        thread.setDaemon(true);
++        return thread;
++    });
++
++    private static final class Pending {
++        private final long generation;
++        private final long sequence;
++        private final Listener listener;
++        private ScheduledFuture<?> timeout;
++
++        private Pending(long generation, long sequence, Listener listener) {
++            this.generation = generation;
++            this.sequence = sequence;
++            this.listener = listener;
++        }
++    }
++
++    private final Object lock = new Object();
++    private final long timeoutMillis;
++
++    private long generation;
++    private Pending pending;
++    private boolean stopped;
++
++    public DisplayConfigurationCoordinator(long timeoutMillis) {
++        if (timeoutMillis <= 0) {
++            throw new IllegalArgumentException("Timeout must be positive");
++        }
++        this.timeoutMillis = timeoutMillis;
++    }
++
++    public long begin(long sequence, Listener listener) {
++        Pending replaced;
++        long requestGeneration;
++        synchronized (lock) {
++            if (stopped) {
++                throw new IllegalStateException("Display configuration coordinator stopped");
++            }
++            replaced = pending;
++            if (replaced != null) {
++                replaced.timeout.cancel(false);
++            }
++
++            requestGeneration = ++generation;
++            Pending next = new Pending(requestGeneration, sequence, listener);
++            pending = next;
++            next.timeout = TIMEOUT_EXECUTOR.schedule(
++                    () -> finish(requestGeneration, false),
++                    timeoutMillis,
++                    TimeUnit.MILLISECONDS);
++        }
++
++        if (replaced != null) {
++            replaced.listener.onFinished(replaced.sequence, false);
++        }
++        return requestGeneration;
++    }
++
++    public void succeed(long requestGeneration) {
++        finish(requestGeneration, true);
++    }
++
++    public void fail(long requestGeneration) {
++        finish(requestGeneration, false);
++    }
++
++    public void stop() {
++        Pending current;
++        synchronized (lock) {
++            stopped = true;
++            current = pending;
++            pending = null;
++            if (current != null) {
++                current.timeout.cancel(false);
++            }
++        }
++        if (current != null) {
++            current.listener.onFinished(current.sequence, false);
++        }
++    }
++
++    private void finish(long requestGeneration, boolean success) {
++        Pending current;
++        synchronized (lock) {
++            if (pending == null || pending.generation != requestGeneration) {
++                return;
++            }
++            current = pending;
++            pending = null;
++            current.timeout.cancel(false);
++        }
++        current.listener.onFinished(current.sequence, success);
++    }
++}
+diff -ruN /dev/null b/server/src/main/java/com/genymobile/scrcpy/control/DisplayStreamConfiguration.java
+--- /dev/null	1970-01-01 00:00:00
++++ b/server/src/main/java/com/genymobile/scrcpy/control/DisplayStreamConfiguration.java	2026-10-28 09:51:03
+@@ -0,0 +1,78 @@
++package com.genymobile.scrcpy.control;
++
++import java.util.Objects;
++
++public final class DisplayStreamConfiguration {
++
++    public static final int MIN_NATIVE_SIZE = 320;
++    public static final int MAX_NATIVE_SIZE = 4096;
++
++    private final long nativeWidth;
++    private final long nativeHeight;
++    private final long density;
++    private final long maxSize;
++    private final long maxFps;
++
++    public DisplayStreamConfiguration(long nativeWidth, long nativeHeight, long density, long maxSize, long maxFps) {
++        this.nativeWidth = nativeWidth;
++        this.nativeHeight = nativeHeight;
++        this.density = density;
++        this.maxSize = maxSize;
++        this.maxFps = maxFps;
++    }
++
++    public boolean isValid() {
++        return nativeWidth >= MIN_NATIVE_SIZE && nativeWidth <= MAX_NATIVE_SIZE
++                && nativeHeight >= MIN_NATIVE_SIZE && nativeHeight <= MAX_NATIVE_SIZE
++                && (density == 320 || density == 400)
++                && (maxSize == 1280 || maxSize == 1920 || maxSize == 2560)
++                && (maxFps == 30 || maxFps == 45 || maxFps == 60);
++    }
++
++    public long getNativeWidth() {
++        return nativeWidth;
++    }
++
++    public long getNativeHeight() {
++        return nativeHeight;
++    }
++
++    public long getDensity() {
++        return density;
++    }
++
++    public long getMaxSize() {
++        return maxSize;
++    }
++
++    public long getMaxFps() {
++        return maxFps;
++    }
++
++    @Override
++    public boolean equals(Object o) {
++        if (this == o) {
++            return true;
++        }
++        if (o == null || getClass() != o.getClass()) {
++            return false;
++        }
++        DisplayStreamConfiguration that = (DisplayStreamConfiguration) o;
++        return nativeWidth == that.nativeWidth
++                && nativeHeight == that.nativeHeight
++                && density == that.density
++                && maxSize == that.maxSize
++                && maxFps == that.maxFps;
++    }
++
++    @Override
++    public int hashCode() {
++        return Objects.hash(nativeWidth, nativeHeight, density, maxSize, maxFps);
++    }
++
++    @Override
++    public String toString() {
++        return nativeWidth + "x" + nativeHeight + "/" + density
++                + " maxSize=" + maxSize + " maxFps=" + maxFps;
++    }
++}
+diff -ruN /dev/null b/server/src/main/java/com/genymobile/scrcpy/control/TouchFinishedPolicy.java
+--- /dev/null	1970-01-01 00:00:00
++++ b/server/src/main/java/com/genymobile/scrcpy/control/TouchFinishedPolicy.java	2026-10-28 09:51:03
 @@ -0,0 +1,59 @@
 +package com.genymobile.scrcpy.control;
 +
@@ -318,8 +636,8 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/TouchFinishedPoli
 +    }
 +}
 diff -ruN a/server/src/main/java/com/genymobile/scrcpy/device/Streamer.java b/server/src/main/java/com/genymobile/scrcpy/device/Streamer.java
---- a/server/src/main/java/com/genymobile/scrcpy/device/Streamer.java	2026-10-08 14:41:27
-+++ b/server/src/main/java/com/genymobile/scrcpy/device/Streamer.java	2026-10-25 23:58:43
+--- a/server/src/main/java/com/genymobile/scrcpy/device/Streamer.java	2026-10-28 09:51:03
++++ b/server/src/main/java/com/genymobile/scrcpy/device/Streamer.java	2026-10-28 09:51:03
 @@ -24,6 +24,7 @@
      private final boolean sendFrameMeta;
  
@@ -352,10 +670,37 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/device/Streamer.java b/se
          }
  
          IO.writeFully(fd, buffer);
+diff -ruN a/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java b/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java
+--- a/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java	2026-10-28 09:51:03
++++ b/server/src/main/java/com/genymobile/scrcpy/video/CaptureControl.java	2026-10-28 09:51:03
+@@ -8,6 +8,7 @@
+     public static final int RESET_REASON_DISPLAY_PROPERTIES_CHANGED = 1 << 1;
+     public static final int RESET_REASON_CLIENT_RESET = 1 << 2;
+     public static final int RESET_REASON_CLIENT_RESIZED = 1 << 3;
++    public static final int RESET_REASON_DISPLAY_CONFIGURED = 1 << 4;
+ 
+     private int reset = 0;
+ 
 diff -ruN a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
---- a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java	2026-10-08 14:41:27
-+++ b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java	2026-10-25 11:44:38
-@@ -61,6 +61,7 @@
+--- a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
++++ b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+@@ -2,6 +2,7 @@
+ 
+ import com.genymobile.scrcpy.AndroidVersions;
+ import com.genymobile.scrcpy.Options;
++import com.genymobile.scrcpy.control.DisplayStreamConfiguration;
+ import com.genymobile.scrcpy.control.PositionMapper;
+ import com.genymobile.scrcpy.display.DisplayInfo;
+ import com.genymobile.scrcpy.display.DisplayMonitor;
+@@ -21,6 +22,7 @@
+ import android.graphics.Rect;
+ import android.hardware.display.VirtualDisplay;
+ import android.os.Build;
++import android.os.SystemClock;
+ import android.view.Surface;
+ 
+ import java.io.IOException;
+@@ -61,6 +63,7 @@
      private final boolean vdDestroyContent;
      private final boolean vdSystemDecorations;
      private final boolean flexDisplay;
@@ -363,7 +708,7 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.j
  
      private VideoConstraints videoConstraints;
  
-@@ -88,6 +89,7 @@
+@@ -88,6 +91,7 @@
          this.vdDestroyContent = options.getVDDestroyContent();
          this.vdSystemDecorations = options.getVDSystemDecorations();
          this.flexDisplay = options.getFlexDisplay();
@@ -371,7 +716,16 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.j
      }
  
      @Override
-@@ -227,12 +229,11 @@
+@@ -129,7 +133,7 @@
+     }
+ 
+     @Override
+-    public void prepare() {
++    public synchronized void prepare() {
+         int displayRotation;
+         if (virtualDisplay == null) {
+             if (flexDisplay) {
+@@ -227,12 +231,11 @@
                          | VIRTUAL_DISPLAY_FLAG_ALWAYS_UNLOCKED
                          | VIRTUAL_DISPLAY_FLAG_TOUCH_FEEDBACK_DISABLED;
                  if (Build.VERSION.SDK_INT >= AndroidVersions.API_34_ANDROID_14) {
@@ -386,10 +740,230 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.j
              setCurrentVirtualDisplay(vd); // used for client resize
              int virtualDisplayId = vd.getDisplay().getDisplayId();
              Ln.i("New display: " + displaySize.getWidth() + "x" + displaySize.getHeight() + "/" + dpi + " (id=" + virtualDisplayId + ")");
+@@ -264,7 +267,7 @@
+     }
+ 
+     @Override
+-    public void start(Surface surface) throws IOException {
++    public synchronized void start(Surface surface) throws IOException {
+         if (displayTransform != null) {
+             assert glRunner == null;
+             OpenGLFilter glFilter = new AffineOpenGLFilter(displayTransform);
+@@ -285,7 +288,7 @@
+     }
+ 
+     @Override
+-    public void stop() {
++    public synchronized void stop() {
+         if (glRunner != null) {
+             glRunner.stopAndRelease();
+             glRunner = null;
+@@ -293,7 +296,7 @@
+     }
+ 
+     @Override
+-    public void release() {
++    public synchronized void release() {
+         displayMonitor.stopAndRelease();
+ 
+         if (debouncer != null) {
+@@ -324,6 +327,58 @@
+         int den = initialSize.getMax();
+         int num = size.getMax();
+         return initialDpi * num / den;
++    }
++
++    public synchronized boolean applyDisplayConfiguration(DisplayStreamConfiguration configuration) {
++        if (!configuration.isValid() || virtualDisplay == null) {
++            return false;
++        }
++
++        VideoConstraints constraints = getVideoConstraints();
++        if (constraints == null) {
++            return false;
++        }
++
++        int width = (int) configuration.getNativeWidth();
++        int height = (int) configuration.getNativeHeight();
++        int density = (int) configuration.getDensity();
++        int displayId = virtualDisplay.getDisplay().getDisplayId();
++        DisplayInfo displayInfo = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
++        if (displayInfo == null) {
++            return false;
++        }
++
++        int rotation = displayInfo.getRotation();
++        Size expectedDisplaySize = rotation % 2 == 0 ? new Size(width, height) : new Size(height, width);
++        boolean displayChanged = !displayInfo.getSize().equals(expectedDisplaySize) || displayInfo.getDpi() != density;
++        try {
++            if (displayChanged) {
++                // The binder call returns before DisplayManager has necessarily
++                // published the resize. Never encode/acknowledge the old geometry.
++                virtualDisplay.resize(width, height, density);
++                long deadline = SystemClock.uptimeMillis() + 1500;
++                boolean published = false;
++                do {
++                    DisplayInfo actual = ServiceManager.getDisplayManager().getDisplayInfo(displayId);
++                    if (actual != null && actual.getSize().equals(expectedDisplaySize) && actual.getDpi() == density) {
++                        published = true;
++                        break;
++                    }
++                    SystemClock.sleep(10);
++                } while (SystemClock.uptimeMillis() < deadline);
++                if (!published) {
++                    return false;
++                }
++            }
++            setVideoConstraints(constraints.withMaxSize((int) configuration.getMaxSize()));
++            displaySize = expectedDisplaySize;
++            dpi = density;
++            Ln.i("Display reconfigured in place: " + configuration);
++            return true;
++        } catch (RuntimeException e) {
++            Ln.e("Could not reconfigure display in place", e);
++            return false;
++        }
+     }
+ 
+     public void requestResize(int width, int height) {
 diff -ruN a/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java b/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
---- a/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java	2026-10-08 14:41:27
-+++ b/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java	2026-10-25 23:58:43
-@@ -312,7 +312,8 @@
+--- a/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
++++ b/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
+@@ -3,6 +3,8 @@
+ import com.genymobile.scrcpy.AndroidVersions;
+ import com.genymobile.scrcpy.AsyncProcessor;
+ import com.genymobile.scrcpy.Options;
++import com.genymobile.scrcpy.control.DisplayConfigurationCoordinator;
++import com.genymobile.scrcpy.control.DisplayStreamConfiguration;
+ import com.genymobile.scrcpy.device.Streamer;
+ import com.genymobile.scrcpy.model.Codec;
+ import com.genymobile.scrcpy.model.CodecOption;
+@@ -35,14 +37,15 @@
+     // Keep the values in descending order
+     private static final int[] MAX_SIZE_FALLBACK = {2560, 1920, 1600, 1280, 1024, 800};
+     private static final int MAX_CONSECUTIVE_ERRORS = 3;
++    private static final long DISPLAY_CONFIGURATION_TIMEOUT_MS = 5000;
+ 
+     private final SurfaceCapture capture;
+     private final Streamer streamer;
+     private final String encoderName;
+     private final List<CodecOption> codecOptions;
+     private final int videoBitRate;
+-    private final int maxSize;
+-    private final float maxFps;
++    private volatile int maxSize;
++    private volatile float maxFps;
+     private final boolean downsizeOnError;
+     private final int minSizeAlignment;
+     private final boolean ignoreVideoEncoderConstraints;
+@@ -54,8 +57,11 @@
+     private final AtomicBoolean stopped = new AtomicBoolean();
+ 
+     private final CaptureControl captureControl = new CaptureControl();
++    private final DisplayConfigurationCoordinator displayConfigurationCoordinator =
++            new DisplayConfigurationCoordinator(DISPLAY_CONFIGURATION_TIMEOUT_MS);
+ 
+     private VideoConstraints videoConstraints;
++    private volatile long armedDisplayConfigurationGeneration;
+ 
+     public SurfaceEncoder(SurfaceCapture capture, Streamer streamer, Options options) {
+         this.capture = capture;
+@@ -73,7 +79,6 @@
+     private void streamCapture() throws IOException, ConfigurationException {
+         Codec codec = streamer.getCodec();
+         MediaCodec mediaCodec = createMediaCodec(codec, encoderName);
+-        MediaFormat format = createFormat(codec.getMimeType(), videoBitRate, maxFps, codecOptions);
+ 
+         MediaCodecInfo.VideoCapabilities caps;
+         int alignment;
+@@ -108,6 +113,7 @@
+                 if ((resetReasons & CaptureControl.RESET_REASON_TERMINATED) != 0) {
+                     break;
+                 }
++                long displayConfigurationGeneration = armedDisplayConfigurationGeneration;
+                 if (retainedResetReasons != 0) {
+                     // The reasons for the previous failed encoding must be preserved when retrying
+                     resetReasons |= retainedResetReasons;
+@@ -117,6 +123,7 @@
+                 capture.prepare();
+                 Size size = capture.getSize();
+ 
++                MediaFormat format = createFormat(codec.getMimeType(), videoBitRate, maxFps, codecOptions);
+                 format.setInteger(MediaFormat.KEY_WIDTH, size.getWidth());
+                 format.setInteger(MediaFormat.KEY_HEIGHT, size.getHeight());
+ 
+@@ -144,6 +151,7 @@
+                             boolean isClientResize = (resetReasons & CaptureControl.RESET_REASON_CLIENT_RESIZED) != 0
+                                     && (resetReasons & CaptureControl.RESET_REASON_DISPLAY_PROPERTIES_CHANGED) == 0;
+                             streamer.writeSessionMeta(size.getWidth(), size.getHeight(), isClientResize);
++                            displayConfigurationCoordinator.succeed(displayConfigurationGeneration);
+ 
+                             // If a reset is requested during encode(), it will interrupt the encoding by an EOS
+                             encode(mediaCodec, streamer);
+@@ -183,9 +191,45 @@
+                 }
+             } while (alive);
+         } finally {
++            displayConfigurationCoordinator.stop();
+             mediaCodec.release();
+             capture.release();
+         }
++    }
++
++    public void requestDisplayConfiguration(long sequence, DisplayStreamConfiguration configuration,
++            DisplayConfigurationCoordinator.Listener listener) {
++        if (stopped.get() || !configuration.isValid() || !(capture instanceof NewDisplayCapture)) {
++            listener.onFinished(sequence, false);
++            return;
++        }
++
++        long generation;
++        try {
++            generation = displayConfigurationCoordinator.begin(sequence, listener);
++        } catch (IllegalStateException e) {
++            listener.onFinished(sequence, false);
++            return;
++        }
++
++        NewDisplayCapture newDisplayCapture = (NewDisplayCapture) capture;
++        boolean applied;
++        try {
++            applied = newDisplayCapture.applyDisplayConfiguration(configuration);
++        } catch (RuntimeException e) {
++            Ln.e("Display configuration application failed", e);
++            applied = false;
++        }
++        if (!applied || stopped.get()) {
++            displayConfigurationCoordinator.fail(generation);
++            return;
++        }
++
++        maxSize = (int) configuration.getMaxSize();
++        videoConstraints = videoConstraints.withMaxSize(maxSize);
++        maxFps = (float) configuration.getMaxFps();
++        armedDisplayConfigurationGeneration = generation;
++        captureControl.reset(CaptureControl.RESET_REASON_DISPLAY_CONFIGURED);
+     }
+ 
+     private boolean prepareRetry(MediaCodecInfo.VideoCapabilities caps, Size currentSize) {
+@@ -254,9 +298,14 @@
+ 
+         boolean eos;
+         do {
+-            int outputBufferId = codec.dequeueOutputBuffer(bufferInfo, -1);
++            // Some encoders do not deliver EOS after a surface reset. Poll so
++            // display updates and shutdown cannot wait forever for a buffer.
++            if (stopped.get() || captureControl.isResetRequested()) {
++                break;
++            }
++            int outputBufferId = codec.dequeueOutputBuffer(bufferInfo, 100_000);
+             try {
+-                eos = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
++                eos = outputBufferId >= 0 && (bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+                 // On EOS, there might be data or not, depending on bufferInfo.size
+                 if (outputBufferId >= 0 && bufferInfo.size > 0) {
+                     boolean isConfig = (bufferInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
+@@ -312,7 +361,8 @@
          format.setString(MediaFormat.KEY_MIME, videoMimeType);
          format.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
          // must be present to configure the encoder, but does not impact the actual frame rate, which is variable
@@ -399,7 +973,7 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
          format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
          if (Build.VERSION.SDK_INT >= AndroidVersions.API_24_ANDROID_7_0) {
              format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);
-@@ -323,11 +324,15 @@
+@@ -323,10 +373,14 @@
          if (Build.VERSION.SDK_INT >= AndroidVersions.API_23_ANDROID_6_0) {
              // real-time priority
              format.setInteger(MediaFormat.KEY_PRIORITY, 0);
@@ -409,14 +983,13 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
              // output 1 frame as soon as 1 frame is queued
 -            format.setInteger(MediaFormat.KEY_LATENCY, 1);
 +            format.setInteger(MediaFormat.KEY_LATENCY, 0);
-         }
++        }
 +        if (Build.VERSION.SDK_INT >= AndroidVersions.API_29_ANDROID_10) {
 +            format.setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0);
-+        }
+         }
          if (maxFps > 0) {
              // The key existed privately before Android 10:
-             // <https://android.googlesource.com/platform/frameworks/base/+/625f0aad9f7a259b6881006ad8710adce57d1384%5E%21/>
-@@ -350,6 +355,10 @@
+@@ -350,6 +404,10 @@
      @Override
      public void start(TerminationListener listener) {
          thread = new Thread(() -> {
@@ -427,9 +1000,17 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/video/SurfaceEncoder.java
              // Some devices (Meizu) deadlock if the video encoding thread has no Looper
              // <https://github.com/Genymobile/scrcpy/issues/4143>
              Looper.prepare();
+@@ -377,6 +435,7 @@
+             stopped.set(true);
+             captureControl.reset(CaptureControl.RESET_REASON_TERMINATED);
+         }
++        displayConfigurationCoordinator.stop();
+     }
+ 
+     @Override
 diff -ruN a/server/src/main/java/com/genymobile/scrcpy/wrappers/DisplayManager.java b/server/src/main/java/com/genymobile/scrcpy/wrappers/DisplayManager.java
---- a/server/src/main/java/com/genymobile/scrcpy/wrappers/DisplayManager.java	2026-10-08 14:41:27
-+++ b/server/src/main/java/com/genymobile/scrcpy/wrappers/DisplayManager.java	2026-10-25 11:44:38
+--- a/server/src/main/java/com/genymobile/scrcpy/wrappers/DisplayManager.java	2026-10-28 09:51:03
++++ b/server/src/main/java/com/genymobile/scrcpy/wrappers/DisplayManager.java	2026-10-28 09:51:03
 @@ -11,6 +11,7 @@
  import android.annotation.TargetApi;
  import android.content.Context;
@@ -482,8 +1063,8 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/wrappers/DisplayManager.j
      }
  
 diff -ruN a/server/src/test/java/com/genymobile/scrcpy/control/ControlMessageReaderTest.java b/server/src/test/java/com/genymobile/scrcpy/control/ControlMessageReaderTest.java
---- a/server/src/test/java/com/genymobile/scrcpy/control/ControlMessageReaderTest.java	2026-10-08 14:41:27
-+++ b/server/src/test/java/com/genymobile/scrcpy/control/ControlMessageReaderTest.java	2026-10-25 11:44:38
+--- a/server/src/test/java/com/genymobile/scrcpy/control/ControlMessageReaderTest.java	2026-10-28 09:51:03
++++ b/server/src/test/java/com/genymobile/scrcpy/control/ControlMessageReaderTest.java	2026-10-28 09:51:03
 @@ -116,6 +116,26 @@
      }
  
@@ -511,9 +1092,9 @@ diff -ruN a/server/src/test/java/com/genymobile/scrcpy/control/ControlMessageRea
      public void testParseScrollEvent() throws IOException {
          ByteArrayOutputStream bos = new ByteArrayOutputStream();
          DataOutputStream dos = new DataOutputStream(bos);
-diff -ruN a/server/src/test/java/com/genymobile/scrcpy/control/ControllerTouchOrderedTest.java b/server/src/test/java/com/genymobile/scrcpy/control/ControllerTouchOrderedTest.java
---- a/server/src/test/java/com/genymobile/scrcpy/control/ControllerTouchOrderedTest.java	1970-01-01 08:00:00
-+++ b/server/src/test/java/com/genymobile/scrcpy/control/ControllerTouchOrderedTest.java	2026-10-25 11:44:38
+diff -ruN /dev/null b/server/src/test/java/com/genymobile/scrcpy/control/ControllerTouchOrderedTest.java
+--- /dev/null	1970-01-01 00:00:00
++++ b/server/src/test/java/com/genymobile/scrcpy/control/ControllerTouchOrderedTest.java	2026-10-28 09:51:03
 @@ -0,0 +1,88 @@
 +package com.genymobile.scrcpy.control;
 +
@@ -604,8 +1185,8 @@ diff -ruN a/server/src/test/java/com/genymobile/scrcpy/control/ControllerTouchOr
 +    }
 +}
 diff -ruN a/server/src/test/java/com/genymobile/scrcpy/control/DeviceMessageWriterTest.java b/server/src/test/java/com/genymobile/scrcpy/control/DeviceMessageWriterTest.java
---- a/server/src/test/java/com/genymobile/scrcpy/control/DeviceMessageWriterTest.java	2026-10-08 14:41:27
-+++ b/server/src/test/java/com/genymobile/scrcpy/control/DeviceMessageWriterTest.java	2026-10-25 11:44:38
+--- a/server/src/test/java/com/genymobile/scrcpy/control/DeviceMessageWriterTest.java	2026-10-28 09:51:03
++++ b/server/src/test/java/com/genymobile/scrcpy/control/DeviceMessageWriterTest.java	2026-10-28 09:51:03
 @@ -72,4 +72,21 @@
  
          Assert.assertArrayEquals(expected, actual);
@@ -628,3 +1209,154 @@ diff -ruN a/server/src/test/java/com/genymobile/scrcpy/control/DeviceMessageWrit
 +        Assert.assertEquals(DeviceMessage.TOUCH_FINISHED_SIZE, bos.size());
 +    }
  }
+diff -ruN /dev/null b/server/src/test/java/com/genymobile/scrcpy/control/DisplayConfigurationProtocolTest.java
+--- /dev/null	1970-01-01 00:00:00
++++ b/server/src/test/java/com/genymobile/scrcpy/control/DisplayConfigurationProtocolTest.java	2026-10-28 09:51:03
+@@ -0,0 +1,147 @@
++package com.genymobile.scrcpy.control;
++
++import org.junit.Assert;
++import org.junit.Test;
++
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.DataOutputStream;
++import java.io.IOException;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicLong;
++
++public class DisplayConfigurationProtocolTest {
++
++    @Test
++    public void testParseDisplayConfigurationRequest() throws IOException {
++        ByteArrayOutputStream bos = new ByteArrayOutputStream();
++        DataOutputStream dos = new DataOutputStream(bos);
++        dos.writeByte(ControlMessage.TYPE_DISPLAY_CONFIGURATION);
++        dos.writeInt(0xF1020304);
++        dos.writeInt(1600);
++        dos.writeInt(2560);
++        dos.writeInt(400);
++        dos.writeInt(1920);
++        dos.writeInt(45);
++        byte[] packet = bos.toByteArray();
++
++        Assert.assertEquals(25, packet.length);
++        ByteArrayInputStream bis = new ByteArrayInputStream(packet);
++        ControlMessage message = new ControlMessageReader(bis).read();
++
++        Assert.assertEquals(ControlMessage.TYPE_DISPLAY_CONFIGURATION, message.getType());
++        Assert.assertEquals(0xF1020304L, message.getSequence());
++        Assert.assertEquals(
++                new DisplayStreamConfiguration(1600, 2560, 400, 1920, 45),
++                message.getDisplayConfiguration());
++        Assert.assertEquals(-1, bis.read());
++    }
++
++    @Test
++    public void testDisplayConfigurationBoundsAreExact() {
++        Assert.assertTrue(new DisplayStreamConfiguration(320, 4096, 320, 1280, 30).isValid());
++        Assert.assertTrue(new DisplayStreamConfiguration(4096, 320, 400, 2560, 60).isValid());
++
++        Assert.assertFalse(new DisplayStreamConfiguration(319, 1000, 320, 1280, 30).isValid());
++        Assert.assertFalse(new DisplayStreamConfiguration(1000, 4097, 320, 1280, 30).isValid());
++        Assert.assertFalse(new DisplayStreamConfiguration(1000, 1000, 360, 1280, 30).isValid());
++        Assert.assertFalse(new DisplayStreamConfiguration(1000, 1000, 320, 1600, 30).isValid());
++        Assert.assertFalse(new DisplayStreamConfiguration(1000, 1000, 320, 1280, 50).isValid());
++    }
++
++    @Test
++    public void testSerializeDisplayConfigurationAcknowledgement() throws IOException {
++        ByteArrayOutputStream bos = new ByteArrayOutputStream();
++        new DeviceMessageWriter(bos).write(
++                DeviceMessage.createDisplayConfiguration(0xF1020304L, false));
++
++        Assert.assertArrayEquals(new byte[] {
++                DeviceMessage.TYPE_DISPLAY_CONFIGURATION,
++                (byte) 0xF1, 2, 3, 4,
++                1,
++        }, bos.toByteArray());
++        Assert.assertEquals(DeviceMessage.DISPLAY_CONFIGURATION_SIZE, bos.size());
++
++        bos.reset();
++        new DeviceMessageWriter(bos).write(
++                DeviceMessage.createDisplayConfiguration(7, true));
++        Assert.assertArrayEquals(new byte[] {
++                DeviceMessage.TYPE_DISPLAY_CONFIGURATION,
++                0, 0, 0, 7,
++                0,
++        }, bos.toByteArray());
++    }
++
++    @Test
++    public void testCoordinatorCompletesOnlyMatchingGeneration() throws InterruptedException {
++        DisplayConfigurationCoordinator coordinator = new DisplayConfigurationCoordinator(1000);
++        CountDownLatch finished = new CountDownLatch(1);
++        AtomicBoolean success = new AtomicBoolean();
++        AtomicLong sequence = new AtomicLong();
++        long generation = coordinator.begin(17, (finishedSequence, ok) -> {
++            sequence.set(finishedSequence);
++            success.set(ok);
++            finished.countDown();
++        });
++
++        coordinator.succeed(generation - 1);
++        Assert.assertFalse(finished.await(50, TimeUnit.MILLISECONDS));
++
++        coordinator.succeed(generation);
++        Assert.assertTrue(finished.await(1, TimeUnit.SECONDS));
++        Assert.assertEquals(17, sequence.get());
++        Assert.assertTrue(success.get());
++    }
++
++    @Test
++    public void testNewRequestFailsReplacedRequest() throws InterruptedException {
++        DisplayConfigurationCoordinator coordinator = new DisplayConfigurationCoordinator(1000);
++        CountDownLatch firstFinished = new CountDownLatch(1);
++        CountDownLatch secondFinished = new CountDownLatch(1);
++        AtomicBoolean firstSuccess = new AtomicBoolean(true);
++        AtomicBoolean secondSuccess = new AtomicBoolean();
++
++        long first = coordinator.begin(1, (sequence, success) -> {
++            firstSuccess.set(success);
++            firstFinished.countDown();
++        });
++        long second = coordinator.begin(2, (sequence, success) -> {
++            secondSuccess.set(success);
++            secondFinished.countDown();
++        });
++
++        Assert.assertTrue(firstFinished.await(1, TimeUnit.SECONDS));
++        Assert.assertFalse(firstSuccess.get());
++        coordinator.succeed(first);
++        Assert.assertFalse(secondFinished.await(50, TimeUnit.MILLISECONDS));
++        coordinator.succeed(second);
++        Assert.assertTrue(secondFinished.await(1, TimeUnit.SECONDS));
++        Assert.assertTrue(secondSuccess.get());
++    }
++
++    @Test
++    public void testStopAndTimeoutFailWithoutHanging() throws InterruptedException {
++        CountDownLatch stoppedFinished = new CountDownLatch(1);
++        AtomicBoolean stopSuccess = new AtomicBoolean(true);
++        DisplayConfigurationCoordinator stopped = new DisplayConfigurationCoordinator(1000);
++        stopped.begin(3, (sequence, success) -> {
++            stopSuccess.set(success);
++            stoppedFinished.countDown();
++        });
++        stopped.stop();
++        Assert.assertTrue(stoppedFinished.await(1, TimeUnit.SECONDS));
++        Assert.assertFalse(stopSuccess.get());
++
++        CountDownLatch timedOut = new CountDownLatch(1);
++        AtomicBoolean timeoutSuccess = new AtomicBoolean(true);
++        DisplayConfigurationCoordinator timeout = new DisplayConfigurationCoordinator(50);
++        timeout.begin(4, (sequence, success) -> {
++            timeoutSuccess.set(success);
++            timedOut.countDown();
++        });
++        Assert.assertTrue(timedOut.await(1, TimeUnit.SECONDS));
++        Assert.assertFalse(timeoutSuccess.get());
++    }
++}

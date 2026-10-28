@@ -180,7 +180,6 @@ public final class DirectCommitImeService extends InputMethodService {
             AtomicReference<FocusResult> confirmed = new AtomicReference<>();
             MAIN.post(() -> {
                 try {
-                    if (op == 2) { client.confirmedEpoch = -1; client.confirmedConnection = null; }
                     DirectCommitImeService service = activeService;
                     if (cancelled.get() || service == null || service.destroyed
                         || current != client || client.closed.get()
@@ -192,6 +191,9 @@ public final class DirectCommitImeService extends InputMethodService {
                     int display = service.getDisplay() == null ? -1 : service.getDisplay().getDisplayId();
                     if (display <= 0 || (expectedDisplay >= 0 && display != expectedDisplay)) { status.set(2); return; }
                     if (op == 2) {
+                        // A stale window's confirmation must not revoke the
+                        // currently active display's independently granted lease.
+                        client.confirmedEpoch = -1; client.confirmedConnection = null;
                         long epoch = focusEpoch;
                         // Zero mode/filter checks the remote connection without requesting
                         // cursor text, coordinates, or composing data.

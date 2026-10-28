@@ -288,6 +288,79 @@ final class ApplicationWindowTests: XCTestCase {
     }
 
     @MainActor
+    func testChangingQualityPreservesWindowSizeAndInterfaceScale() throws {
+        _ = NSApplication.shared
+        let app = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        let window = try XCTUnwrap(app.window)
+        defer { app.performExplicitClose() }
+        app.applyDisplayMode(tabletMode: true, preferredPixelSize: CGSize(width: 1920, height: 1200), interfaceScale: .large)
+        window.setContentSize(NSSize(width: 720, height: 450))
+        let frame = window.frame
+        for preset in ["720p", "1440p", "1080p"] {
+            app.selectResolutionPreset(preset)
+            XCTAssertEqual(window.frame.width, frame.width, accuracy: 1)
+            XCTAssertEqual(window.frame.height, frame.height, accuracy: 1)
+            XCTAssertEqual(app.currentInterfaceScale, .large)
+        }
+    }
+
+    @MainActor
+    func testDisplayRequestWaitsForStreamBeforeChangingInputCoordinates() throws {
+        _ = NSApplication.shared
+        let app = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        defer { app.performExplicitClose() }
+        let current = CGSize(width: 1920, height: 1200)
+        app.applyDisplayMode(tabletMode: true, preferredPixelSize: current)
+        var requested: String?
+        app.onSelectResolutionPreset = { requested = $0 }
+        app.selectResolutionPreset("720p")
+        XCTAssertEqual(requested, "720p")
+        XCTAssertEqual(app.surface.pixelSize, current, "显示服务确认前应继续使用旧画面坐标。")
+        app.onRestoreRecommendedDisplay = {}
+        app.restoreRecommendedDisplay()
+        XCTAssertEqual(app.surface.pixelSize, current)
+        app.applyDisplayMode(tabletMode: true, preferredPixelSize: CGSize(width: 1280, height: 800), resolutionPreset: "720p")
+        XCTAssertEqual(app.surface.pixelSize, CGSize(width: 1280, height: 800))
+    }
+
+    @MainActor
+    func testPortraitToolbarKeepsBackAndDisplayControlsVisibleAtMinimumWidth() throws {
+        _ = NSApplication.shared
+        let app = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        let window = try XCTUnwrap(app.window)
+        defer { app.performExplicitClose() }
+        var metadata = ContainerApp.metadata(for: "com.example.notes")
+        metadata.name = "用于检查窄窗口布局的便笺应用"
+        app.configureForApp(metadata)
+        app.applyDisplayMode(tabletMode: false, preferredPixelSize: CGSize(width: 1200, height: 1920))
+        app.presentWindow()
+        window.setContentSize(window.contentMinSize)
+        window.contentView?.superview?.layoutSubtreeIfNeeded()
+        let toolbar = try XCTUnwrap(window.titlebarAccessoryViewControllers.first?.view)
+        toolbar.layoutSubtreeIfNeeded()
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let buttons = descendants(toolbar).compactMap { $0 as? TFButton }
+        XCTAssertEqual(buttons.count, 5)
+        let frames = buttons.map { $0.convert($0.bounds, to: toolbar) }.sorted { $0.minX < $1.minX }
+        for (button, frame) in zip(buttons, buttons.map({ $0.convert($0.bounds, to: toolbar) })) {
+            XCTAssertGreaterThan(frame.width, 10)
+            XCTAssertGreaterThanOrEqual(frame.minX, 0)
+            XCTAssertLessThanOrEqual(frame.maxX, toolbar.bounds.width + 1)
+            XCTAssertFalse((button.accessibilityLabel() ?? "").isEmpty)
+        }
+        for pair in zip(frames, frames.dropFirst()) {
+            XCTAssertLessThanOrEqual(pair.0.maxX + 4, pair.1.minX)
+        }
+        let back = try XCTUnwrap(buttons.first { $0.identifier?.rawValue == "app-window-back" })
+        let label = try XCTUnwrap(descendants(back).compactMap { $0 as? NSTextField }.first { $0.stringValue == "返回" })
+        XCTAssertGreaterThanOrEqual(label.bounds.width + 0.5, label.intrinsicContentSize.width)
+        var backCalls = 0
+        app.onBack = { backCalls += 1 }
+        XCTAssertTrue(back.accessibilityPerformPress())
+        XCTAssertEqual(backCalls, 1)
+    }
+
+    @MainActor
     func testRuntimeOperationCloseDoesNotApplyUserClosePolicy() throws {
         _ = NSApplication.shared
         let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
@@ -499,6 +572,26 @@ final class ApplicationWindowTests: XCTestCase {
         rootView.layoutSubtreeIfNeeded()
         let readyBtn = try XCTUnwrap(collectRuntimeButtons(in: rootView).first)
         XCTAssertEqual(readyBtn.mode, .stop)
+    }
+
+    @MainActor
+    func testRetiredVideoSizeCannotOverwriteNewInputCoordinates() async throws {
+        _ = NSApplication.shared
+        let controller = ApplicationWindow(device: try XCTUnwrap(MTLCreateSystemDefaultDevice()))
+        defer { controller.performExplicitClose() }
+        let session = UUID()
+        controller.surface.beginSession(session)
+        controller.surface.expectVideoSize(CGSize(width: 1280, height: 800))
+        var oldBuffer: CVPixelBuffer?
+        var newBuffer: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(nil, 1920, 1200, kCVPixelFormatType_32BGRA, nil, &oldBuffer), kCVReturnSuccess)
+        XCTAssertEqual(CVPixelBufferCreate(nil, 1280, 800, kCVPixelFormatType_32BGRA, nil, &newBuffer), kCVReturnSuccess)
+        controller.surface.accept(DecodedFrame(buffer: try XCTUnwrap(newBuffer), pts: 1, marker: nil), session: session)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(controller.surface.pixelSize, CGSize(width: 1280, height: 800))
+        controller.surface.accept(DecodedFrame(buffer: try XCTUnwrap(oldBuffer), pts: 0, marker: nil), session: session)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(controller.surface.pixelSize, CGSize(width: 1280, height: 800), "旧尺寸解码帧不能回写新的点击坐标")
     }
 
     @MainActor

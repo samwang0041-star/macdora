@@ -256,44 +256,85 @@ struct DisplayResolutionOption: Equatable, Sendable {
     let subtitle: String
     let landscapeSize: CGSize
     let portraitSize: CGSize
-    let landscapeDPI: Int
-    let portraitDPI: Int
 
     func pixelSize(tabletMode: Bool) -> CGSize {
         tabletMode ? landscapeSize : portraitSize
     }
 
-    func dpi(tabletMode: Bool) -> Int {
-        tabletMode ? landscapeDPI : portraitDPI
-    }
-
-    func dimensionLabel(tabletMode: Bool) -> String {
-        let size = pixelSize(tabletMode: tabletMode)
+    func dimensionLabel(tabletMode: Bool, interfaceScale: DisplayInterfaceScale = .standard) -> String {
+        let size = ContainerPreferences.pixelSize(for: preset, tabletMode: tabletMode, interfaceScale: interfaceScale)
         return "\(Int(size.width)) × \(Int(size.height))"
     }
 
-    func scrcpyNewDisplaySpec(tabletMode: Bool) -> String {
-        let size = pixelSize(tabletMode: tabletMode)
-        return "\(Int(size.width))x\(Int(size.height))/\(dpi(tabletMode: tabletMode))"
+    func menuTitle(tabletMode: Bool, interfaceScale: DisplayInterfaceScale = .standard) -> String {
+        "\(title) · \(dimensionLabel(tabletMode: tabletMode, interfaceScale: interfaceScale))"
+    }
+}
+
+enum DisplayInterfaceScale: String, Codable, CaseIterable, Sendable {
+    case small
+    case standard
+    case large
+
+    var title: String {
+        switch self {
+        case .small: return "较小"
+        case .standard: return "标准"
+        case .large: return "较大"
+        }
     }
 
-    func menuTitle(tabletMode: Bool) -> String {
-        "\(title) (\(dimensionLabel(tabletMode: tabletMode)) · \(dpi(tabletMode: tabletMode)) DPI)"
+    var percentage: Int {
+        switch self {
+        case .small: return 80
+        case .standard: return 100
+        case .large: return 125
+        }
+    }
+
+    /// Every scale keeps one density. Android relaunches Activities that do
+    /// not handle `density`, so the size changes only the display pixels.
+    var nativeDPI: Int { 320 }
+
+    func nativePixelSize(tabletMode: Bool) -> CGSize {
+        let landscape: CGSize
+        switch self {
+        case .small: landscape = CGSize(width: 3200, height: 2000)
+        case .standard: landscape = CGSize(width: 2560, height: 1600)
+        case .large: landscape = CGSize(width: 2048, height: 1280)
+        }
+        return tabletMode ? landscape : CGSize(width: landscape.height, height: landscape.width)
     }
 }
 
 struct AppDisplayPreference: Codable, Equatable, Sendable {
     var resolutionPreset: String
     var tabletMode: Bool
+    var interfaceScale: DisplayInterfaceScale
 
-    init(resolutionPreset: String, tabletMode: Bool) {
-        self.resolutionPreset = resolutionPreset
+    init(resolutionPreset: String, tabletMode: Bool, interfaceScale: DisplayInterfaceScale = .standard) {
+        self.resolutionPreset = ContainerPreferences.canonicalResolutionPreset(resolutionPreset)
         self.tabletMode = tabletMode
+        self.interfaceScale = interfaceScale
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case resolutionPreset, tabletMode, interfaceScale
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let preset = try values.decodeIfPresent(String.self, forKey: .resolutionPreset) ?? "1080p"
+        resolutionPreset = ContainerPreferences.canonicalResolutionPreset(preset)
+        tabletMode = try values.decodeIfPresent(Bool.self, forKey: .tabletMode) ?? true
+        interfaceScale = try values.decodeIfPresent(DisplayInterfaceScale.self, forKey: .interfaceScale)
+            ?? ContainerPreferences.legacyInterfaceScale(for: preset)
     }
 }
 
 struct ContainerPreferences: Codable, Equatable, Sendable {
     var resolutionPreset: String
+    var interfaceScale: DisplayInterfaceScale
     var targetFPS: Int
     var keepWarmInBackground: Bool
     var clipboardSyncEnabled: Bool
@@ -312,9 +353,11 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         directIMEEnabled: Bool = true,
         cameraEnabled: Bool = true,
         tabletMode: Bool = true,
-        appDisplayOverrides: [String: AppDisplayPreference] = [:]
+        appDisplayOverrides: [String: AppDisplayPreference] = [:],
+        interfaceScale: DisplayInterfaceScale = .standard
     ) {
-        self.resolutionPreset = resolutionPreset
+        self.resolutionPreset = Self.canonicalResolutionPreset(resolutionPreset)
+        self.interfaceScale = interfaceScale
         self.targetFPS = targetFPS
         self.keepWarmInBackground = keepWarmInBackground
         self.clipboardSyncEnabled = clipboardSyncEnabled
@@ -326,6 +369,7 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case resolutionPreset
+        case interfaceScale
         case targetFPS
         case keepWarmInBackground
         case clipboardSyncEnabled
@@ -337,7 +381,10 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        resolutionPreset = try container.decodeIfPresent(String.self, forKey: .resolutionPreset) ?? "1080p"
+        let preset = try container.decodeIfPresent(String.self, forKey: .resolutionPreset) ?? "1080p"
+        resolutionPreset = Self.canonicalResolutionPreset(preset)
+        interfaceScale = try container.decodeIfPresent(DisplayInterfaceScale.self, forKey: .interfaceScale)
+            ?? Self.legacyInterfaceScale(for: preset)
         targetFPS = try container.decodeIfPresent(Int.self, forKey: .targetFPS) ?? 60
         keepWarmInBackground = try container.decodeIfPresent(Bool.self, forKey: .keepWarmInBackground) ?? true
         clipboardSyncEnabled = try container.decodeIfPresent(Bool.self, forKey: .clipboardSyncEnabled) ?? true
@@ -360,94 +407,64 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
 
     static let resolutionOptions: [DisplayResolutionOption] = [
         DisplayResolutionOption(
-            preset: "960x600",
-            title: "紧凑大字 · 960×600",
-            shortTitle: "紧凑大字",
-            subtitle: "界面放大 60%，适合多窗口并排与高可读性办公",
-            landscapeSize: CGSize(width: 960, height: 600),
-            portraitSize: CGSize(width: 540, height: 960),
-            landscapeDPI: 200,
-            portraitDPI: 240
-        ),
-        DisplayResolutionOption(
-            preset: "1280x800_comfortable",
-            title: "舒适大字 · 1280×800 (推荐办公/微信)",
-            shortTitle: "舒适大字",
-            subtitle: "提升像素密度使 OA 与微信字体清晰饱满，告别平板模式小字",
-            landscapeSize: CGSize(width: 1280, height: 800),
-            portraitSize: CGSize(width: 720, height: 1280),
-            landscapeDPI: 213,
-            portraitDPI: 320
-        ),
-        DisplayResolutionOption(
-            preset: "1440x900",
-            title: "适中均衡 · 1440×900",
-            shortTitle: "适中均衡",
-            subtitle: "兼顾内容视野与文字可读性的黄金比例",
-            landscapeSize: CGSize(width: 1440, height: 900),
-            portraitSize: CGSize(width: 900, height: 1600),
-            landscapeDPI: 240,
-            portraitDPI: 360
-        ),
-        DisplayResolutionOption(
-            preset: "1920x1200_hidpi",
-            title: "高清大字 · 1920×1200 HiDPI",
-            shortTitle: "高清大字",
-            subtitle: "1080p 级精细渲染 + 320/420 DPI 放大界面，文字边缘锐利且不显小",
-            landscapeSize: CGSize(width: 1920, height: 1200),
-            portraitSize: CGSize(width: 1080, height: 1920),
-            landscapeDPI: 320,
-            portraitDPI: 420
-        ),
-        DisplayResolutionOption(
             preset: "720p",
-            title: "标准 720p · 1280×800",
-            shortTitle: "720p 标准",
-            subtitle: "原生平板密度 (160 DPI)，低资源开销",
+            title: "流畅",
+            shortTitle: "流畅",
+            subtitle: "减少视频传输与解码开销；不改变界面大小",
             landscapeSize: CGSize(width: 1280, height: 800),
-            portraitSize: CGSize(width: 800, height: 1280),
-            landscapeDPI: 160,
-            portraitDPI: 160
+            portraitSize: CGSize(width: 800, height: 1280)
         ),
         DisplayResolutionOption(
             preset: "1080p",
-            title: "标准 1080p · 1920×1200",
-            shortTitle: "1080p 标准",
-            subtitle: "原生平板密度 (240 DPI)，大屏宽广视野",
+            title: "清晰（推荐）",
+            shortTitle: "清晰",
+            subtitle: "适合日常办公；不改变界面大小",
             landscapeSize: CGSize(width: 1920, height: 1200),
-            portraitSize: CGSize(width: 1200, height: 1920),
-            landscapeDPI: 240,
-            portraitDPI: 240
+            portraitSize: CGSize(width: 1200, height: 1920)
         ),
         DisplayResolutionOption(
             preset: "1440p",
-            title: "超清 1440p · 2560×1600",
-            shortTitle: "1440p 超清",
-            subtitle: "原生平板密度 (320 DPI)，适合大尺寸外接显示器",
+            title: "精细",
+            shortTitle: "精细",
+            subtitle: "文字边缘更细腻，资源占用更高；不改变界面大小",
             landscapeSize: CGSize(width: 2560, height: 1600),
-            portraitSize: CGSize(width: 1600, height: 2560),
-            landscapeDPI: 320,
-            portraitDPI: 320
+            portraitSize: CGSize(width: 1600, height: 2560)
         )
     ]
 
-    static func resolutionOption(for preset: String) -> DisplayResolutionOption {
-        if let match = resolutionOptions.first(where: { $0.preset == preset }) {
-            return match
+    static func canonicalResolutionPreset(_ preset: String) -> String {
+        switch preset {
+        case "960x600", "1280x800_comfortable", "720p": return "720p"
+        case "1440p": return "1440p"
+        default: return "1080p"
         }
-        return resolutionOptions.first(where: { $0.preset == "1080p" })!
+    }
+
+    static func legacyInterfaceScale(for preset: String) -> DisplayInterfaceScale {
+        switch preset {
+        case "960x600", "1280x800_comfortable", "1440x900", "1920x1200_hidpi": return .large
+        default: return .standard
+        }
+    }
+
+    static func resolutionOption(for preset: String) -> DisplayResolutionOption {
+        resolutionOptions.first { $0.preset == canonicalResolutionPreset(preset) }!
     }
 
     static func pixelSize(for preset: String, tabletMode: Bool) -> CGSize {
         resolutionOption(for: preset).pixelSize(tabletMode: tabletMode)
     }
 
-    static func dpi(for preset: String, tabletMode: Bool) -> Int {
-        resolutionOption(for: preset).dpi(tabletMode: tabletMode)
+    /// The video never exceeds the native display; scrcpy only scales down.
+    static func pixelSize(for preset: String, tabletMode: Bool, interfaceScale: DisplayInterfaceScale) -> CGSize {
+        let output = pixelSize(for: preset, tabletMode: tabletMode)
+        let native = interfaceScale.nativePixelSize(tabletMode: tabletMode)
+        return max(native.width, native.height) < max(output.width, output.height) ? native : output
     }
 
-    static func scrcpyNewDisplaySpec(for preset: String, tabletMode: Bool) -> String {
-        resolutionOption(for: preset).scrcpyNewDisplaySpec(tabletMode: tabletMode)
+    static func scrcpyNewDisplaySpec(tabletMode: Bool, interfaceScale: DisplayInterfaceScale = .standard) -> String {
+        let size = interfaceScale.nativePixelSize(tabletMode: tabletMode)
+        return "\(Int(size.width))x\(Int(size.height))/\(interfaceScale.nativeDPI)"
     }
 
     static func displayLabel(for preset: String, tabletMode: Bool) -> String {
@@ -473,11 +490,20 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         if let package, let override = appDisplayOverrides[package] {
             return override
         }
-        return AppDisplayPreference(resolutionPreset: resolutionPreset, tabletMode: tabletMode)
+        return AppDisplayPreference(resolutionPreset: resolutionPreset, tabletMode: tabletMode, interfaceScale: interfaceScale)
     }
 
     var resolutionDisplayLabel: String {
         Self.displayLabel(for: resolutionPreset, tabletMode: tabletMode)
+    }
+
+    var displaySummary: String {
+        "\(Self.resolutionOption(for: resolutionPreset).shortTitle) · \(interfaceScale.title) \(interfaceScale.percentage)% · \(tabletMode ? "横屏" : "竖屏")"
+    }
+
+    mutating func restoreRecommendedDisplay() {
+        resolutionPreset = "1080p"
+        interfaceScale = .standard
     }
 
     var preferredPixelSize: CGSize {
@@ -485,7 +511,7 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
     }
 
     var preferredDPI: Int {
-        Self.dpi(for: resolutionPreset, tabletMode: tabletMode)
+        interfaceScale.nativeDPI
     }
 }
 

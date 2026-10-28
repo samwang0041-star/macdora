@@ -884,6 +884,90 @@ final class HostServiceAgentWorkspaceController {
 }
 
 @MainActor
+final class PluginKeepAwakeView: TFCardView {
+    private let titleLabel = NSTextField(labelWithString: "后台保持唤醒")
+    private let detailLabel = NSTextField(wrappingLabelWithString: "")
+    private let scopeLabel = NSTextField(wrappingLabelWithString: "此插件使用当前 Android 环境的防冻结策略，同一环境内的其他应用也会受影响。")
+    private let toggle = TFToggleSwitch(isOn: false)
+    private let retry = TFButton(title: "重试", variant: .secondary, size: .sm)
+    private let controls = NSStackView()
+    private var status: OfficeKeepAwakeStatus = .off
+    private var onToggle: ((Bool) -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        identifier = NSUserInterfaceItemIdentifier("plugin-keep-awake-settings")
+        cornerRadius = 12
+        hasCardShadow = true
+        for label in [titleLabel, detailLabel, scopeLabel] {
+            label.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(label)
+        }
+        titleLabel.font = .systemFont(ofSize: 13.5, weight: .medium)
+        detailLabel.font = .systemFont(ofSize: 12)
+        scopeLabel.font = .systemFont(ofSize: 11.5)
+        for label in [detailLabel, scopeLabel] {
+            label.maximumNumberOfLines = 0
+            label.setContentCompressionResistancePriority(.required, for: .vertical)
+        }
+        controls.orientation = .horizontal
+        controls.alignment = .centerY
+        controls.spacing = 8
+        controls.translatesAutoresizingMaskIntoConstraints = false
+        controls.addArrangedSubview(retry)
+        controls.addArrangedSubview(toggle)
+        addSubview(controls)
+        toggle.identifier = NSUserInterfaceItemIdentifier("plugin-keep-awake-toggle")
+        toggle.setAccessibilityLabel("插件后台保持唤醒")
+        toggle.onToggle = { [weak self] in self?.onToggle?($0) }
+        retry.identifier = NSUserInterfaceItemIdentifier("plugin-keep-awake-retry")
+        retry.setAccessibilityLabel("重试插件保持唤醒设置")
+        retry.onClick = { [weak self] in
+            guard let self else { return }
+            self.onToggle?(self.status.enabled)
+        }
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 18),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: controls.leadingAnchor, constant: -12),
+            controls.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            controls.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            detailLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            detailLabel.trailingAnchor.constraint(equalTo: controls.trailingAnchor),
+            detailLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 12),
+            scopeLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            scopeLabel.trailingAnchor.constraint(equalTo: detailLabel.trailingAnchor),
+            scopeLabel.topAnchor.constraint(equalTo: detailLabel.bottomAnchor, constant: 6),
+            scopeLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -18)
+        ])
+        update(status: .off, runtimeBusy: false, onToggle: { _ in })
+        refreshTheme()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func update(status: OfficeKeepAwakeStatus, runtimeBusy: Bool, onToggle: @escaping (Bool) -> Void) {
+        self.status = status
+        self.onToggle = onToggle
+        toggle.isOn = status.enabled
+        toggle.isEnabled = !runtimeBusy && status.phase != .applying
+        retry.isHidden = status.phase != .failed
+        retry.isEnabled = toggle.isEnabled
+        detailLabel.stringValue = status.detail
+    }
+
+    func refreshTheme() {
+        fillColor = TFTheme.card
+        strokeColor = TFTheme.line
+        titleLabel.textColor = TFTheme.ink
+        detailLabel.textColor = TFTheme.ink2
+        scopeLabel.textColor = TFTheme.ink3
+        retry.refreshColors()
+    }
+}
+
+@MainActor
 final class HostServiceAgentWorkspaceView: NSView {
     let controller: HostServiceAgentWorkspaceController
     let pluginIdentity: ObjectIdentifier
@@ -913,6 +997,7 @@ final class HostServiceAgentWorkspaceView: NSView {
     private let actionStack = NSStackView()
     private let badge: TFIconBadgeView
     private let suppressesAutomaticRefresh: Bool
+    private let keepAwakeView: PluginKeepAwakeView?
     private var copyConfirmationLabel: NSTextField?
     private var copyConfirmationDismissTask: Task<Void, Never>?
 
@@ -925,6 +1010,7 @@ final class HostServiceAgentWorkspaceView: NSView {
         controller = HostServiceAgentWorkspaceController(plugin: plugin)
         pluginIdentity = ObjectIdentifier(plugin)
         self.suppressesAutomaticRefresh = suppressesAutomaticRefresh
+        keepAwakeView = plugin.manifest.supportsKeepAwakeControl ? PluginKeepAwakeView() : nil
         badge = TFIconBadgeView(
             symbol: "person.crop.circle.badge.checkmark",
             accentHex: 0x0F766E,
@@ -1013,7 +1099,12 @@ final class HostServiceAgentWorkspaceView: NSView {
         super.layout()
     }
 
+    func updateKeepAwake(status: OfficeKeepAwakeStatus, runtimeBusy: Bool, onToggle: @escaping (Bool) -> Void) {
+        keepAwakeView?.update(status: status, runtimeBusy: runtimeBusy, onToggle: onToggle)
+    }
+
     func refreshTheme() {
+        keepAwakeView?.refreshTheme()
         statusLabel.textColor = TFTheme.ink
         detailLabel.textColor = TFTheme.ink2
         scopeLabel.textColor = TFTheme.ink2
@@ -1120,7 +1211,6 @@ final class HostServiceAgentWorkspaceView: NSView {
             card.leadingAnchor.constraint(equalTo: leadingAnchor),
             card.trailingAnchor.constraint(equalTo: trailingAnchor),
             card.topAnchor.constraint(equalTo: topAnchor),
-            card.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             header.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
             header.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
@@ -1150,6 +1240,17 @@ final class HostServiceAgentWorkspaceView: NSView {
             pillHost.heightAnchor.constraint(equalToConstant: 20),
             pillHost.widthAnchor.constraint(greaterThanOrEqualToConstant: 64)
         ])
+        if let keepAwakeView {
+            addSubview(keepAwakeView)
+            NSLayoutConstraint.activate([
+                keepAwakeView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                keepAwakeView.trailingAnchor.constraint(equalTo: trailingAnchor),
+                keepAwakeView.topAnchor.constraint(equalTo: card.bottomAnchor, constant: 14),
+                keepAwakeView.bottomAnchor.constraint(equalTo: bottomAnchor)
+            ])
+        } else {
+            card.bottomAnchor.constraint(equalTo: bottomAnchor).isActive = true
+        }
         render()
     }
 

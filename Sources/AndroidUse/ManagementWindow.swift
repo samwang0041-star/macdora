@@ -1137,7 +1137,8 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     var onSettings: (() -> Void)?
     var onToggleCamera: ((Bool) -> Void)?
     var onUpdatePreferences: ((ContainerPreferences) -> Void)?
-    var onToggleOfficeKeepAwake: ((Bool) -> Void)?
+    var onTogglePluginKeepAwake: ((String, Bool) -> Void)?
+    var onRestoreOrphanedKeepAwake: (() -> Void)?
     var onClearCache: (() -> Void)?
     var onRevealData: (() -> Void)?
     var onImportDeveloperPlugin: (() -> Void)?
@@ -1672,6 +1673,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                ws.pluginIdentity == ObjectIdentifier(host),
                ws.superview === pageStack {
                 refreshLivePluginControls(for: detailID)
+                refreshPluginKeepAwakeControls()
                 reusedAgentDetail = true
             } else if selectedSection == .plugins,
                       let detailID = activePluginDetailID,
@@ -1689,6 +1691,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                     addFullWidth(replacement, to: pageStack)
                 }
                 refreshLivePluginControls(for: detailID)
+                refreshPluginKeepAwakeControls()
                 reusedAgentDetail = true
             }
         }
@@ -1758,6 +1761,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
 
     func update(_ state: RuntimeState) {
         currentState = state
+        refreshPluginKeepAwakeControls()
         if case .preparing = state {} else { runtimeEnvironmentProgress = nil }
         if case .failed(let msg) = state {
             bannerMessage = msg
@@ -1845,13 +1849,14 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     ) {
         let tabletModeChanged =
             self.currentPreferences.tabletMode != preferences.tabletMode ||
-            self.currentPreferences.resolutionPreset != preferences.resolutionPreset
+            self.currentPreferences.resolutionPreset != preferences.resolutionPreset ||
+            self.currentPreferences.interfaceScale != preferences.interfaceScale
         let settingsChanged =
             self.cameraEnabled != cameraEnabled ||
             self.canChangeCamera != canChangeCamera ||
             self.rootPath != rootPath ||
-            self.currentPreferences != preferences ||
-            self.currentOfficeKeepAwake != officeKeepAwake
+            self.currentPreferences != preferences
+        let keepAwakeChanged = self.currentOfficeKeepAwake != officeKeepAwake
         let readinessChanged = self.currentReadiness != readiness
         self.cameraEnabled = cameraEnabled
         self.canChangeCamera = canChangeCamera
@@ -1859,11 +1864,14 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         self.currentPreferences = preferences
         self.currentOfficeKeepAwake = officeKeepAwake
         self.currentReadiness = readiness
+        refreshPluginKeepAwakeControls()
         if selectedSection == .settings && settingsChanged {
             rebuildPageContent()
         } else if selectedSection == .serving && (settingsChanged || readinessChanged) {
             rebuildPageContent()
         } else if selectedSection == .apps && tabletModeChanged {
+            rebuildPageContent()
+        } else if selectedSection == .plugins && activePluginDetailID == nil && keepAwakeChanged {
             rebuildPageContent()
         }
     }
@@ -1989,6 +1997,18 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         }
         activePluginDetailID = nil
         addFullWidth(makePluginsCatalogSection(), to: pageStack)
+        let hasController = pluginManager?.installedCatalogItems.contains { item in
+            item.state.isEnabled && pluginManager?.hostServicePlugin(for: item.id)?.manifest.supportsKeepAwakeControl == true
+        } == true
+        if !hasController, currentOfficeKeepAwake.enabled || currentOfficeKeepAwake.phase != .off {
+            let restore = TFButton(title: currentOfficeKeepAwake.phase == .failed ? "重试恢复" : "恢复原冻结策略", variant: .secondary, size: .sm)
+            restore.identifier = NSUserInterfaceItemIdentifier("plugin-orphaned-keep-awake-restore")
+            restore.isEnabled = !currentState.isBusy && currentOfficeKeepAwake.phase != .applying
+            restore.onClick = { [weak self] in self?.onRestoreOrphanedKeepAwake?() }
+            addFullWidth(makeSettingsSection(title: "插件后台策略待恢复", rows: [
+                makeSettingRow(title: "后台保持唤醒", detail: "当前没有可管理此策略的插件；可恢复原设置。", control: restore, isLast: true)
+            ]), to: pageStack)
+        }
     }
 
     private func makePluginsCatalogSection() -> NSView {
@@ -2283,6 +2303,28 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                 ws = created
             }
             addFullWidth(ws, to: pageStack)
+            configurePluginKeepAwakeControl(ws, plugin: hostPlugin)
+        }
+    }
+
+    private func configurePluginKeepAwakeControl(_ workspace: HostServiceAgentWorkspaceView, plugin: HostServiceSystemPlugin) {
+        guard plugin.manifest.supportsKeepAwakeControl else { return }
+        let pluginID = plugin.manifest.id
+        workspace.updateKeepAwake(status: currentOfficeKeepAwake, runtimeBusy: currentState.isBusy || pluginManager?.isPluginBusy(pluginID) == true) { [weak self, weak plugin] enabled in
+            guard let self, let plugin,
+                  self.pluginManager?.hostServicePlugin(for: pluginID) === plugin,
+                  self.pluginManager?.isPluginEnabled(pluginID) == true,
+                  self.pluginManager?.isPluginBusy(pluginID) == false else { return }
+            self.onTogglePluginKeepAwake?(pluginID, enabled)
+        }
+    }
+
+    private func refreshPluginKeepAwakeControls() {
+        guard let manager = pluginManager else { return }
+        for (id, workspace) in agentWorkspaceViews {
+            guard let plugin = manager.hostServicePlugin(for: id), manager.isPluginEnabled(id),
+                  workspace.pluginIdentity == ObjectIdentifier(plugin) else { continue }
+            configurePluginKeepAwakeControl(workspace, plugin: plugin)
         }
     }
 
@@ -2452,16 +2494,15 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         activeRuntimeFPSLabel = fpsLbl
         rightControls.addArrangedSubview(fpsLbl)
 
-        let currentResOption = ContainerPreferences.resolutionOption(for: currentPreferences.resolutionPreset)
         let resQuickBtn = TFButton(
-            title: "\(currentResOption.shortTitle) ▾",
+            title: "显示 · \(currentPreferences.interfaceScale.percentage)% ▾",
             symbolName: "aspectratio",
             variant: .secondary,
             size: .sm
         )
         resQuickBtn.identifier = NSUserInterfaceItemIdentifier("runtime-bar-resolution-switch")
-        resQuickBtn.setAccessibilityLabel("一键切换分辨率")
-        resQuickBtn.toolTip = "当前分辨率：\(currentPreferences.resolutionDisplayLabel)（点击一键切换常用分辨率）"
+        resQuickBtn.setAccessibilityLabel("调整显示大小与清晰度")
+        resQuickBtn.toolTip = currentPreferences.displaySummary
         resQuickBtn.onClick = { [weak self, weak resQuickBtn] in
             guard let self, let resQuickBtn else { return }
             self.presentResolutionPresetMenu(anchor: resQuickBtn)
@@ -2476,11 +2517,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             selectedValue: currentPreferences.tabletMode ? "tablet" : "phone"
         )
         androidModeSwitch.onSelect = { [weak self] val in
-            guard let self else { return }
-            var prefs = self.currentPreferences
-            prefs.tabletMode = (val == "tablet")
-            self.currentPreferences = prefs
-            self.onUpdatePreferences?(prefs)
+            self?.selectTabletMode(val == "tablet")
         }
         rightControls.addArrangedSubview(androidModeSwitch)
 
@@ -3018,7 +3055,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         let memSub = "Macdora 与运行环境合计"
 
         let modeVal = currentPreferences.tabletMode ? "横屏布局" : "竖屏布局"
-        let modeSub = "\(currentPreferences.resolutionDisplayLabel) · \(currentPreferences.targetFPS)Hz"
+        let modeSub = "\(currentPreferences.displaySummary) · \(currentPreferences.targetFPS)Hz"
 
         row2.addArrangedSubview(makeMetricCard(label: "内存使用", value: memVal, detail: memSub))
         row2.addArrangedSubview(makeMetricCard(label: "窗口布局", value: modeVal, detail: modeSub))
@@ -3175,47 +3212,31 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             selectedValue: currentPreferences.tabletMode ? "tablet" : "phone"
         )
         modeSeg.onSelect = { [weak self] val in
-            guard let self else { return }
-            var prefs = self.currentPreferences
-            prefs.tabletMode = (val == "tablet")
-            self.currentPreferences = prefs
-            self.onUpdatePreferences?(prefs)
+            self?.selectTabletMode(val == "tablet")
+        }
+
+        let scaleSeg = TFSegmentedControl(
+            options: DisplayInterfaceScale.allCases.map {
+                .init(value: $0.rawValue, label: "\($0.title) \($0.percentage)%")
+            },
+            selectedValue: currentPreferences.interfaceScale.rawValue
+        )
+        scaleSeg.identifier = NSUserInterfaceItemIdentifier("settings-interface-scale")
+        scaleSeg.onSelect = { [weak self] raw in
+            guard let scale = DisplayInterfaceScale(rawValue: raw) else { return }
+            self?.selectInterfaceScale(scale)
         }
 
         let resSeg = TFSegmentedControl(
-            options: [
-                .init(value: "960x600", label: "紧凑大字"),
-                .init(value: "1280x800_comfortable", label: "舒适大字"),
-                .init(value: "1920x1200_hidpi", label: "高清大字"),
-                .init(value: "1080p", label: "1080p"),
-                .init(value: "1440p", label: "1440p")
-            ],
+            options: ContainerPreferences.resolutionOptions.map { .init(value: $0.preset, label: $0.shortTitle) },
             selectedValue: currentPreferences.resolutionPreset
         )
-        resSeg.onSelect = { [weak self] val in
-            guard let self else { return }
-            self.selectResolutionPreset(val)
-        }
+        resSeg.identifier = NSUserInterfaceItemIdentifier("settings-display-quality")
+        resSeg.onSelect = { [weak self] in self?.selectResolutionPreset($0) }
 
-        let currentResOption = ContainerPreferences.resolutionOption(for: currentPreferences.resolutionPreset)
-        let moreResBtn = TFButton(
-            title: "\(currentResOption.shortTitle) ▾",
-            symbolName: "aspectratio",
-            variant: .secondary,
-            size: .sm
-        )
-        moreResBtn.identifier = NSUserInterfaceItemIdentifier("settings-resolution-menu-button")
-        moreResBtn.setAccessibilityLabel("选择常用分辨率预设")
-        moreResBtn.onClick = { [weak self, weak moreResBtn] in
-            guard let self, let moreResBtn else { return }
-            self.presentResolutionPresetMenu(anchor: moreResBtn)
-        }
-
-        let resControlStack = NSStackView(views: [resSeg, moreResBtn])
-        resControlStack.orientation = .horizontal
-        resControlStack.alignment = .centerY
-        resControlStack.spacing = 8
-        resControlStack.translatesAutoresizingMaskIntoConstraints = false
+        let restoreBtn = TFButton(title: "恢复推荐", symbolName: "arrow.counterclockwise", variant: .secondary, size: .sm)
+        restoreBtn.identifier = NSUserInterfaceItemIdentifier("settings-display-restore")
+        restoreBtn.onClick = { [weak self] in self?.restoreRecommendedDisplay() }
 
         let fpsSeg = TFSegmentedControl(
             options: [
@@ -3247,13 +3268,23 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                     control: modeSeg
                 ),
                 makeSettingRow(
-                    title: "画面清晰度与字体比例",
-                    detail: "当前分辨率：\(currentPreferences.resolutionDisplayLabel) · 推荐「舒适大字」解决 OA 与微信字体过小",
-                    control: resControlStack
+                    title: "界面大小",
+                    detail: "推荐标准 100%；切换后部分应用会刷新当前页面",
+                    control: scaleSeg
+                ),
+                makeSettingRow(
+                    title: "画面清晰度",
+                    detail: "只影响精细度与资源占用，文字和按钮大小不变",
+                    control: resSeg
+                ),
+                makeSettingRow(
+                    title: "恢复推荐显示",
+                    detail: "标准 100% + 清晰；保留横竖屏方向",
+                    control: restoreBtn
                 ),
                 makeSettingRow(
                     title: "多应用独立窗口 (融合模式)",
-                    detail: "多个应用可同时在独立原生窗口中运行，每个窗口顶部均可独立调节分辨率与横竖屏",
+                    detail: "窗口顶部的显示设置仅影响当前应用",
                     control: multiWindowPill
                 ),
                 makeSettingRow(
@@ -3273,33 +3304,6 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             prefs.keepWarmInBackground = enabled
             self.currentPreferences = prefs
             self.onUpdatePreferences?(prefs)
-        }
-
-        let officeKeepAwakeToggle = TFToggleSwitch(isOn: currentOfficeKeepAwake.enabled)
-        officeKeepAwakeToggle.identifier = NSUserInterfaceItemIdentifier("office-keep-awake-toggle")
-        officeKeepAwakeToggle.setAccessibilityLabel("办公实例保持唤醒")
-        officeKeepAwakeToggle.isEnabled = !currentState.isBusy && currentOfficeKeepAwake.phase != .applying
-        officeKeepAwakeToggle.onToggle = { [weak self] enabled in
-            self?.onToggleOfficeKeepAwake?(enabled)
-        }
-        let officeKeepAwakeControl: NSView
-        if currentOfficeKeepAwake.phase == .failed {
-            let retry = TFButton(title: "重试", variant: .secondary, size: .sm)
-            retry.identifier = NSUserInterfaceItemIdentifier("office-keep-awake-retry")
-            retry.setAccessibilityLabel("重试办公实例保持唤醒设置")
-            retry.isEnabled = !currentState.isBusy
-            retry.onClick = { [weak self] in
-                guard let self else { return }
-                self.onToggleOfficeKeepAwake?(self.currentOfficeKeepAwake.enabled)
-            }
-            let controls = NSStackView(views: [retry, officeKeepAwakeToggle])
-            controls.orientation = .horizontal
-            controls.alignment = .centerY
-            controls.spacing = 8
-            controls.translatesAutoresizingMaskIntoConstraints = false
-            officeKeepAwakeControl = controls
-        } else {
-            officeKeepAwakeControl = officeKeepAwakeToggle
         }
 
         let imeToggle = TFToggleSwitch(isOn: currentPreferences.directIMEEnabled)
@@ -3333,11 +3337,6 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                     title: "后台常驻",
                     detail: "关闭窗口后保持运行，下次打开更快",
                     control: keepWarmToggle
-                ),
-                makeSettingRow(
-                    title: "办公实例保持唤醒",
-                    detail: currentOfficeKeepAwake.detail,
-                    control: officeKeepAwakeControl
                 ),
                 makeSettingRow(
                     title: "原生中文输入",
@@ -3858,27 +3857,70 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         rebuildPageContent()
     }
 
-    private func presentResolutionPresetMenu(anchor: NSView) {
-        let menu = NSMenu(title: "选择分辨率")
-        for option in ContainerPreferences.resolutionOptions {
-            let item = NSMenuItem(
-                title: option.menuTitle(tabletMode: currentPreferences.tabletMode),
-                action: #selector(handleResolutionMenuItem(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = option.preset
-            item.toolTip = option.subtitle
-            item.state = (option.preset == currentPreferences.resolutionPreset) ? .on : .off
-            menu.addItem(item)
+    func selectInterfaceScale(_ scale: DisplayInterfaceScale) {
+        guard scale != currentPreferences.interfaceScale else { return }
+        confirmDisplayLayoutChange { [weak self] in
+            guard let self else { return }
+            var prefs = self.currentPreferences
+            prefs.interfaceScale = scale
+            self.currentPreferences = prefs
+            self.onUpdatePreferences?(prefs)
+            self.rebuildPageContent()
         }
-        let location = NSPoint(x: 0, y: anchor.bounds.height + 4)
-        menu.popUp(positioning: nil, at: location, in: anchor)
     }
 
-    @objc private func handleResolutionMenuItem(_ sender: NSMenuItem) {
-        guard let preset = sender.representedObject as? String else { return }
-        selectResolutionPreset(preset)
+    func selectTabletMode(_ tabletMode: Bool) {
+        guard tabletMode != currentPreferences.tabletMode else { return }
+        confirmDisplayLayoutChange { [weak self] in
+            guard let self else { return }
+            var prefs = self.currentPreferences
+            prefs.tabletMode = tabletMode
+            self.currentPreferences = prefs
+            self.onUpdatePreferences?(prefs)
+            self.rebuildPageContent()
+        }
+    }
+
+    private func confirmDisplayLayoutChange(_ apply: @escaping () -> Void) {
+        guard currentState == .running, !activePackages.isEmpty else { apply(); return }
+        DisplaySettingsConfirmation.present(on: window) { [weak self] confirmed in
+            if confirmed { apply() }
+            else { self?.rebuildPageContent() }
+        }
+    }
+
+    func restoreRecommendedDisplay() {
+        let apply = { [weak self] in
+            guard let self else { return }
+            var prefs = self.currentPreferences
+            prefs.restoreRecommendedDisplay()
+            for package in self.activePackages {
+                var preference = prefs.displayPreference(for: package)
+                preference.resolutionPreset = "1080p"
+                preference.interfaceScale = .standard
+                prefs.appDisplayOverrides[package] = preference
+            }
+            self.currentPreferences = prefs
+            self.onUpdatePreferences?(prefs)
+            self.rebuildPageContent()
+        }
+        let changesSize = activePackages.contains {
+            currentPreferences.displayPreference(for: $0).interfaceScale != .standard
+        }
+        if changesSize { confirmDisplayLayoutChange(apply) }
+        else { apply() }
+    }
+
+    private func presentResolutionPresetMenu(anchor: NSView) {
+        let preference = currentPreferences.displayPreference(for: nil)
+        let menu = DisplaySettingsMenu(
+            preference: preference,
+            scope: "默认显示 · 同时应用于已打开的窗口",
+            onResolution: { [weak self] in self?.selectResolutionPreset($0) },
+            onScale: { [weak self] in self?.selectInterfaceScale($0) },
+            onRestore: { [weak self] in self?.restoreRecommendedDisplay() }
+        )
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
     }
 
     private func makeStatusPill(text: String, tone: PillTone) -> NSView {
@@ -3916,6 +3958,93 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     }
 }
 
+@MainActor
+private enum DisplaySettingsConfirmation {
+    static func present(on window: NSWindow?, completion: @escaping (Bool) -> Void) {
+        guard let window, window.attachedSheet == nil else { completion(false); return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "调整显示前，请先保存内容"
+        alert.informativeText = "部分应用会重新加载当前页面，未保存内容可能丢失。确认已保存后再继续。"
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "仍然调整")
+        alert.beginSheetModal(for: window) { response in
+            completion(response == .alertSecondButtonReturn)
+        }
+    }
+}
+
+@MainActor
+final class DisplaySettingsMenu: NSMenu {
+    private let onResolution: (String) -> Void
+    private let onScale: (DisplayInterfaceScale) -> Void
+    private let onRestore: () -> Void
+
+    init(
+        preference: AppDisplayPreference,
+        scope: String,
+        onResolution: @escaping (String) -> Void,
+        onScale: @escaping (DisplayInterfaceScale) -> Void,
+        onRestore: @escaping () -> Void
+    ) {
+        self.onResolution = onResolution
+        self.onScale = onScale
+        self.onRestore = onRestore
+        super.init(title: "显示设置")
+        autoenablesItems = false
+        addHeading(scope)
+        addItem(.separator())
+        addHeading("界面大小 · 部分应用会刷新当前页面")
+        for scale in DisplayInterfaceScale.allCases {
+            let effect: String
+            switch scale {
+            case .small: effect = "显示更多内容"
+            case .standard: effect = "推荐"
+            case .large: effect = "文字与按钮更大"
+            }
+            let item = NSMenuItem(title: "\(scale.title) \(scale.percentage)% · \(effect)", action: #selector(selectScale(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = scale.rawValue
+            item.state = preference.interfaceScale == scale ? .on : .off
+            addItem(item)
+        }
+        addItem(.separator())
+        addHeading("画面清晰度 · 保持相同界面大小")
+        for option in ContainerPreferences.resolutionOptions {
+            let item = NSMenuItem(title: option.menuTitle(tabletMode: preference.tabletMode, interfaceScale: preference.interfaceScale), action: #selector(selectResolution(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = option.preset
+            item.toolTip = option.subtitle
+            item.state = preference.resolutionPreset == option.preset ? .on : .off
+            addItem(item)
+        }
+        addItem(.separator())
+        let restore = NSMenuItem(title: "恢复推荐 · 标准 100% + 清晰", action: #selector(restoreRecommended), keyEquivalent: "")
+        restore.target = self
+        addItem(restore)
+    }
+
+    required init(coder: NSCoder) { fatalError("DisplaySettingsMenu 仅支持程序化创建") }
+
+    private func addHeading(_ title: String) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        addItem(item)
+    }
+
+    @objc private func selectScale(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let scale = DisplayInterfaceScale(rawValue: raw) else { return }
+        onScale(scale)
+    }
+
+    @objc private func selectResolution(_ sender: NSMenuItem) {
+        guard let preset = sender.representedObject as? String else { return }
+        onResolution(preset)
+    }
+
+    @objc private func restoreRecommended() { onRestore() }
+}
+
 // MARK: - ApplicationWindow (Proportional Edge Resize + Miniaturize on Close + Tablet Mode)
 
 @MainActor
@@ -3927,11 +4056,14 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
     var onBack: (() -> Void)?
     var onToggleTabletMode: (() -> Void)?
     var onSelectResolutionPreset: ((String) -> Void)?
+    var onSelectInterfaceScale: ((DisplayInterfaceScale) -> Void)?
+    var onRestoreRecommendedDisplay: (() -> Void)?
 
     private static let toolbarHeight: CGFloat = 38
     private var allowExplicitClose = false
     private(set) var isHorizontalLayout = true
     private(set) var currentResolutionPreset: String = ContainerPreferences.default.resolutionPreset
+    private(set) var currentInterfaceScale: DisplayInterfaceScale = .standard
     private var lockedAspectRatio: CGFloat
 
     private let overlay = TFCardView(frame: .zero)
@@ -4047,57 +4179,87 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
         win.contentMaxSize = NSSize(width: maxHeight * lockedAspectRatio, height: maxHeight)
     }
 
-    func applyDisplayMode(tabletMode: Bool, preferredPixelSize: CGSize, resolutionPreset: String? = nil) {
+    func applyDisplayMode(tabletMode: Bool, preferredPixelSize: CGSize, resolutionPreset: String? = nil, interfaceScale: DisplayInterfaceScale? = nil) {
         let modeChanged = (isHorizontalLayout != tabletMode)
-        let presetChanged = (resolutionPreset != nil && resolutionPreset != currentResolutionPreset)
         isHorizontalLayout = tabletMode
         if let resolutionPreset {
             currentResolutionPreset = ContainerPreferences.resolutionOption(for: resolutionPreset).preset
         }
+        if let interfaceScale { currentInterfaceScale = interfaceScale }
         let option = ContainerPreferences.resolutionOption(for: currentResolutionPreset)
-        resolutionSwitchButton?.title = option.shortTitle
-        resolutionSwitchButton?.toolTip = "当前分辨率：\(ContainerPreferences.displayLabel(for: currentResolutionPreset, tabletMode: tabletMode))（点击一键切换）"
-        modeSwitchButton?.title = tabletMode ? "切换竖屏" : "切换横屏"
+        resolutionSwitchButton?.title = "显示 ▾"
+        resolutionSwitchButton?.toolTip = "仅当前应用 · 界面\(currentInterfaceScale.title) \(currentInterfaceScale.percentage)% · \(option.shortTitle)"
         modeSwitchButton?.symbolName = tabletMode ? "ipad.landscape" : "iphone"
+        modeSwitchButton?.toolTip = tabletMode ? "切换为竖屏" : "切换为横屏"
+        modeSwitchButton?.setAccessibilityLabel(tabletMode ? "切换竖屏" : "切换横屏")
         if preferredPixelSize.width > 0, preferredPixelSize.height > 0 {
             surface.pixelSize = preferredPixelSize
-            syncToPixelSize(preferredPixelSize, resetDefaultHeight: modeChanged || presetChanged)
+            syncToPixelSize(preferredPixelSize, resetDefaultHeight: modeChanged)
         }
     }
 
     func selectResolutionPreset(_ preset: String) {
         let option = ContainerPreferences.resolutionOption(for: preset)
-        let targetPixels = option.pixelSize(tabletMode: isHorizontalLayout)
+        let targetPixels = ContainerPreferences.pixelSize(for: option.preset, tabletMode: isHorizontalLayout, interfaceScale: currentInterfaceScale)
         applyDisplayMode(
             tabletMode: isHorizontalLayout,
-            preferredPixelSize: targetPixels,
+            preferredPixelSize: onSelectResolutionPreset == nil ? targetPixels : surface.pixelSize,
             resolutionPreset: option.preset
         )
         onSelectResolutionPreset?(option.preset)
     }
 
-    private func presentResolutionMenu() {
-        guard let anchor = resolutionSwitchButton else { return }
-        let menu = NSMenu(title: "选择分辨率")
-        for option in ContainerPreferences.resolutionOptions {
-            let item = NSMenuItem(
-                title: option.menuTitle(tabletMode: isHorizontalLayout),
-                action: #selector(handleWindowResolutionMenuItem(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = option.preset
-            item.toolTip = option.subtitle
-            item.state = (option.preset == currentResolutionPreset) ? .on : .off
-            menu.addItem(item)
+    func selectInterfaceScale(_ scale: DisplayInterfaceScale) {
+        guard scale != currentInterfaceScale else { return }
+        confirmDisplayLayoutChange { [weak self] in
+            guard let self else { return }
+            self.applyDisplayMode(tabletMode: self.isHorizontalLayout, preferredPixelSize: self.surface.pixelSize, interfaceScale: scale)
+            self.onSelectInterfaceScale?(scale)
         }
-        let location = NSPoint(x: 0, y: anchor.bounds.height + 4)
-        menu.popUp(positioning: nil, at: location, in: anchor)
     }
 
-    @objc private func handleWindowResolutionMenuItem(_ sender: NSMenuItem) {
-        guard let preset = sender.representedObject as? String else { return }
-        selectResolutionPreset(preset)
+    func requestOrientationChange() {
+        confirmDisplayLayoutChange { [weak self] in self?.onToggleTabletMode?() }
+    }
+
+    private func confirmDisplayLayoutChange(_ apply: @escaping () -> Void) {
+        guard overlay.isHidden, surface.videoVisible else { apply(); return }
+        DisplaySettingsConfirmation.present(on: window) { confirmed in
+            if confirmed { apply() }
+        }
+    }
+
+    func restoreRecommendedDisplay() {
+        let apply = { [weak self] in
+            guard let self else { return }
+            self.applyDisplayMode(
+                tabletMode: self.isHorizontalLayout,
+                preferredPixelSize: self.onRestoreRecommendedDisplay == nil
+                    ? ContainerPreferences.pixelSize(for: "1080p", tabletMode: self.isHorizontalLayout)
+                    : self.surface.pixelSize,
+                resolutionPreset: "1080p",
+                interfaceScale: .standard
+            )
+            self.onRestoreRecommendedDisplay?()
+        }
+        if currentInterfaceScale != .standard { confirmDisplayLayoutChange(apply) }
+        else { apply() }
+    }
+
+    func makeDisplaySettingsMenu() -> DisplaySettingsMenu {
+        DisplaySettingsMenu(
+            preference: AppDisplayPreference(resolutionPreset: currentResolutionPreset, tabletMode: isHorizontalLayout, interfaceScale: currentInterfaceScale),
+            scope: "仅当前应用",
+            onResolution: { [weak self] in self?.selectResolutionPreset($0) },
+            onScale: { [weak self] in self?.selectInterfaceScale($0) },
+            onRestore: { [weak self] in self?.restoreRecommendedDisplay() }
+        )
+    }
+
+    private func presentResolutionMenu() {
+        guard let anchor = resolutionSwitchButton else { return }
+        let menu = makeDisplaySettingsMenu()
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
     }
 
     func syncToPixelSize(_ size: CGSize, resetDefaultHeight: Bool = false) {
@@ -4175,6 +4337,7 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
         topBar.addSubview(topBarSep)
 
         let backBtn = TFButton(title: "返回", symbolName: "chevron.left", variant: .subtle, size: .sm)
+        backBtn.identifier = NSUserInterfaceItemIdentifier("app-window-back")
         backBtn.onClick = { [weak self] in self?.onBack?() }
         topBar.addSubview(backBtn)
 
@@ -4202,28 +4365,34 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
         rightStack.translatesAutoresizingMaskIntoConstraints = false
         topBar.addSubview(rightStack)
 
-        let initialOption = ContainerPreferences.resolutionOption(for: currentResolutionPreset)
         resolutionSwitchButton = TFButton(
-            title: initialOption.shortTitle,
+            title: "显示 ▾",
             symbolName: nil,
             variant: .subtle,
             size: .sm
         )
         resolutionSwitchButton.identifier = NSUserInterfaceItemIdentifier("app-window-resolution-switch")
-        resolutionSwitchButton.setAccessibilityLabel("切换分辨率")
-        resolutionSwitchButton.toolTip = "一键切换分辨率与字体缩放比例"
+        resolutionSwitchButton.setAccessibilityLabel("调整当前应用显示")
+        resolutionSwitchButton.toolTip = "界面大小与画面清晰度独立调节"
         resolutionSwitchButton.onClick = { [weak self] in self?.presentResolutionMenu() }
         rightStack.addArrangedSubview(resolutionSwitchButton)
 
-        modeSwitchButton = TFButton(title: "切换竖屏", symbolName: "ipad.landscape", variant: .subtle, size: .sm)
-        modeSwitchButton.onClick = { [weak self] in self?.onToggleTabletMode?() }
+        modeSwitchButton = TFButton(title: "", symbolName: "ipad.landscape", variant: .subtle, size: .sm)
+        modeSwitchButton.identifier = NSUserInterfaceItemIdentifier("app-window-orientation")
+        modeSwitchButton.setAccessibilityLabel("切换竖屏")
+        modeSwitchButton.toolTip = "切换为竖屏"
+        modeSwitchButton.onClick = { [weak self] in self?.requestOrientationChange() }
         rightStack.addArrangedSubview(modeSwitchButton)
 
-        let mgrBtn = TFButton(title: "管理台", variant: .subtle, size: .sm)
+        let mgrBtn = TFButton(title: "", symbolName: "square.grid.2x2", variant: .subtle, size: .sm)
+        mgrBtn.setAccessibilityLabel("打开管理台")
+        mgrBtn.toolTip = "打开管理台"
         mgrBtn.onClick = { [weak self] in self?.onManagement?() }
         rightStack.addArrangedSubview(mgrBtn)
 
-        explicitCloseButton = TFButton(title: "关闭", variant: .ghost, size: .sm)
+        explicitCloseButton = TFButton(title: "", symbolName: "xmark", variant: .ghost, size: .sm)
+        explicitCloseButton.setAccessibilityLabel("关闭当前应用窗口")
+        explicitCloseButton.toolTip = "关闭当前应用窗口"
         explicitCloseButton.onClick = { [weak self] in self?.performExplicitClose() }
         rightStack.addArrangedSubview(explicitCloseButton)
 
@@ -4283,6 +4452,7 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
 
             toolbarTitleLabel.leadingAnchor.constraint(equalTo: backBtn.trailingAnchor, constant: 10),
             toolbarTitleLabel.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
+            toolbarTitleLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
 
             fpsBadgeCard.leadingAnchor.constraint(equalTo: toolbarTitleLabel.trailingAnchor, constant: 8),
             fpsBadgeCard.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
@@ -4293,11 +4463,7 @@ final class ApplicationWindow: NSWindowController, NSWindowDelegate {
 
             rightStack.trailingAnchor.constraint(equalTo: topBar.trailingAnchor, constant: -10),
             rightStack.centerYAnchor.constraint(equalTo: topBar.centerYAnchor),
-            {
-                let c = rightStack.leadingAnchor.constraint(greaterThanOrEqualTo: fpsBadgeCard.trailingAnchor, constant: 6)
-                c.priority = NSLayoutConstraint.Priority(40)
-                return c
-            }(),
+            rightStack.leadingAnchor.constraint(greaterThanOrEqualTo: fpsBadgeCard.trailingAnchor, constant: 6),
 
             surface.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             surface.trailingAnchor.constraint(equalTo: root.trailingAnchor),

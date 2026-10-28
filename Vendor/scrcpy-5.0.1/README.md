@@ -1,4 +1,4 @@
-# AndroidUse ordered-touch scrcpy server patch
+# AndroidUse ordered-touch and display-reconfiguration scrcpy server patch
 
 This directory contains the minimal Android server-side delta used by the
 native AndroidUse client. The unmodified upstream inputs are kept outside the
@@ -19,7 +19,8 @@ tracked tree:
 
 `scripts/build_without_gradle.sh` is an unmodified copy of the upstream manual
 compiler. `ordered-touch.patch` applies with `patch --fuzz=0` to a fresh copy of
-the upstream `server/src` tree. `SHA256SUMS` pins every patched input.
+the upstream `server/src` tree and also contains the display-reconfiguration
+delta. `SHA256SUMS` pins every patched input.
 
 The server version remains `5.0.1` for protocol compatibility. The manifest
 records the patch identity and patch digest.
@@ -42,6 +43,33 @@ records the patch identity and patch digest.
 An upstream v5.0.1 server rejects unknown control type 128, so this client
 cannot silently fall back to an ordered-touch claim with the stock server.
 
+### In-place display configuration
+
+- Client to device: `129` (`u8`) + `sequence` (`u32`, big endian) +
+  `nativeWidth` (`u32`) + `nativeHeight` (`u32`) + `density` (`u32`) +
+  `maxSize` (`u32`) + `maxFPS` (`u32`), exactly 25 bytes.
+- Width and height must be between 320 and 4096 inclusive. Density must be 320
+  or 400, max size must be 1280, 1920 or 2560, and max FPS must be 30, 45 or 60.
+- Device to client: `4` (`u8`) + `sequence` (`u32`, big endian) + `status`
+  (`u8`, 0 success, 1 failure), exactly 6 bytes.
+- The existing virtual display is resized with `VirtualDisplay.resize()`. Its
+  display id is retained, and the display, touch mapper, focus lease and other
+  displays are not recreated. Macdora keeps density at 320, so `maxSize` and
+  `maxFPS` changes keep the Activity and unsaved input. A size change is an
+  Android configuration change: Activities that do not handle `screenSize`,
+  `smallestScreenSize` or, for a 640dp-wide display, `screenLayout` may still
+  be relaunched by Android.
+- `maxSize` controls the encoder output independently from the native display
+  size. `maxFPS` is applied to a fresh encoder format, including the operating
+  rate and `max-fps-to-encoder`.
+- DisplayManager must publish the requested size and density before capture
+  is reconfigured. Success is reported only after MediaCodec starts and the new
+  video-session metadata has been written; the host also waits for matching
+  video metadata before enabling input. The device timeout is 5 seconds; a replacement or
+  stopped request completes the superseded request with failure. The encoder
+  polls for output every 100 ms and checks reset/shutdown before waiting again,
+  because some codecs do not report EOS after a surface reset.
+
 ## Build
 
 Run from the repository root:
@@ -52,8 +80,8 @@ scripts/build-ordered-server.sh
 
 The output is `.build/scrcpy-ordered/scrcpy-server`. The script creates a
 clean source copy under `.build/scrcpy-ordered`, applies the patch without
-fuzzing, runs focused protocol and touch-order tests, invokes the upstream
-manual compiler, and verifies the resulting DEX.
+fuzzing, runs focused protocol, display-reconfiguration and touch-order tests,
+invokes the upstream manual compiler, and verifies the resulting DEX.
 
 The build uses the official Android SDK Platform 36 r02 archive and macOS
 Build-Tools 36 macOS archive, checked against the Android repository SHA-1:
@@ -77,6 +105,6 @@ the fixed URL when absent:
 The pinned source files are recorded in `SHA256SUMS`. The patched source tree,
 SDK cache, and binary are build artifacts and are excluded from version
 control. The current reproducible output digest is
-`0f69641a17d9e6aa2f5ea065523a08d1ce5d6a6ced873fc99399dd5b72869519`.
+`fd27be5fd66d9fb6e663e04b91e94c918f3e820592a7f0d6521f0323f22c44b8`.
 
 Licensed under Apache License 2.0. See `LICENSE`.
