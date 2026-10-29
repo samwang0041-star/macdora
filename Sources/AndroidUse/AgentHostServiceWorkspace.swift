@@ -39,6 +39,7 @@ final class HostServiceAgentWorkspaceController {
     #endif
 
     var onDisplayChanged: ((Display) -> Void)?
+    var usesCopyTokenAuthorization: Bool { plugin.manifest.usesCopyTokenAuthorization }
 
     init(
         plugin: HostServiceSystemPlugin,
@@ -149,6 +150,13 @@ final class HostServiceAgentWorkspaceController {
         guard let status else {
             return storedManualIntent ? "需要你操作" : "确认托管中"
         }
+        if usesCopyTokenAuthorization, !storedManualIntent, !status.manual,
+           status.state == .recovering, status.errorCode == nil {
+            return "准备中"
+        }
+        if usesCopyTokenAuthorization, status.state == .waitingForLogin {
+            return "需要登录"
+        }
         if status.errorCode != nil
             || status.state == .needsAttention
             || status.state == .recovering {
@@ -171,6 +179,7 @@ final class HostServiceAgentWorkspaceController {
         if !storedManualIntent {
             return .revoke
         }
+        if usesCopyTokenAuthorization { return nil }
         if isSubmitting || activePrimaryAction != nil { return nil }
         guard !isRefreshing,
               !isPreparing,
@@ -203,6 +212,7 @@ final class HostServiceAgentWorkspaceController {
     }
 
     var canTestConnection: Bool {
+        if usesCopyTokenAuthorization { return false }
         if candidateStatus?.manual == false || !storedManualIntent {
             return false
         }
@@ -231,6 +241,19 @@ final class HostServiceAgentWorkspaceController {
             return storedManualIntent ? "连接检查未完成" : "托管状态待确认"
         case .available(let status):
             guard self.status != nil else { return "连接状态待确认" }
+            if usesCopyTokenAuthorization {
+                if storedManualIntent { return "由你操作" }
+                if status.errorCode == .permissionDenied { return "接入受限" }
+                if status.state == .waitingForLogin { return "需要登录" }
+                if status.manual { return "接入待恢复" }
+                if status.errorCode != nil { return "已授权，等待业务恢复" }
+                if status.taskRunning { return "Agent 正在处理" }
+                if !status.agentConnected { return "已授权，待接入" }
+                if !status.businessReady {
+                    return status.state == .recovering ? "正在准备" : "已授权，待处理"
+                }
+                return "Agent 已就绪"
+            }
             return Self.statusText(for: status, effectiveManual: effectiveManualIntent)
         }
     }
@@ -253,6 +276,20 @@ final class HostServiceAgentWorkspaceController {
                     ? "已保存手动状态；运行实例已改变，请重新检查连接。"
                     : "运行实例已改变；点「我来操作」可立即保存手动状态。"
             }
+            if usesCopyTokenAuthorization {
+                if storedManualIntent { return "点「复制给 Agent」即可授权只读访问。" }
+                if status.errorCode == .permissionDenied {
+                    return "无法验证运行环境，请检查系统权限或插件状态。你可随时点「我来操作」。"
+                }
+                if status.state == .waitingForLogin {
+                    return "登录对应应用后可继续。你可随时点「我来操作」。"
+                }
+                if status.manual {
+                    return "请确认对应应用已登录；若仍无法接入，可重新复制。你可随时点「我来操作」。"
+                }
+                if status.errorCode != nil { return "授权仍有效；业务恢复后自动继续。你可随时点「我来操作」。" }
+                return "只读授权已保存，你可随时点「我来操作」接回控制。"
+            }
             return Self.detailText(
                 for: status,
                 effectiveManual: effectiveManualIntent
@@ -261,7 +298,9 @@ final class HostServiceAgentWorkspaceController {
     }
 
     var workflowText: String {
-        "复制接入说明发给自己的 Agent，由它完成配置并引导你确认授权。"
+        usesCopyTokenAuthorization
+            ? "复制即授权只读访问，将接入内容发给你的 Agent。"
+            : "复制接入说明发给自己的 Agent，由它完成配置并引导你确认授权。"
     }
 
     var scopeText: String {
@@ -312,10 +351,11 @@ final class HostServiceAgentWorkspaceController {
             display = .failed("运行实例已改变，请重新检查连接。")
         }
         notify()
-        if awaitsRuntimeContextRefresh,
+        let needsRecoveryRefresh = usesCopyTokenAuthorization && !storedManualIntent
+            && (status == nil || status?.manual == true)
+        if ((awaitsRuntimeContextRefresh && status == nil) || needsRecoveryRefresh),
            currentInstanceID != nil,
            viewIsLoaded,
-           status == nil,
            activeRefresh == nil,
            activeAction == nil,
            !isSubmitting,
@@ -380,6 +420,90 @@ final class HostServiceAgentWorkspaceController {
             instructions: plugin.manifest.agentInstructions,
             configuration: data
         )
+    }
+
+    func copyAgentHandoff(
+        writeToClipboard: (String) -> Bool = { text in
+            NSPasteboard.general.clearContents()
+            return NSPasteboard.general.setString(text, forType: .string)
+        }
+    ) async throws {
+        guard canExportConfiguration else { throw HostServiceAgentFailure.unavailable }
+        if !usesCopyTokenAuthorization {
+            let text = try await agentHandoffText()
+            guard writeToClipboard(text) else { throw HostServiceAgentFailure.unavailable }
+            return
+        }
+        guard let context = plugin.agentRuntimeContext() else { throw HostServiceAgentFailure.unavailable }
+        let expected = try plugin.agentControlStore.reload()
+        invalidateRefresh()
+        let actionID = UUID()
+        actionToken = actionID
+        isSubmitting = true
+        notify()
+        defer { clearAction(token: actionID) }
+
+        guard await context.securityStateCheck.validate(), actionToken == actionID,
+              plugin.agentRuntimeContext()?.instanceID == context.instanceID else {
+            throw HostServiceAgentFailure.stale
+        }
+        _ = try HostServiceEndpointReader.read(at: context.configuration.endpointURL,
+            expected: context.configuration.endpoint)
+        let credential = HostServiceAgentCopyToken.generate()
+        let data = try HostServiceAgentMCPConfiguration.data(pluginID: pluginID,
+            agentExecutableURL: plugin.agentMCPExecutableURL,
+            endpointURL: context.configuration.endpointURL, token: credential.value)
+        let text = try HostServiceAgentMCPConfiguration.handoff(
+            instructions: plugin.manifest.agentInstructions, configuration: data)
+        guard writeToClipboard(text) else { throw HostServiceAgentFailure.unavailable }
+        guard actionToken == actionID,
+              let record = try plugin.agentControlStore.authorizeCopy(ifUnchanged: expected,
+                instanceID: context.instanceID, tokenDigest: credential.digest) else {
+            throw HostServiceAgentFailure.stale
+        }
+        storedManualIntent = false
+        notify()
+        let result = await rpcClient.authorize(context: context, record: record)
+        let securityValid = await context.securityStateCheck.validate()
+        if actionToken == actionID, securityValid,
+           plugin.agentRuntimeContext()?.instanceID == context.instanceID,
+           (try? plugin.agentControlStore.reload()) == record {
+            switch result {
+            case .success(let response) where response.pluginId == pluginID
+                && response.instanceId == context.instanceID && !response.manual:
+                lastStatus = response
+                lastFailure = nil
+                display = .available(response)
+                return
+            case .failure(let failure):
+                let waitingForLogin = failure == .server(.loginRequired)
+                if waitingForLogin || failure == .server(.businessNotReady)
+                    || failure == .server(.recoveryRequired) || failure == .busy {
+                    let pending = HostServiceAgentStatus(pluginId: pluginID,
+                        instanceId: context.instanceID,
+                        state: waitingForLogin ? .waitingForLogin : .recovering,
+                        agentConnected: false, businessReady: false, taskRunning: false,
+                        manual: true, errorCode: waitingForLogin ? .loginRequired : .businessNotReady)
+                    lastStatus = pending
+                    lastFailure = nil
+                    display = .available(pending)
+                    plugin.scheduleAgentAuthorizationRestore()
+                    return
+                }
+            default:
+                break
+            }
+        }
+        // An uncertain response never leaves a newly issued credential usable.
+        // CAS preserves any newer copy or manual action, including an offline withdrawal.
+        _ = try? plugin.agentControlStore.compareAndSetManual(
+            expectedGeneration: record.generation, manual: true)
+        if actionToken == actionID {
+            reloadPersistedManual()
+            lastStatus = nil
+            display = .failed("接入未完成，请重新复制。")
+        }
+        throw HostServiceAgentFailure.stale
     }
 
     private func reloadPersistedManual() {
@@ -1271,8 +1395,13 @@ final class HostServiceAgentWorkspaceView: NSView {
             : nil
 
         testButton.isEnabled = controller.canTestConnection
+        testButton.isHidden = controller.usesCopyTokenAuthorization
+        primaryButton.isHidden = controller.usesCopyTokenAuthorization && controller.primaryAction == nil
         testButton.title = controller.isPreparing ? "正在测试…" : "测试连接"
         exportButton.isEnabled = controller.canExportConfiguration
+        exportButton.variant = controller.usesCopyTokenAuthorization ? .primary : .subtle
+        exportButton.toolTip = controller.usesCopyTokenAuthorization
+            ? "复制即授予只读访问；重新复制会使旧接入凭据失效" : nil
 
         if case .failed(let message) = controller.display {
             statusLabel.textColor = TFTheme.danger
@@ -1327,12 +1456,7 @@ final class HostServiceAgentWorkspaceView: NSView {
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let string = try await self.controller.agentHandoffText()
-                NSPasteboard.general.clearContents()
-                guard NSPasteboard.general.setString(string, forType: .string) else {
-                    self.showCopyFailure()
-                    return
-                }
+                try await self.controller.copyAgentHandoff()
                 self.showCopyConfirmation()
             } catch {
                 self.showCopyFailure()

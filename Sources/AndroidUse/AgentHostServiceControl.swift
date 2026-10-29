@@ -10,24 +10,28 @@ struct HostServiceAgentControlRecord: Codable, Equatable, Sendable {
     var pluginId: String
     var generation: UUID
     var manual: Bool
+    var authorization: HostServiceAgentCopyAuthorization? = nil
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion
         case pluginId
         case generation
         case manual
+        case authorization
     }
 
     init(
         schemaVersion: Int,
         pluginId: String,
         generation: UUID,
-        manual: Bool
+        manual: Bool,
+        authorization: HostServiceAgentCopyAuthorization? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.pluginId = pluginId
         self.generation = generation
         self.manual = manual
+        self.authorization = authorization
     }
 
     init(from decoder: Decoder) throws {
@@ -44,6 +48,7 @@ struct HostServiceAgentControlRecord: Codable, Equatable, Sendable {
         }
         generation = decodedGeneration
         manual = try container.decode(Bool.self, forKey: .manual)
+        authorization = try container.decodeIfPresent(HostServiceAgentCopyAuthorization.self, forKey: .authorization)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -52,6 +57,7 @@ struct HostServiceAgentControlRecord: Codable, Equatable, Sendable {
         try container.encode(pluginId, forKey: .pluginId)
         try container.encode(generation.uuidString.lowercased(), forKey: .generation)
         try container.encode(manual, forKey: .manual)
+        try container.encodeIfPresent(authorization, forKey: .authorization)
     }
 }
 
@@ -132,6 +138,53 @@ struct HostServiceAgentControlStore: Sendable {
             try ensureDirectory()
             guard expected.manual, try loadIfPresent() == expected else { return nil }
             return try writeNewManualState(false)
+        }
+    }
+
+    func authorizeCopy(
+        ifUnchanged expected: HostServiceAgentControlRecord,
+        instanceID: UUID,
+        tokenDigest: String
+    ) throws -> HostServiceAgentControlRecord? {
+        let authorization = HostServiceAgentCopyAuthorization(
+            instanceId: instanceID, tokenSHA256: tokenDigest
+        )
+        guard authorization.isValid else {
+            throw HostServiceAgentControlStoreError.invalidRecord
+        }
+        return try withControlLock {
+            try ensureDirectory()
+            guard try loadIfPresent() == expected else { return nil }
+            let record = HostServiceAgentControlRecord(
+                schemaVersion: 2, pluginId: pluginID, generation: UUID(), manual: false,
+                authorization: authorization
+            )
+            try write(record)
+            return record
+        }
+    }
+
+    /// Rebind an existing local copy grant without creating a new credential.
+    /// A newer copy or manual withdrawal always wins the compare-and-set.
+    func rebindCopyAuthorization(
+        ifUnchanged expected: HostServiceAgentControlRecord,
+        toInstance instanceID: UUID
+    ) throws -> HostServiceAgentControlRecord? {
+        try withControlLock {
+            try ensureDirectory()
+            guard try loadIfPresent() == expected,
+                  expected.schemaVersion == 2, !expected.manual,
+                  var authorization = expected.authorization, authorization.isValid else {
+                return nil
+            }
+            if authorization.instanceId == instanceID { return expected }
+            authorization.instanceId = instanceID
+            let rebound = HostServiceAgentControlRecord(
+                schemaVersion: 2, pluginId: pluginID, generation: UUID(), manual: false,
+                authorization: authorization
+            )
+            try write(rebound)
+            return rebound
         }
     }
 
@@ -301,8 +354,9 @@ struct HostServiceAgentControlStore: Sendable {
             HostServiceAgentControlRecord.self,
             from: data
         ),
-        record.schemaVersion == HostServiceAgentControlRecord.schemaVersion,
-        record.pluginId == pluginID else {
+        record.pluginId == pluginID,
+        (record.schemaVersion == 1 && record.authorization == nil
+            || record.schemaVersion == 2 && !record.manual && record.authorization?.isValid == true) else {
             throw HostServiceAgentControlStoreError.invalidRecord
         }
         return record
@@ -340,8 +394,9 @@ struct HostServiceAgentControlStore: Sendable {
     }
 
     private func write(_ record: HostServiceAgentControlRecord) throws {
-        guard record.schemaVersion == HostServiceAgentControlRecord.schemaVersion,
-              record.pluginId == pluginID else {
+        guard record.pluginId == pluginID,
+              (record.schemaVersion == 1 && record.authorization == nil
+                || record.schemaVersion == 2 && !record.manual && record.authorization?.isValid == true) else {
             throw HostServiceAgentControlStoreError.invalidRecord
         }
         // Existing unsafe paths are rejected, while a safe malformed file may be
@@ -628,7 +683,8 @@ enum HostServiceAgentWire {
         requestID: Int,
         instanceID: UUID,
         generation: UUID? = nil,
-        consumerId: UUID? = nil
+        consumerId: UUID? = nil,
+        authorization: HostServiceAgentCopyAuthorization? = nil
     ) -> [String: Any] {
         var params: [String: Any] = [
             instanceIdKey: canonicalInstanceId(instanceID)
@@ -646,6 +702,12 @@ enum HostServiceAgentWire {
         case .revoke:
             if let generation {
                 params[generationKey] = canonicalGeneration(generation)
+            }
+        case .authorize:
+            if let generation { params[generationKey] = canonicalGeneration(generation) }
+            if let authorization {
+                params["tokenSHA256"] = authorization.tokenSHA256
+                params["scope"] = authorization.scope
             }
         }
         return [
@@ -826,6 +888,7 @@ enum HostServiceAgentControlMethod: String, Sendable {
     case prepare = "macdora.agent.prepare"
     case grant = "macdora.agent.grant"
     case revoke = "macdora.agent.revoke"
+    case authorize = "macdora.agent.authorize"
 }
 
 struct HostServiceAgentWireFixture: Codable, Equatable, Sendable {
@@ -871,6 +934,10 @@ enum HostServiceAgentSocketTestSupport {
 }
 
 protocol HostServiceAgentRPCPerforming: Sendable {
+    func authorize(
+        context: HostServiceAgentRuntimeContext,
+        record: HostServiceAgentControlRecord
+    ) async -> Result<HostServiceAgentStatus, HostServiceAgentFailure>
     func request(
         _ method: HostServiceAgentControlMethod,
         context: HostServiceAgentRuntimeContext,
@@ -879,9 +946,33 @@ protocol HostServiceAgentRPCPerforming: Sendable {
     ) async -> Result<HostServiceAgentStatus, HostServiceAgentFailure>
 }
 
+extension HostServiceAgentRPCPerforming {
+    func authorize(
+        context: HostServiceAgentRuntimeContext,
+        record: HostServiceAgentControlRecord
+    ) async -> Result<HostServiceAgentStatus, HostServiceAgentFailure> {
+        await request(.authorize, context: context, generation: record.generation, consumerId: nil)
+    }
+}
+
 struct HostServiceAgentRPCClient: HostServiceAgentRPCPerforming {
     static let responseLimit = 16 * 1024
     static let timeout: TimeInterval = 4
+
+    func authorize(
+        context: HostServiceAgentRuntimeContext,
+        record: HostServiceAgentControlRecord
+    ) async -> Result<HostServiceAgentStatus, HostServiceAgentFailure> {
+        let task = Task.detached(priority: .utility) {
+            Self.requestBlocking(.authorize, context: context, generation: record.generation,
+                consumerId: nil, authorization: record.authorization)
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
 
     func request(
         _ method: HostServiceAgentControlMethod,
@@ -908,7 +999,8 @@ struct HostServiceAgentRPCClient: HostServiceAgentRPCPerforming {
         _ method: HostServiceAgentControlMethod,
         context: HostServiceAgentRuntimeContext,
         generation: UUID?,
-        consumerId: UUID?
+        consumerId: UUID?,
+        authorization: HostServiceAgentCopyAuthorization? = nil
     ) -> Result<HostServiceAgentStatus, HostServiceAgentFailure> {
         guard context.securityStateCheck.isCurrent() else {
             return .failure(.unavailable)
@@ -938,7 +1030,9 @@ struct HostServiceAgentRPCClient: HostServiceAgentRPCPerforming {
         case .status, .prepare:
             break
         case .grant where generation == nil || consumerId == nil,
-             .revoke where generation == nil:
+             .revoke where generation == nil,
+             .authorize where generation == nil || authorization?.isValid != true
+                || authorization?.instanceId != context.instanceID:
             return .failure(.invalidResponse)
         default:
             break
@@ -950,13 +1044,14 @@ struct HostServiceAgentRPCClient: HostServiceAgentRPCPerforming {
             requestID: requestID,
             instanceID: context.instanceID,
             generation: generation,
-            consumerId: consumerId
+            consumerId: consumerId,
+            authorization: authorization
         )
         guard let requestData = try? JSONSerialization.data(withJSONObject: request) else {
             return .failure(.invalidResponse)
         }
 
-        let deadline = DispatchTime.now() + timeout
+        let deadline = DispatchTime.now() + (method == .authorize ? 35 : timeout)
         guard let fd = HostServiceAgentSocket.connect(
             socketURL: context.configuration.socketURL,
             deadline: deadline
@@ -1235,6 +1330,11 @@ enum HostServiceAgentMCPConfiguration {
             throw HostServiceAgentFailure.invalidResponse
         }
         let guide = instructions ?? "通过 MCP 工具发现了解本插件的能力和使用顺序。"
+        let document = try? JSONDecoder().decode(Document.self, from: configuration)
+        let tokenIncluded = document?.mcpServers.values.contains { $0.env?["MACDORA_AGENT_TOKEN"] != nil } == true
+        let authorizationGuide = tokenIncluded
+            ? "本次复制已授权本机只读访问。使用配置携带的凭据接入，无需再次点击授权。保留用户随时接回控制的入口。"
+            : "分别核实已配置、已连接、业务可用和已获授权。连接成功不代表用户已经授权。\n需要人工确认时说明具体动作；保留用户随时接回控制的入口。"
         return """
         请将以下已安装的本机插件接入当前 Agent。
         使用当前客户端支持的 MCP 配置方式合并下方 JSON，保留已有服务。请完成你能够执行的配置步骤。
@@ -1249,14 +1349,14 @@ enum HostServiceAgentMCPConfiguration {
         \(String(decoding: configuration, as: UTF8.self))
         ```
 
-        分别核实已配置、已连接、业务可用和已获授权。连接成功不代表用户已经授权。
-        需要人工确认时说明具体动作；保留用户随时接回控制的入口。
+        \(authorizationGuide)
         """
     }
 
     struct Server: Codable, Equatable, Sendable {
         var command: String
         var args: [String]
+        var env: [String: String]? = nil
     }
 
     struct Document: Codable, Equatable, Sendable {
@@ -1266,13 +1366,15 @@ enum HostServiceAgentMCPConfiguration {
     static func document(
         pluginID: String,
         agentExecutableURL: URL,
-        endpointURL: URL
+        endpointURL: URL,
+        token: String? = nil
     ) -> Document {
         Document(
             mcpServers: [
                 pluginID: Server(
                     command: agentExecutableURL.path,
-                    args: ["--endpoint", endpointURL.path]
+                    args: ["--endpoint", endpointURL.path],
+                    env: token.map { ["MACDORA_AGENT_TOKEN": $0] }
                 )
             ]
         )
@@ -1281,7 +1383,8 @@ enum HostServiceAgentMCPConfiguration {
     static func data(
         pluginID: String,
         agentExecutableURL: URL,
-        endpointURL: URL
+        endpointURL: URL,
+        token: String? = nil
     ) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
@@ -1289,7 +1392,8 @@ enum HostServiceAgentMCPConfiguration {
             document(
                 pluginID: pluginID,
                 agentExecutableURL: agentExecutableURL,
-                endpointURL: endpointURL
+                endpointURL: endpointURL,
+                token: token
             )
         )
     }

@@ -7,6 +7,579 @@ import Testing
 
 @Suite("Agent Host Service", .serialized)
 struct AgentHostServiceTests {
+    @Test("A prior copy can bind a new service instance while withdrawal wins")
+    func copyAuthorizationRestartUsesExistingDigest() throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HostServiceAgentControlStore(rootURL: root, pluginID: "dev.agent.restore")
+        let original = try store.loadOrCreate()
+        let token = HostServiceAgentCopyToken.generate()
+        let granted = try #require(try store.authorizeCopy(ifUnchanged: original,
+            instanceID: UUID(), tokenDigest: token.digest))
+        let instance = UUID()
+        let rebound = try #require(try store.rebindCopyAuthorization(ifUnchanged: granted, toInstance: instance))
+        #expect(rebound.authorization?.instanceId == instance)
+        #expect(rebound.authorization?.tokenSHA256 == token.digest)
+        #expect(rebound.generation != granted.generation)
+        #expect(try store.rebindCopyAuthorization(ifUnchanged: rebound, toInstance: instance) == rebound)
+        let manual = try store.setManual(true)
+        #expect(try store.rebindCopyAuthorization(ifUnchanged: rebound, toInstance: UUID()) == nil)
+        #expect(try store.rebindCopyAuthorization(ifUnchanged: manual, toInstance: UUID()) == nil)
+        #expect(try store.reload() == manual)
+    }
+
+    @Test("A trusted service restart restores the old copy after login without opening the workspace")
+    @MainActor
+    func restartRestoresCopyWithoutWorkspace() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try makeAgentRuntimeFixture(root: root, id: "dev.agent.restart",
+            publishEndpointOnLaunch: true, copyToken: true)
+        defer { fixture.launcher.stopAll() }
+        let store = HostServiceAgentControlStore(rootURL: root, pluginID: fixture.manifest.id)
+        let initial = try store.loadOrCreate()
+        let token = HostServiceAgentCopyToken.generate()
+        let previous = try #require(try store.authorizeCopy(ifUnchanged: initial,
+            instanceID: UUID(), tokenDigest: token.digest))
+        let rpc = AgentRecoveryRPCClient()
+        let plugin = HostServiceSystemPlugin(manifest: fixture.manifest,
+            bundleDirectoryURL: fixture.bundleURL, rootURL: root,
+            processExecuter: fixture.launcher, processTerminator: AgentStartupTerminator(),
+            healthClient: { _, _, _ in .success(()) }, agentRPCClient: rpc,
+            agentRestoreRetryDelay: .milliseconds(5))
+        defer { plugin.retire() }
+        await plugin.activate(bridge: AgentEnvironmentTestBridge())
+        try await rpc.waitForCallCount(2)
+        let calls = await rpc.callsSnapshot()
+        let restored = try store.reload()
+        let instance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        #expect(plugin.healthState == .healthy)
+        #expect(restored.authorization?.instanceId == instance)
+        #expect(restored.authorization?.tokenSHA256 == token.digest)
+        #expect(restored.generation != previous.generation)
+        #expect(calls.count == 2)
+        #expect(calls.allSatisfy { $0 == restored })
+    }
+
+    @Test("Restart recovery stops after a runtime permission denial")
+    @MainActor
+    func restartDoesNotRetryPermissionDenial() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try makeAgentRuntimeFixture(root: root, id: "dev.agent.restart-denied",
+            publishEndpointOnLaunch: true, copyToken: true)
+        defer { fixture.launcher.stopAll() }
+        let store = HostServiceAgentControlStore(rootURL: root, pluginID: fixture.manifest.id)
+        let token = HostServiceAgentCopyToken.generate()
+        _ = try #require(try store.authorizeCopy(ifUnchanged: store.loadOrCreate(),
+            instanceID: UUID(), tokenDigest: token.digest))
+        let rpc = AgentRecordingRPCClient(response: .failure(.server(.permissionDenied)))
+        let plugin = HostServiceSystemPlugin(manifest: fixture.manifest,
+            bundleDirectoryURL: fixture.bundleURL, rootURL: root,
+            processExecuter: fixture.launcher, processTerminator: AgentStartupTerminator(),
+            healthClient: { _, _, _ in .success(()) }, agentRPCClient: rpc,
+            agentRestoreRetryDelay: .milliseconds(5))
+        defer { plugin.retire() }
+        await plugin.activate(bridge: AgentEnvironmentTestBridge())
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(await rpc.callsSnapshot().map(\.method) == [.authorize])
+    }
+
+    @Test("Manual withdrawal wins while a restart authorization reply is pending")
+    @MainActor
+    func restartRestoreCannotUndoWithdrawal() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try makeAgentRuntimeFixture(root: root, id: "dev.agent.restart-race",
+            publishEndpointOnLaunch: true, copyToken: true)
+        defer { fixture.launcher.stopAll() }
+        let store = HostServiceAgentControlStore(rootURL: root, pluginID: fixture.manifest.id)
+        let initial = try store.loadOrCreate()
+        let token = HostServiceAgentCopyToken.generate()
+        _ = try #require(try store.authorizeCopy(ifUnchanged: initial,
+            instanceID: UUID(), tokenDigest: token.digest))
+        let rpc = AgentControlledRPCClient(gatedMethods: [.authorize])
+        let plugin = HostServiceSystemPlugin(manifest: fixture.manifest,
+            bundleDirectoryURL: fixture.bundleURL, rootURL: root,
+            processExecuter: fixture.launcher, processTerminator: AgentStartupTerminator(),
+            healthClient: { _, _, _ in .success(()) }, agentRPCClient: rpc,
+            agentRestoreRetryDelay: .milliseconds(5))
+        defer { plugin.retire() }
+        await plugin.activate(bridge: AgentEnvironmentTestBridge())
+        await rpc.waitForCallCount(1)
+        let instance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        let manual = try store.setManual(true)
+        await rpc.resolve(.authorize, with: .success(agentStatus(pluginID: fixture.manifest.id,
+            instanceID: instance, manual: false, businessReady: false, state: .ready)))
+        try await Task.sleep(for: .milliseconds(25))
+        #expect(try store.reload() == manual)
+    }
+
+    @Test("Copy authorization exports an executable cross-language wire fixture",
+          .enabled(if: ProcessInfo.processInfo.environment["MACDORA_AGENT_COPY_WIRE_EXPORT"] != nil,
+                   "Set MACDORA_AGENT_COPY_WIRE_EXPORT for the private protocol acceptance fixture."))
+    func copyTokenCrossLanguageExport() throws {
+        let path = try #require(ProcessInfo.processInfo.environment["MACDORA_AGENT_COPY_WIRE_EXPORT"])
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HostServiceAgentControlStore(rootURL: root, pluginID: "dev.example.copy")
+        let initial = try store.loadOrCreate()
+        let instance = try #require(UUID(uuidString: "19B4C6BE-2182-44EE-9D4C-B5A5E91F931D"))
+        let token = HostServiceAgentCopyToken(value: String(repeating: "f", count: 64))
+        let record = try #require(try store.authorizeCopy(ifUnchanged: initial,
+            instanceID: instance, tokenDigest: token.digest))
+        let persisted = try JSONSerialization.jsonObject(with: Data(contentsOf: store.fileURL))
+        let request = HostServiceAgentWire.request(method: .authorize, requestID: 41,
+            instanceID: instance, generation: record.generation, authorization: record.authorization)
+        let config = try HostServiceAgentMCPConfiguration.document(pluginID: "dev.example.copy",
+            agentExecutableURL: URL(fileURLWithPath: "/tmp/Sample Plugin/bin/agent"),
+            endpointURL: URL(fileURLWithPath: "/tmp/Sample Plugin/endpoint.json"), token: token.value)
+        let configuration = try JSONSerialization.jsonObject(with: JSONEncoder().encode(config))
+        let data = try JSONSerialization.data(withJSONObject: ["control": persisted,
+            "request": request, "configuration": configuration], options: [.sortedKeys, .prettyPrinted])
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+    @Test("Copy token mode commits authorization only after clipboard success")
+    @MainActor
+    func copyTokenClipboardFailure() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.clipboard", copyToken: true)
+        defer { plugin.retire() }
+        try writeCopyEndpoint(plugin)
+        let rpc = AgentRecordingRPCClient(response: .failure(.unavailable))
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+        let before = try plugin.agentControlStore.reload()
+        do {
+            try await controller.copyAgentHandoff(writeToClipboard: { _ in false })
+            Issue.record("A failed clipboard write must fail the action")
+        } catch {}
+        #expect(try plugin.agentControlStore.reload() == before)
+        #expect(await rpc.callsSnapshot().isEmpty)
+        #expect(!controller.isSubmitting)
+    }
+
+    @Test("Copy alone authorizes without an Agent connection and preserves manual withdrawal")
+    @MainActor
+    func copyTokenAuthorizesWithoutConsumer() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.copy-authorize", copyToken: true)
+        defer { plugin.retire() }
+        try writeCopyEndpoint(plugin)
+        let context = try #require(plugin.agentRuntimeContext())
+        var response = agentStatus(pluginID: plugin.manifest.id, instanceID: context.instanceID,
+            manual: false, consumerId: nil, businessReady: false, state: .ready)
+        response.agentConnected = false
+        let rpc = AgentRecordingRPCClient(response: .success(response))
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+        var copied = ""
+        try await controller.copyAgentHandoff(writeToClipboard: { copied = $0; return true })
+        let record = try plugin.agentControlStore.reload()
+        #expect(record.schemaVersion == 2 && !record.manual)
+        #expect(copied.contains("MACDORA_AGENT_TOKEN"))
+        #expect(!copied.contains("测试连接"))
+        #expect(await rpc.callsSnapshot().map(\.method) == [.authorize])
+        #expect(controller.primaryAction == .revoke)
+        #expect(!controller.canTestConnection)
+        #expect(controller.statusText == "已授权，待接入")
+        #expect(!controller.isSubmitting)
+    }
+
+    @Test("Copy before login keeps the grant and restores it after login")
+    @MainActor
+    func copyBeforeLoginRecoversAutomatically() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let rpc = AgentRecoveryRPCClient()
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.copy-before-login",
+            copyToken: true, rpcClient: rpc, restoreRetryDelay: .milliseconds(5))
+        defer { plugin.retire() }
+        try writeCopyEndpoint(plugin)
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+        var copied = false
+        try await controller.copyAgentHandoff(writeToClipboard: { _ in copied = true; return true })
+        #expect(copied)
+        #expect(controller.statusText == "需要登录")
+        #expect(controller.primaryAction == .revoke)
+        let record = try plugin.agentControlStore.reload()
+        #expect(!record.manual)
+        try await rpc.waitForCallCount(2)
+        let calls = await rpc.callsSnapshot()
+        #expect(calls[0] == record)
+        #expect(calls[1] == record)
+        #expect(try plugin.agentControlStore.reload() == record)
+    }
+
+    @Test("Copy also recovers from a temporarily busy or unavailable business session")
+    @MainActor
+    func copyTemporaryBusinessFailureRecovers() async throws {
+        for (index, failure) in [HostServiceAgentFailure.server(.businessNotReady),
+                                  .server(.recoveryRequired), .busy].enumerated() {
+            let root = try agentTemporaryRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let rpc = AgentRecoveryRPCClient(firstFailure: failure)
+            let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.copy-busy-\(index)",
+                copyToken: true, rpcClient: rpc, restoreRetryDelay: .milliseconds(5))
+            defer { plugin.retire() }
+            try writeCopyEndpoint(plugin)
+            let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+            try await controller.copyAgentHandoff(writeToClipboard: { _ in true })
+            #expect(controller.statusText == "接入待恢复")
+            let record = try plugin.agentControlStore.reload()
+            #expect(!record.manual)
+            try await rpc.waitForCallCount(2)
+            let calls = await rpc.callsSnapshot()
+            #expect(calls[0] == record && calls[1] == record)
+        }
+    }
+
+    @Test("Permission failure during copy does not leave a usable grant")
+    @MainActor
+    func copyPermissionFailureRollsBack() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.copy-denied", copyToken: true)
+        defer { plugin.retire() }
+        try writeCopyEndpoint(plugin)
+        let rpc = AgentRecordingRPCClient(response: .failure(.server(.permissionDenied)))
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+        do {
+            try await controller.copyAgentHandoff(writeToClipboard: { _ in true })
+            Issue.record("A denied authorization must not succeed")
+        } catch {}
+        #expect(try plugin.agentControlStore.reload().manual)
+        #expect(await rpc.callsSnapshot().count == 1)
+    }
+
+    @Test("Manual withdrawal wins while first-copy login recovery is pending")
+    @MainActor
+    func copyBeforeLoginWithdrawalWins() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let rpc = AgentControlledRPCClient(gatedMethods: [.authorize])
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.copy-login-withdraw",
+            copyToken: true, rpcClient: rpc, restoreRetryDelay: .milliseconds(5))
+        defer { plugin.retire() }
+        try writeCopyEndpoint(plugin)
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+        let copy = Task { @MainActor in
+            try await controller.copyAgentHandoff(writeToClipboard: { _ in true })
+        }
+        await rpc.waitForCallCount(1)
+        await rpc.resolve(.authorize, with: .failure(.server(.loginRequired)))
+        try await copy.value
+        await rpc.waitForCallCount(2)
+        let instance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        await controller.performPrimaryAction()
+        let manual = try plugin.agentControlStore.reload()
+        #expect(manual.manual)
+        await rpc.resolve(.authorize, with: .success(agentStatus(pluginID: plugin.manifest.id,
+            instanceID: instance, manual: false, businessReady: false, state: .ready)))
+        try await Task.sleep(for: .milliseconds(25))
+        #expect(try plugin.agentControlStore.reload() == manual)
+        #expect(controller.primaryAction != .revoke)
+    }
+
+    @Test("An authorized idle connection does not claim preparation is running")
+    @MainActor
+    func copyTokenConnectedIdleIsNotPreparing() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.connected-idle", copyToken: true)
+        defer { plugin.retire() }
+        try writeCopyEndpoint(plugin)
+        let instance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        let response = agentStatus(pluginID: plugin.manifest.id, instanceID: instance,
+            manual: false, consumerId: UUID(), businessReady: false, state: .ready)
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin,
+            rpcClient: AgentRecordingRPCClient(response: .success(response)))
+        try await controller.copyAgentHandoff(writeToClipboard: { _ in true })
+        #expect(controller.statusText == "已授权，待处理")
+        #expect(controller.primaryAction == .revoke)
+        #expect(!controller.canTestConnection)
+    }
+
+    @Test("Copy authorization waiting for recovery does not demand another copy")
+    @MainActor
+    func copyTokenWaitingForRecovery() throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.restore-ui", copyToken: true)
+        defer { plugin.retire() }
+        let instance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin)
+        let waiting = agentStatus(pluginID: plugin.manifest.id, instanceID: instance,
+            manual: true, businessReady: false, state: .waitingForAgent)
+        controller.setLoadedStatusForTesting(waiting, persistedManual: false, loaded: true)
+        #expect(controller.statusText == "接入待恢复")
+        #expect(!controller.detailText.contains("重新复制接入内容后即可继续"))
+        #expect(controller.primaryAction == .revoke)
+        let login = agentStatus(pluginID: plugin.manifest.id, instanceID: instance,
+            manual: false, businessReady: false, state: .waitingForLogin, errorCode: .loginRequired)
+        controller.setLoadedStatusForTesting(login, persistedManual: false, loaded: true)
+        #expect(controller.statusText == "需要登录")
+        #expect(controller.detailText.contains("登录"))
+        #expect(controller.handoffPillText == "需要登录")
+        #expect(controller.primaryAction == .revoke)
+    }
+
+    @Test("An open copy workspace refreshes after background authorization recovery")
+    @MainActor
+    func copyWorkspaceRefreshesAfterBackgroundRecovery() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.restore-open-ui", copyToken: true)
+        defer { plugin.retire() }
+        let instance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        let store = plugin.agentControlStore
+        let previous = try store.loadOrCreate()
+        let token = HostServiceAgentCopyToken.generate()
+        _ = try #require(try store.authorizeCopy(ifUnchanged: previous,
+            instanceID: instance, tokenDigest: token.digest))
+        let restored = agentStatus(pluginID: plugin.manifest.id, instanceID: instance,
+            manual: false, businessReady: false, state: .ready)
+        let rpc = AgentRecordingRPCClient(response: .success(restored))
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+        let pending = agentStatus(pluginID: plugin.manifest.id, instanceID: instance,
+            manual: true, businessReady: false, state: .waitingForAgent)
+        controller.setLoadedStatusForTesting(pending, persistedManual: false, loaded: true)
+        controller.setRefreshingForTesting(false)
+        controller.hostStateDidChange()
+        try await Task.sleep(for: .milliseconds(80))
+        let calls = await rpc.callsSnapshot()
+        #expect(calls.map(\.method) == [.status])
+        #expect(controller.status == restored)
+        #expect(controller.statusText == "已授权，待接入")
+        #expect(controller.primaryAction == .revoke)
+    }
+
+    @Test("An open copy workspace refreshes after the runtime or control record changed")
+    @MainActor
+    func copyWorkspaceRecoversFromFailedState() async throws {
+        for message in ["运行实例已改变，请重新检查连接。", "控制权已更新，请重新检查。"] {
+            let root = try agentTemporaryRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.failed-restore", copyToken: true)
+            defer { plugin.retire() }
+            let instance = try #require(plugin.agentRuntimeContext()?.instanceID)
+            let store = plugin.agentControlStore
+            let token = HostServiceAgentCopyToken.generate()
+            _ = try #require(try store.authorizeCopy(ifUnchanged: store.loadOrCreate(),
+                instanceID: instance, tokenDigest: token.digest))
+            let restored = agentStatus(pluginID: plugin.manifest.id, instanceID: instance,
+                manual: false, businessReady: false, state: .ready)
+            let rpc = AgentRecordingRPCClient(response: .success(restored))
+            let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+            controller.ingestFailureForTesting(message, persistedManual: false)
+            controller.setViewLoadedForTesting(true)
+            controller.hostStateDidChange()
+            try await Task.sleep(for: .milliseconds(80))
+            #expect(await rpc.callsSnapshot().map(\.method) == [.status])
+            #expect(controller.status == restored)
+            #expect(controller.primaryAction == .revoke)
+        }
+    }
+
+    @Test("An open copy workspace refreshes after a real runtime instance replacement")
+    @MainActor
+    func copyWorkspaceRefreshesAfterInstanceReplacement() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.instance-refresh", copyToken: true)
+        defer { plugin.retire() }
+        let oldInstance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        let store = plugin.agentControlStore
+        let token = HostServiceAgentCopyToken.generate()
+        let previous = try #require(try store.authorizeCopy(ifUnchanged: store.loadOrCreate(),
+            instanceID: oldInstance, tokenDigest: token.digest))
+        let rpc = AgentControlledRPCClient(gatedMethods: [.status])
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+        let oldStatus = agentStatus(pluginID: plugin.manifest.id, instanceID: oldInstance,
+            manual: false, businessReady: false, state: .ready)
+        controller.setLoadedStatusForTesting(oldStatus, persistedManual: false, loaded: true)
+        controller.setRefreshingForTesting(false)
+        let nextLauncher = AgentTestProcessLauncher()
+        plugin.installAgentTestRuntime(handle: nextLauncher.currentHandle)
+        let newInstance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        #expect(newInstance != oldInstance)
+        _ = try #require(try store.rebindCopyAuthorization(ifUnchanged: previous, toInstance: newInstance))
+        controller.hostStateDidChange()
+        try await Task.sleep(for: .milliseconds(80))
+        let calls = await rpc.callsSnapshot()
+        #expect(calls.map(\.method) == [.status])
+        guard !calls.isEmpty else { return }
+        let restored = agentStatus(pluginID: plugin.manifest.id, instanceID: newInstance,
+            manual: false, businessReady: false, state: .ready)
+        await rpc.resolve(.status, with: .success(restored))
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(controller.status == restored)
+        #expect(controller.primaryAction == .revoke)
+    }
+
+    @Test("An open copy workspace retries after a control generation changes during refresh")
+    @MainActor
+    func copyWorkspaceRetriesAfterControlGenerationRace() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.refresh-race", copyToken: true)
+        defer { plugin.retire() }
+        let instance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        let store = plugin.agentControlStore
+        let token = HostServiceAgentCopyToken.generate()
+        let first = try #require(try store.authorizeCopy(ifUnchanged: store.loadOrCreate(),
+            instanceID: instance, tokenDigest: token.digest))
+        let rpc = AgentControlledRPCClient(gatedMethods: [.status])
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+        controller.setViewLoadedForTesting(true)
+        let refresh = Task { @MainActor in await controller.refresh() }
+        await rpc.waitForCallCount(1)
+        let replacement = HostServiceAgentCopyToken.generate()
+        _ = try #require(try store.authorizeCopy(ifUnchanged: first,
+            instanceID: instance, tokenDigest: replacement.digest))
+        let restored = agentStatus(pluginID: plugin.manifest.id, instanceID: instance,
+            manual: false, businessReady: false, state: .ready)
+        await rpc.resolve(.status, with: .success(restored))
+        await refresh.value
+        #expect(controller.status == nil)
+        controller.hostStateDidChange()
+        try await Task.sleep(for: .milliseconds(80))
+        let calls = await rpc.callsSnapshot()
+        #expect(calls.map(\.method) == [.status, .status])
+        guard calls.count == 2 else { return }
+        await rpc.resolve(.status, with: .success(restored))
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(controller.status == restored)
+    }
+
+    @Test("An open failed workspace does not restore after the user takes control")
+    @MainActor
+    func copyWorkspaceDoesNotRestoreAfterWithdrawal() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.failed-manual", copyToken: true)
+        defer { plugin.retire() }
+        let instance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        let rpc = AgentRecordingRPCClient(response: .success(agentStatus(pluginID: plugin.manifest.id,
+            instanceID: instance, manual: false, businessReady: false, state: .ready)))
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+        controller.ingestFailureForTesting("控制权已更新，请重新检查。", persistedManual: false)
+        controller.setViewLoadedForTesting(true)
+        _ = try plugin.agentControlStore.setManual(true)
+        controller.hostStateDidChange()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(await rpc.callsSnapshot().isEmpty)
+        #expect(controller.primaryAction == nil)
+    }
+
+    @Test("A runtime permission failure is not displayed as an automatic business recovery")
+    @MainActor
+    func copyWorkspaceShowsPermissionFailure() throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.permission-ui", copyToken: true)
+        defer { plugin.retire() }
+        let instance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin)
+        let denied = agentStatus(pluginID: plugin.manifest.id, instanceID: instance,
+            manual: true, businessReady: false, state: .needsAttention, errorCode: .permissionDenied)
+        controller.setLoadedStatusForTesting(denied, persistedManual: false, loaded: true)
+        #expect(controller.statusText == "接入受限")
+        #expect(controller.detailText.contains("权限"))
+        #expect(controller.primaryAction == .revoke)
+    }
+
+    @Test("Unconfirmed copy authorization rolls back only its generation")
+    @MainActor
+    func copyTokenUncertainAuthorizationRollsBack() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.copy-rollback", copyToken: true)
+        defer { plugin.retire() }
+        try writeCopyEndpoint(plugin)
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: AgentFailingRPCClient())
+        do {
+            try await controller.copyAgentHandoff(writeToClipboard: { _ in true })
+            Issue.record("An unconfirmed authorization must fail")
+        } catch {}
+        let record = try plugin.agentControlStore.reload()
+        #expect(record.manual && record.authorization == nil)
+        #expect(controller.primaryAction == nil)
+        #expect(!controller.isSubmitting)
+    }
+
+    @Test("A late copy authorization cannot undo the user's newer manual withdrawal")
+    @MainActor
+    func copyTokenLateAuthorizationLosesToWithdrawal() async throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let plugin = try makeRunningAgentPlugin(root: root, id: "dev.agent.copy-race", copyToken: true)
+        defer { plugin.retire() }
+        try writeCopyEndpoint(plugin)
+        let instance = try #require(plugin.agentRuntimeContext()?.instanceID)
+        let rpc = AgentControlledRPCClient(gatedMethods: [.authorize])
+        let controller = HostServiceAgentWorkspaceController(plugin: plugin, rpcClient: rpc)
+        let copying = Task { @MainActor in
+            try? await controller.copyAgentHandoff(writeToClipboard: { _ in true })
+        }
+        await rpc.waitForCallCount(1)
+        await controller.performPrimaryAction()
+        let manual = try plugin.agentControlStore.reload()
+        await rpc.resolve(.authorize, with: .success(agentStatus(pluginID: plugin.manifest.id,
+            instanceID: instance, manual: false, consumerId: nil, businessReady: false)))
+        await copying.value
+        #expect(manual.manual)
+        #expect(try plugin.agentControlStore.reload() == manual)
+        #expect(!controller.isSubmitting)
+        #expect(!controller.showsAgentManaged)
+    }
+
+    @Test("Copy authorization stores only a scoped token digest and explicit revoke invalidates it")
+    func copyTokenControlLifecycle() throws {
+        let root = try agentTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = HostServiceAgentControlStore(rootURL: root, pluginID: "dev.agent.copy")
+        let initial = try store.loadOrCreate()
+        let token = HostServiceAgentCopyToken.generate()
+        let instance = UUID()
+        let granted = try #require(try store.authorizeCopy(
+            ifUnchanged: initial, instanceID: instance, tokenDigest: token.digest
+        ))
+        #expect(granted.schemaVersion == 2)
+        #expect(!granted.manual)
+        #expect(granted.authorization?.scope == "readOnly")
+        #expect(granted.authorization?.instanceId == instance)
+        #expect(granted.authorization?.tokenSHA256 == token.digest)
+        #expect(try store.reload() == granted)
+        let persisted = try String(contentsOf: store.fileURL, encoding: .utf8)
+        #expect(!persisted.contains(token.value))
+        #expect(token.value.count == 64)
+        #expect(HostServiceAgentCopyToken.generate().value != token.value)
+        let revoked = try store.setManual(true)
+        #expect(revoked.authorization == nil)
+        #expect(revoked.generation != granted.generation)
+        #expect(try store.authorizeCopy(ifUnchanged: granted, instanceID: instance,
+            tokenDigest: token.digest) == nil)
+        #expect(try store.reload() == revoked)
+    }
+
+    @Test("A copied credential travels in structured MCP environment rather than process arguments")
+    func copyTokenStructuredEnvironment() throws {
+        let token = HostServiceAgentCopyToken.generate()
+        let data = try HostServiceAgentMCPConfiguration.data(
+            pluginID: "dev.agent.copy", agentExecutableURL: URL(fileURLWithPath: "/tmp/Sample Plugin/bin/agent"),
+            endpointURL: URL(fileURLWithPath: "/tmp/Sample Plugin/endpoint.json"), token: token.value
+        )
+        let document = try JSONDecoder().decode(HostServiceAgentMCPConfiguration.Document.self, from: data)
+        let server = try #require(document.mcpServers["dev.agent.copy"])
+        #expect(server.env?["MACDORA_AGENT_TOKEN"] == token.value)
+        #expect(server.args == ["--endpoint", "/tmp/Sample Plugin/endpoint.json"])
+        #expect(!server.args.contains(token.value))
+        let handoff = try HostServiceAgentMCPConfiguration.handoff(instructions: nil, configuration: data)
+        #expect(handoff.contains("本次复制已授权"))
+        #expect(!handoff.contains("需要人工确认时"))
+    }
+
     @Test("An explicitly selected development bundle passes the actual host verifier without installation",
           .enabled(if: ProcessInfo.processInfo.environment["MACDORA_AGENT_DEVELOPMENT_BUNDLE"] != nil,
                    "Set MACDORA_AGENT_DEVELOPMENT_BUNDLE for a local artifact check."))
@@ -232,7 +805,7 @@ struct AgentHostServiceTests {
         #expect(parsed.mcpServers["dev.example.agent"]?.args == ["--endpoint", endpoint.path])
         let legacy = try HostServiceAgentMCPConfiguration.handoff(instructions: nil, configuration: configuration)
         #expect(legacy.contains("工具发现"))
-        #expect(!legacy.contains("oa_"))
+        #expect(!legacy.contains("sample_status"))
     }
 
     @Test("Control state remains manual across reload and each explicit change rotates generation")
@@ -1797,6 +2370,38 @@ private final class AgentEnvironmentTestBridge: SystemPluginHostBridge {
     func notifyPluginStateDidChange() {}
 }
 
+private actor AgentRecoveryRPCClient: HostServiceAgentRPCPerforming {
+    private var calls: [HostServiceAgentControlRecord] = []
+    private let firstFailure: HostServiceAgentFailure
+
+    init(firstFailure: HostServiceAgentFailure = .server(.loginRequired)) {
+        self.firstFailure = firstFailure
+    }
+
+    func authorize(context: HostServiceAgentRuntimeContext,
+                   record: HostServiceAgentControlRecord) async -> Result<HostServiceAgentStatus, HostServiceAgentFailure> {
+        calls.append(record)
+        if calls.count == 1 { return .failure(firstFailure) }
+        return .success(agentStatus(pluginID: context.pluginID, instanceID: context.instanceID,
+            manual: false, businessReady: false, state: .ready))
+    }
+
+    func request(_ method: HostServiceAgentControlMethod, context: HostServiceAgentRuntimeContext,
+                 generation: UUID?, consumerId: UUID?) async -> Result<HostServiceAgentStatus, HostServiceAgentFailure> {
+        .failure(.unavailable)
+    }
+
+    func callsSnapshot() -> [HostServiceAgentControlRecord] { calls }
+
+    func waitForCallCount(_ count: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while calls.count < count {
+            guard ContinuousClock.now < deadline else { throw AgentTestError.compileFailed }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+}
+
 private actor AgentRecordingRPCClient: HostServiceAgentRPCPerforming {
     let response: Result<HostServiceAgentStatus, HostServiceAgentFailure>
     private var calls: [AgentRPCCall] = []
@@ -2191,7 +2796,8 @@ private struct AgentRuntimeFixture {
 private func makeAgentRuntimeFixture(
     root: URL,
     id: String,
-    publishEndpointOnLaunch: Bool = false
+    publishEndpointOnLaunch: Bool = false,
+    copyToken: Bool = false
 ) throws -> AgentRuntimeFixture {
     let compileLock = AgentFixtureCompileLock.shared
     compileLock.lock.lock()
@@ -2207,7 +2813,7 @@ private func makeAgentRuntimeFixture(
     try compileAndSign(source: source, output: agent)
     let manifest = agentFixtureManifest(
         id: id,
-        capabilities: ["host.service", "agent.readonly"],
+        capabilities: ["host.service", "agent.readonly"] + (copyToken ? ["agent.readonly.token.v1"] : []),
         agentMCP: "bin/agent"
     )
     try JSONEncoder().encode(manifest).write(
@@ -2319,7 +2925,9 @@ private func compileAndSign(source: URL, output: URL) throws {
 }
 
 @MainActor
-private func makeRunningAgentPlugin(root: URL, id: String) throws -> HostServiceSystemPlugin {
+private func makeRunningAgentPlugin(root: URL, id: String, copyToken: Bool = false,
+    rpcClient: (any HostServiceAgentRPCPerforming)? = nil,
+    restoreRetryDelay: Duration = .seconds(5)) throws -> HostServiceSystemPlugin {
     let compileLock = AgentFixtureCompileLock.shared
     compileLock.lock.lock()
     defer { compileLock.lock.unlock() }
@@ -2334,7 +2942,7 @@ private func makeRunningAgentPlugin(root: URL, id: String) throws -> HostService
     try compileAndSign(source: source, output: agent)
     let manifest = agentFixtureManifest(
         id: id,
-        capabilities: ["host.service", "agent.readonly"],
+        capabilities: ["host.service", "agent.readonly"] + (copyToken ? ["agent.readonly.token.v1"] : []),
         agentMCP: "bin/agent"
     )
     try JSONEncoder().encode(manifest).write(
@@ -2354,11 +2962,21 @@ private func makeRunningAgentPlugin(root: URL, id: String) throws -> HostService
         processExecuter: launcher,
         processTerminator: AgentTestTerminator(),
         supervisor: HostServiceSupervisorRegistry(),
-        healthClient: { _, _, _ in .success(()) }
+        healthClient: { _, _, _ in .success(()) },
+        agentRPCClient: rpcClient, agentRestoreRetryDelay: restoreRetryDelay
     )
     plugin.setNotificationBridge(nil)
     plugin.installAgentTestRuntime(handle: launcher.currentHandle)
     return plugin
+}
+
+@MainActor
+private func writeCopyEndpoint(_ plugin: HostServiceSystemPlugin) throws {
+    let configuration = try #require(plugin.agentRuntimeContext()?.configuration)
+    try FileManager.default.createDirectory(at: configuration.endpointURL.deletingLastPathComponent(),
+        withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    try JSONEncoder().encode(configuration.endpoint).write(to: configuration.endpointURL, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configuration.endpointURL.path)
 }
 
 private func installAgentFixturePackage(

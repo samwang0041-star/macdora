@@ -70,6 +70,7 @@ struct SystemPluginManifest: Codable, Equatable, Identifiable, Sendable {
         "lifecycle.hooks",
         "host.service",
         "agent.readonly",
+        "agent.readonly.token.v1",
         "runtime.keep-awake"
     ]
     var supportsKeepAwakeControl: Bool {
@@ -101,6 +102,7 @@ struct SystemPluginManifest: Codable, Equatable, Identifiable, Sendable {
     var entrypoints: SystemPluginEntrypoints
     var agentInstructions: String? = nil
     var agentSummary: String? = nil
+    var usesCopyTokenAuthorization: Bool { capabilities.contains("agent.readonly.token.v1") }
 
     static func isValidAgentText(_ text: String, maximumBytes: Int) -> Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1000,6 +1002,14 @@ enum SystemPluginPackageFactory {
                       SystemPluginManifest.isValidAgentText(text, maximumBytes: maximum) else {
                     throw SystemPluginPackageError.incompatibleManifest("Agent setup metadata")
                 }
+            }
+        }
+        if manifest.usesCopyTokenAuthorization {
+            guard
+                  manifest.driverType == "host_service",
+                  manifest.capabilities.contains("agent.readonly"),
+                  manifest.entrypoints.agentMCP != nil else {
+                throw SystemPluginPackageError.incompatibleManifest("Agent authorization")
             }
         }
         if manifest.driverType == "external_script" && manifest.entrypoints.hasGuestShellHooks {

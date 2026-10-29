@@ -1173,6 +1173,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
     private var lastOwnedConfiguration: HostServiceRuntimeConfiguration?
     private var pendingTask: Task<Void, Never>?
     private var pendingTaskID: UUID?
+    private var agentRestoreTask: Task<Void, Never>?
     private var lifecycleGeneration: UInt64 = 0
     private var isDeleted = false
     private weak var notificationBridge: SystemPluginHostBridge?
@@ -1180,6 +1181,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
     let agentRPCClient: any HostServiceAgentRPCPerforming
     private let startupHealthBudgetOverride: TimeInterval?
     private let startupTiming: HostServiceStartupTiming
+    private let agentRestoreRetryDelay: Duration
 
     private(set) var isEnabled = false
     private(set) var healthState: SystemPluginHealthState = .inactive
@@ -1212,7 +1214,9 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
         supervisor: HostServiceSupervisorRegistry? = nil,
         healthClient: HostServiceHealthProbe? = nil,
         startupHealthBudgetOverride: TimeInterval? = nil,
-        startupTiming: HostServiceStartupTiming? = nil
+        startupTiming: HostServiceStartupTiming? = nil,
+        agentRPCClient: (any HostServiceAgentRPCPerforming)? = nil,
+        agentRestoreRetryDelay: Duration = .seconds(5)
     ) {
         self.manifest = manifest
         self.bundleDirectoryURL = bundleDirectoryURL.standardizedFileURL
@@ -1221,7 +1225,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
             rootURL: rootURL,
             pluginID: manifest.id
         )
-        self.agentRPCClient = HostServiceAgentRPCClient()
+        self.agentRPCClient = agentRPCClient ?? HostServiceAgentRPCClient()
         self.fileManager = fileManager
         self.processExecuter = processExecuter
         self.processTerminator = processTerminator
@@ -1235,10 +1239,12 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
         }
         self.startupHealthBudgetOverride = startupHealthBudgetOverride
         self.startupTiming = startupTiming ?? .live()
+        self.agentRestoreRetryDelay = agentRestoreRetryDelay
     }
 
     func setEnabledWithoutBridge(_ enabled: Bool) async {
         guard !isDeleted else { return }
+        cancelAgentAuthorizationRestore()
         await waitForPendingTask()
         lifecycleGeneration &+= 1
         if enabled {
@@ -1261,6 +1267,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
 
     func activate(bridge: SystemPluginHostBridge) async {
         guard !isDeleted else { return }
+        cancelAgentAuthorizationRestore()
         await waitForPendingTask()
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
@@ -1296,6 +1303,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
                 guard isCurrent(generation) else { return false }
                 healthState = .healthy
                 runtimeStatusSummary = "已启用 · 宿主服务运行中"
+                scheduleAgentAuthorizationRestore()
                 return false
             }
             guard isCurrent(generation) else { return false }
@@ -1312,6 +1320,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
                 guard isCurrent(generation) else { return false }
                 healthState = .healthy
                 runtimeStatusSummary = "已启用 · 宿主服务运行中"
+                scheduleAgentAuthorizationRestore()
                 return false
             }
             guard isCurrent(generation) else { return false }
@@ -1361,6 +1370,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
     @discardableResult
     func deactivate(bridge: SystemPluginHostBridge) async -> Bool {
         guard !isDeleted else { return !isEnabled }
+        cancelAgentAuthorizationRestore()
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
         isEnabled = false
@@ -1388,6 +1398,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
     }
 
     func retire() {
+        cancelAgentAuthorizationRestore()
         isDeleted = true
         isEnabled = false
         lifecycleGeneration &+= 1
@@ -1448,6 +1459,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
 
     func onRuntimeBecameReady(bridge: SystemPluginHostBridge) async {
         guard isEnabled, !isDeleted else { return }
+        cancelAgentAuthorizationRestore()
         await waitForPendingTask()
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
@@ -1465,6 +1477,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
 
     func onRuntimeStopping(bridge: SystemPluginHostBridge) async {
         guard !isDeleted else { return }
+        cancelAgentAuthorizationRestore()
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
         await waitForPendingTask()
@@ -1626,6 +1639,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
             }
             healthState = .healthy
             runtimeStatusSummary = "已启用 · 宿主服务运行中"
+            scheduleAgentAuthorizationRestore()
         } catch is CancellationError {
             _ = await stopOwnedProcess()
         } catch {
@@ -1826,6 +1840,9 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
         if manifest.capabilities.contains("agent.readonly") {
             environment["MACDORA_AGENT_CONTROL_PATH"] = agentControlStore.fileURL.path
         }
+        if manifest.usesCopyTokenAuthorization {
+            environment["MACDORA_AGENT_AUTH_MODE"] = "token-v1"
+        }
         if manifest.capabilities.contains("guest.shell") {
             for name in [
                 "MACDORA_ADB_PATH",
@@ -1919,6 +1936,67 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
                 rootURL: rootURL,
                 pluginID: manifest.id
             ).endpointURL
+    }
+
+    private func cancelAgentAuthorizationRestore() {
+        agentRestoreTask?.cancel()
+        agentRestoreTask = nil
+    }
+
+    /// A copy grant belongs to the local user, not to one host-service process.
+    /// Restore it only through the same host-only authorization RPC as a copy.
+    func scheduleAgentAuthorizationRestore() {
+        cancelAgentAuthorizationRestore()
+        guard manifest.usesCopyTokenAuthorization,
+              let context = agentRuntimeContext() else { return }
+        let generation = lifecycleGeneration
+        agentRestoreTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.restoreAgentAuthorization(context: context, generation: generation)
+        }
+    }
+
+    private func restoreAgentAuthorization(
+        context: HostServiceAgentRuntimeContext,
+        generation: UInt64
+    ) async {
+        func isCurrentContext() -> Bool {
+            isCurrent(generation)
+                && currentOwnedProcess()?.configuration.instanceID == context.instanceID
+                && context.securityStateCheck.isCurrent()
+        }
+        guard isCurrentContext(),
+              let previous = try? agentControlStore.reload(),
+              let record = try? agentControlStore.rebindCopyAuthorization(
+                ifUnchanged: previous, toInstance: context.instanceID
+              ) else { return }
+
+        while isCurrentContext() {
+            guard let current = try? agentControlStore.reload(), current == record else { return }
+            let response = await agentRPCClient.authorize(context: context, record: record)
+            guard isCurrentContext(), let current = try? agentControlStore.reload(),
+                  current == record else { return }
+            switch response {
+            case .success(let status):
+                guard status.pluginId == context.pluginID, status.instanceId == context.instanceID,
+                      !status.manual else { return }
+                notificationBridge?.notifyPluginStateDidChange()
+                return
+            case .failure(let error):
+                switch error {
+                case .unavailable, .busy, .server(.loginRequired),
+                     .server(.businessNotReady), .server(.recoveryRequired):
+                    break
+                default:
+                    return
+                }
+            }
+            do {
+                try await Task.sleep(for: agentRestoreRetryDelay)
+            } catch {
+                return
+            }
+        }
     }
 
     func agentRuntimeContext() -> HostServiceAgentRuntimeContext? {
@@ -2043,6 +2121,7 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
               !owned.handle.isRunning else {
             return
         }
+        cancelAgentAuthorizationRestore()
         _ = supervisor.removeIfOwned(
             rootURL: owned.rootURL,
             pluginID: owned.pluginID,

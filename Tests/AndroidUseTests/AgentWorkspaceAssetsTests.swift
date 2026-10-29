@@ -6,6 +6,79 @@ import XCTest
 
 @MainActor
 final class AgentWorkspaceAssetsTests: XCTestCase {
+    func testCopyAuthorizationStatesUseOneStepAndKeepWithdrawalVisible() throws {
+        _ = NSApplication.shared
+        let fixture = try AgentAssetFixture(copyToken: true)
+        defer { fixture.remove() }
+        let instance = try XCTUnwrap(fixture.plugin.agentRuntimeContext()?.instanceID)
+        let states: [(String, Bool, Bool, Bool, HostServiceAgentState, String)] = [
+            ("manual", false, false, true, .waitingForAgent, "由你操作"),
+            ("approved", true, false, false, .ready, "已授权，待接入"),
+            ("connected-idle", true, true, false, .ready, "已授权，待处理"),
+            ("preparing", true, true, false, .recovering, "正在准备"),
+            ("restore-wait", true, false, true, .waitingForAgent, "接入待恢复"),
+            ("login-wait", true, false, false, .waitingForLogin, "需要登录"),
+            ("permission", true, false, true, .needsAttention, "接入受限")
+        ]
+        for width in [CGFloat(720), CGFloat(360)] {
+            for (name, approved, connected, runtimeManual, state, title) in states {
+                let status = HostServiceAgentStatus(pluginId: fixture.plugin.manifest.id,
+                    instanceId: instance, state: state, agentConnected: connected,
+                    businessReady: false, taskRunning: false, manual: runtimeManual,
+                    errorCode: state == .waitingForLogin ? .loginRequired
+                        : state == .needsAttention ? .permissionDenied : nil)
+                let view = HostServiceAgentWorkspaceView(testingWith: fixture.plugin, status: status)
+                view.controller.setLoadedStatusForTesting(status, persistedManual: !approved, loaded: true)
+                view.frame.size.width = width - 40
+                let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 480),
+                    styleMask: [.titled], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                let host = NSView()
+                window.contentView = host
+                host.addSubview(view)
+                NSLayoutConstraint.activate([
+                    view.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 20),
+                    view.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -20),
+                    view.topAnchor.constraint(equalTo: host.topAnchor, constant: 20)
+                ])
+                host.layoutSubtreeIfNeeded()
+                host.layoutSubtreeIfNeeded()
+                let buttons = descendants(of: view).compactMap { $0 as? TFButton }
+                let copy = try XCTUnwrap(buttons.first { $0.identifier?.rawValue == "agent-copy-configuration" })
+                let withdraw = try XCTUnwrap(buttons.first { $0.identifier?.rawValue == "agent-primary-action" })
+                let test = try XCTUnwrap(buttons.first { $0.identifier?.rawValue == "agent-test-connection" })
+                XCTAssertFalse(copy.isHidden)
+                XCTAssertTrue(copy.isEnabled)
+                XCTAssertTrue(test.isHidden)
+                XCTAssertEqual(withdraw.isHidden, !approved)
+                if approved {
+                    XCTAssertTrue(withdraw.isEnabled)
+                    XCTAssertEqual(withdraw.title, "我来操作")
+                }
+                XCTAssertTrue(labels(in: view).contains(title))
+                if state == .recovering {
+                    XCTAssertTrue(labels(in: view).contains("准备中"))
+                    XCTAssertFalse(labels(in: view).contains("需要处理"))
+                }
+                if state == .waitingForLogin {
+                    XCTAssertTrue(labels(in: view).contains { $0.contains("登录对应应用") })
+                    XCTAssertFalse(labels(in: view).contains("需要处理"))
+                }
+                if state == .needsAttention {
+                    XCTAssertTrue(labels(in: view).contains { $0.contains("系统权限") })
+                }
+                XCTAssertTrue(labels(in: view).contains { $0.contains("复制即授权只读访问") })
+                for button in buttons where !button.isHidden {
+                    let bounds = button.convert(button.bounds, to: view)
+                    XCTAssertGreaterThanOrEqual(bounds.minX, -1)
+                    XCTAssertLessThanOrEqual(bounds.maxX, view.bounds.width + 1)
+                }
+                try snapshot(view, to: try exportDirectory(),
+                    name: "copy-\(name)-\(Int(width)).png")
+                window.orderOut(nil)
+            }
+        }
+    }
     func testNeutralStatesRenderWideAndNarrowWithKeyboardActions() throws {
         _ = NSApplication.shared
         let fixture = try AgentAssetFixture()
@@ -253,7 +326,7 @@ private struct AgentAssetFixture {
     let root: URL
     let plugin: HostServiceSystemPlugin
 
-    init() throws {
+    init(copyToken: Bool = false) throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("macdora-agent-assets-\(UUID().uuidString)")
         let bundle = root.appendingPathComponent("neutral-agent", isDirectory: true)
@@ -280,14 +353,14 @@ private struct AgentAssetFixture {
             iconSymbol: "person.crop.circle.badge.checkmark",
             accentHex: 0x0F766E,
             minHostVersion: "0.2.0",
-            capabilities: ["host.service", "agent.readonly"],
+            capabilities: ["host.service", "agent.readonly"] + (copyToken ? ["agent.readonly.token.v1"] : []),
             driverType: "host_service",
             entrypoints: SystemPluginEntrypoints(
                 hostService: "bin/service",
                 agentMCP: "bin/agent"
             )
         )
-        manifest.agentSummary = "只读计数；不返回正文，不写业务"
+        manifest.agentSummary = copyToken ? "权限：只读；具体能力由插件提供" : "只读计数；不返回正文，不写业务"
         manifest.agentInstructions = "Discover the fixture's tools and verify the current state."
         try JSONEncoder().encode(manifest).write(
             to: bundle.appendingPathComponent("manifest.json")
