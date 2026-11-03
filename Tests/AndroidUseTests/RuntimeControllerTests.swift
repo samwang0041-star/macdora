@@ -32,7 +32,7 @@ final class RuntimeControllerTests: XCTestCase {
             Data("0000: 00000002 00000000 00010000 0001 01 123 @scrcpy_000000490\n".utf8),
             scid: 73
         ))
-        XCTAssertTrue(command.contains("vd_destroy_content=true"))
+        XCTAssertTrue(command.contains("vd_destroy_content=false"))
         XCTAssertFalse(command.contains("start_app="))
     }
 
@@ -933,7 +933,8 @@ private final class TestEnvironment: ControllerEnvironment, @unchecked Sendable 
         adbURL: URL,
         localURL: URL,
         remotePath: String,
-        environment: [String: String]
+        environment: [String: String],
+        timeout: TimeInterval
     ) async throws {}
 
     func portIsAvailable(_ port: UInt16) -> Bool { true }

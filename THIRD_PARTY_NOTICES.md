@@ -11,6 +11,7 @@ Macdora's original host application and original helper code are provided under 
 | SPIRV-Cross | [KhronosGroup/SPIRV-Cross, 6c09849](https://github.com/KhronosGroup/SPIRV-Cross/tree/6c09849fe88c48eaed08413aa022aaa136a3a057) | [Apache-2.0](Vendor/MoltenVK-1.4.2/licenses/SPIRV-Cross-LICENSE). |
 | Vulkan-Headers | [KhronosGroup/Vulkan-Headers, e3b1eec](https://github.com/KhronosGroup/Vulkan-Headers/tree/e3b1eec08173d6b825cd3ac88c885a63b621504a) | [Apache-2.0 or MIT, per file](Vendor/MoltenVK-1.4.2/licenses/Vulkan-Headers-LICENSE.md). |
 | cereal | [USCiLab/cereal, a56bad8](https://github.com/USCiLab/cereal/tree/a56bad8bbb770ee266e930c95d37fff2a5be7fea) | [BSD-3-Clause](Vendor/MoltenVK-1.4.2/licenses/cereal-LICENSE). |
+| 系统助手参考资料 | [wangzan101/mika v0.1.33](https://github.com/wangzan101/mika)（仅作设计参考，不参与构建或运行） | [Apache-2.0](https://github.com/wangzan101/mika/blob/main/LICENSE)，第三方清单见[上游 notices](https://github.com/wangzan101/mika/blob/main/licenses/THIRD_PARTY_NOTICES.md)。插件内的微信使用知识卡来自该项目的 knowledge 数据。 |
 
 The scrcpy build applies Macdora's ordered input acknowledgments, related touch handling changes, and an in-place display/encoder reconfiguration protocol with bounded output polling for reset and shutdown. The replacement Android input controller is in `Guest/OrderedScrcpy`; its use with the upstream server remains under Apache-2.0. The server's upstream license and a modification notice are included in the app's `Contents/Resources/Notices` directory.
 

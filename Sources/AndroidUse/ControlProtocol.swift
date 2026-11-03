@@ -29,6 +29,10 @@ enum Wire {
         return Data([9]) + integer(sequence) + Data([1]) + integer(UInt32(bytes.count)) + bytes
     }
 
+    static func displayPower(on: Bool) -> Data {
+        Data([10, on ? 1 : 0])
+    }
+
     static func touch(action: UInt8, x: UInt32, y: UInt32, width: UInt16, height: UInt16) -> Data {
         // A generic finger avoids the mouse-hover semantics of POINTER_ID_MOUSE.
         Data([2, action]) + integer(UInt64.max - 1) + integer(x) + integer(y)
@@ -80,9 +84,9 @@ struct DisplayStreamConfiguration: Equatable, Sendable {
     var isValid: Bool {
         (320...4096).contains(nativeWidth)
             && (320...4096).contains(nativeHeight)
-            && (density == 320 || density == 400)
+            && [240, 320, 360, 400].contains(density)
             && [1280, 1920, 2560].contains(maxSize)
-            && [30, 45, 60].contains(maxFPS)
+            && [15, 30, 45, 60, 90, 120].contains(maxFPS)
     }
 }
 

@@ -492,6 +492,10 @@ final class VideoStream {
         }
     }
 
+    func setDisplayPower(_ on: Bool) {
+        send(Wire.displayPower(on: on))
+    }
+
     func updateDisplay(_ configuration: DisplayStreamConfiguration, completion: @escaping (Bool) -> Void) {
         guard configuration.isValid else {
             controlQueue.async { completion(false) }

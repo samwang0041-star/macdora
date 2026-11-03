@@ -1,0 +1,23 @@
+{
+  "accentHex": 50720,
+  "author": "Macdora",
+  "capabilities": [
+    "host.service",
+    "guest.shell",
+    "ui.assistant.workspace"
+  ],
+  "category": "效率",
+  "driverType": "host_service",
+  "entrypoints": {
+    "hostService": "bin/mika-host-service",
+    "onDisable": "resources/uninstall.sh",
+    "configFile": "resources/plugin-config.json"
+  },
+  "iconSymbol": "sparkles.rectangle.stack",
+  "id": "agent.mika",
+  "minHostVersion": "0.2.0",
+  "name": "系统助手",
+  "schemaVersion": 1,
+  "subtitle": "系统级 App 操作助手，直接在后台显示上管理 Android 环境",
+  "version": "0.1.7"
+}

@@ -1,4 +1,4 @@
-# AndroidUse ordered-touch and display-reconfiguration scrcpy server patch
+# AndroidUse ordered-touch, display-reconfiguration, and task-reuse scrcpy server patch
 
 This directory contains the minimal Android server-side delta used by the
 native AndroidUse client. The unmodified upstream inputs are kept outside the
@@ -20,7 +20,9 @@ tracked tree:
 `scripts/build_without_gradle.sh` is an unmodified copy of the upstream manual
 compiler. `ordered-touch.patch` applies with `patch --fuzz=0` to a fresh copy of
 the upstream `server/src` tree and also contains the display-reconfiguration
-delta. `SHA256SUMS` pins every patched input.
+delta. `display-reuse.patch` then moves an existing package task to the target
+virtual display before `startActivity`, so reopening an app preserves its
+task and authentication state. `SHA256SUMS` pins every patched input.
 
 The server version remains `5.0.1` for protocol compatibility. The manifest
 records the patch identity and patch digest.
@@ -48,14 +50,16 @@ cannot silently fall back to an ordered-touch claim with the stock server.
 - Client to device: `129` (`u8`) + `sequence` (`u32`, big endian) +
   `nativeWidth` (`u32`) + `nativeHeight` (`u32`) + `density` (`u32`) +
   `maxSize` (`u32`) + `maxFPS` (`u32`), exactly 25 bytes.
-- Width and height must be between 320 and 4096 inclusive. Density must be 320
-  or 400, max size must be 1280, 1920 or 2560, and max FPS must be 30, 45 or 60.
+- Width and height must be between 320 and 4096 inclusive. Density must be
+  240, 320, 360 or 400, max size must be 1280, 1920 or 2560, and max FPS must be
+  15, 30, 45, 60, 90 or 120.
 - Device to client: `4` (`u8`) + `sequence` (`u32`, big endian) + `status`
   (`u8`, 0 success, 1 failure), exactly 6 bytes.
 - The existing virtual display is resized with `VirtualDisplay.resize()`. Its
   display id is retained, and the display, touch mapper, focus lease and other
-  displays are not recreated. Macdora keeps density at 320, so `maxSize` and
-  `maxFPS` changes keep the Activity and unsaved input. A size change is an
+  displays are not recreated. Macdora keeps the active profile density (240 or
+  360), so `maxSize` and `maxFPS` changes keep the Activity and unsaved input.
+  A size change is an
   Android configuration change: Activities that do not handle `screenSize`,
   `smallestScreenSize` or, for a 640dp-wide display, `screenLayout` may still
   be relaunched by Android.
@@ -79,7 +83,7 @@ scripts/build-ordered-server.sh
 ```
 
 The output is `.build/scrcpy-ordered/scrcpy-server`. The script creates a
-clean source copy under `.build/scrcpy-ordered`, applies the patch without
+clean source copy under `.build/scrcpy-ordered`, applies both patches without
 fuzzing, runs focused protocol, display-reconfiguration and touch-order tests,
 invokes the upstream manual compiler, and verifies the resulting DEX.
 
@@ -105,6 +109,6 @@ the fixed URL when absent:
 The pinned source files are recorded in `SHA256SUMS`. The patched source tree,
 SDK cache, and binary are build artifacts and are excluded from version
 control. The current reproducible output digest is
-`fd27be5fd66d9fb6e663e04b91e94c918f3e820592a7f0d6521f0323f22c44b8`.
+`7c4ffec35795433503a01378c10870e1747f3157497b0f170b833164ba816f68`.
 
 Licensed under Apache License 2.0. See `LICENSE`.

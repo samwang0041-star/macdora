@@ -34,6 +34,13 @@ final class DisplayReconfigurationTests: XCTestCase {
             maxSize: 1280,
             maxFPS: 30
         ).isValid)
+        XCTAssertTrue(DisplayStreamConfiguration(
+            nativeWidth: 1600,
+            nativeHeight: 2560,
+            density: 400,
+            maxSize: 1920,
+            maxFPS: 15
+        ).isValid)
         XCTAssertFalse(DisplayStreamConfiguration(
             nativeWidth: 319,
             nativeHeight: 2560,
@@ -41,12 +48,19 @@ final class DisplayReconfigurationTests: XCTestCase {
             maxSize: 1920,
             maxFPS: 45
         ).isValid)
-        XCTAssertFalse(DisplayStreamConfiguration(
+        XCTAssertTrue(DisplayStreamConfiguration(
             nativeWidth: 1600,
             nativeHeight: 2560,
             density: 360,
             maxSize: 1920,
             maxFPS: 45
+        ).isValid)
+        XCTAssertTrue(DisplayStreamConfiguration(
+            nativeWidth: 1600,
+            nativeHeight: 2560,
+            density: 240,
+            maxSize: 1920,
+            maxFPS: 120
         ).isValid)
         XCTAssertFalse(DisplayStreamConfiguration(
             nativeWidth: 1600,

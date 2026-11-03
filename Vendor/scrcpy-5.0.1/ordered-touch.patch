@@ -277,6 +277,27 @@ diff -ruN a/server/src/main/java/com/genymobile/scrcpy/control/Controller.java b
      }
  
      private boolean injectScroll(Position position, float hScroll, float vScroll, int buttons) {
+@@ -855,12 +883,16 @@
+     }
+ 
+     private void setDisplayPower(boolean on) {
+-        // Change the power of the main display when mirroring a virtual display
+-        int targetDisplayId = displayId != Device.DISPLAY_ID_NONE ? displayId : 0;
++        // Target the virtual display created by --new-display. The physical
++        // display is unrelated to the window that the client is hiding.
++        int targetDisplayId = displayId;
++        if (targetDisplayId == Device.DISPLAY_ID_NONE) {
++            DisplayData data = displayData.get();
++            targetDisplayId = data != null ? data.virtualDisplayId : 0;
++        }
+         boolean setDisplayPowerOk = Device.setDisplayPower(targetDisplayId, on);
+         if (setDisplayPowerOk) {
+-            // Do not keep display power off for virtual displays: MOD+p must wake up the physical device
+-            keepDisplayPowerOff = displayId != Device.DISPLAY_ID_NONE && !on;
++            keepDisplayPowerOff = !on;
+             Ln.i("Device display turned " + (on ? "on" : "off"));
+             if (cleanUp != null) {
+                 boolean mustRestoreOnExit = !on;
 @@ -881,6 +929,15 @@
          newDisplayCapture.requestResize(width, height);
      }
@@ -520,9 +541,9 @@ diff -ruN /dev/null b/server/src/main/java/com/genymobile/scrcpy/control/Display
 +    public boolean isValid() {
 +        return nativeWidth >= MIN_NATIVE_SIZE && nativeWidth <= MAX_NATIVE_SIZE
 +                && nativeHeight >= MIN_NATIVE_SIZE && nativeHeight <= MAX_NATIVE_SIZE
-+                && (density == 320 || density == 400)
++                && (density == 240 || density == 320 || density == 360 || density == 400)
 +                && (maxSize == 1280 || maxSize == 1920 || maxSize == 2560)
-+                && (maxFps == 30 || maxFps == 45 || maxFps == 60);
++                && (maxFps == 15 || maxFps == 30 || maxFps == 45 || maxFps == 60 || maxFps == 90 || maxFps == 120);
 +    }
 +
 +    public long getNativeWidth() {
@@ -1212,7 +1233,7 @@ diff -ruN a/server/src/test/java/com/genymobile/scrcpy/control/DeviceMessageWrit
 diff -ruN /dev/null b/server/src/test/java/com/genymobile/scrcpy/control/DisplayConfigurationProtocolTest.java
 --- /dev/null	1970-01-01 00:00:00
 +++ b/server/src/test/java/com/genymobile/scrcpy/control/DisplayConfigurationProtocolTest.java	2026-10-28 09:51:03
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,150 @@
 +package com.genymobile.scrcpy.control;
 +
 +import org.junit.Assert;
@@ -1258,10 +1279,13 @@ diff -ruN /dev/null b/server/src/test/java/com/genymobile/scrcpy/control/Display
 +    public void testDisplayConfigurationBoundsAreExact() {
 +        Assert.assertTrue(new DisplayStreamConfiguration(320, 4096, 320, 1280, 30).isValid());
 +        Assert.assertTrue(new DisplayStreamConfiguration(4096, 320, 400, 2560, 60).isValid());
++        Assert.assertTrue(new DisplayStreamConfiguration(1600, 2560, 400, 1920, 15).isValid());
 +
 +        Assert.assertFalse(new DisplayStreamConfiguration(319, 1000, 320, 1280, 30).isValid());
 +        Assert.assertFalse(new DisplayStreamConfiguration(1000, 4097, 320, 1280, 30).isValid());
-+        Assert.assertFalse(new DisplayStreamConfiguration(1000, 1000, 360, 1280, 30).isValid());
++        Assert.assertTrue(new DisplayStreamConfiguration(1000, 1000, 360, 1280, 30).isValid());
++        Assert.assertTrue(new DisplayStreamConfiguration(1000, 1000, 240, 1280, 30).isValid());
++        Assert.assertTrue(new DisplayStreamConfiguration(1000, 1000, 320, 1280, 120).isValid());
 +        Assert.assertFalse(new DisplayStreamConfiguration(1000, 1000, 320, 1600, 30).isValid());
 +        Assert.assertFalse(new DisplayStreamConfiguration(1000, 1000, 320, 1280, 50).isValid());
 +    }

@@ -71,7 +71,8 @@ struct SystemPluginManifest: Codable, Equatable, Identifiable, Sendable {
         "host.service",
         "agent.readonly",
         "agent.readonly.token.v1",
-        "runtime.keep-awake"
+        "runtime.keep-awake",
+        "ui.assistant.workspace"
     ]
     var supportsKeepAwakeControl: Bool {
         driverType == "host_service"
@@ -310,12 +311,19 @@ struct SystemPluginCatalogItem: Equatable, Identifiable, Sendable {
         driverType == "hardware_gnss_location"
             || driverType == "external_script"
             || isAgentHostService
+            || isAssistantHostService
     }
 
     var isAgentHostService: Bool {
         driverType == "host_service"
             && capabilities.contains("host.service")
             && capabilities.contains("agent.readonly")
+    }
+
+    var isAssistantHostService: Bool {
+        driverType == "host_service"
+            && capabilities.contains("host.service")
+            && capabilities.contains("ui.assistant.workspace")
     }
 
     static let developerLocationID = "builtin.developer.location"

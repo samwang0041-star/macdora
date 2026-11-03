@@ -337,6 +337,8 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
     var interfaceScale: DisplayInterfaceScale
     var targetFPS: Int
     var keepWarmInBackground: Bool
+    var backgroundFrameSavingEnabled: Bool
+    var deviceProfile: GuestDeviceProfile
     var clipboardSyncEnabled: Bool
     var directIMEEnabled: Bool
     var cameraEnabled: Bool
@@ -349,6 +351,8 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         resolutionPreset: String = "1080p",
         targetFPS: Int = 60,
         keepWarmInBackground: Bool = true,
+        backgroundFrameSavingEnabled: Bool = true,
+        deviceProfile: GuestDeviceProfile = .samsungTablet,
         clipboardSyncEnabled: Bool = true,
         directIMEEnabled: Bool = true,
         cameraEnabled: Bool = true,
@@ -360,6 +364,8 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         self.interfaceScale = interfaceScale
         self.targetFPS = targetFPS
         self.keepWarmInBackground = keepWarmInBackground
+        self.backgroundFrameSavingEnabled = backgroundFrameSavingEnabled
+        self.deviceProfile = deviceProfile
         self.clipboardSyncEnabled = clipboardSyncEnabled
         self.directIMEEnabled = directIMEEnabled
         self.cameraEnabled = cameraEnabled
@@ -372,6 +378,8 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         case interfaceScale
         case targetFPS
         case keepWarmInBackground
+        case backgroundFrameSavingEnabled
+        case deviceProfile
         case clipboardSyncEnabled
         case directIMEEnabled
         case cameraEnabled
@@ -387,6 +395,14 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
             ?? Self.legacyInterfaceScale(for: preset)
         targetFPS = try container.decodeIfPresent(Int.self, forKey: .targetFPS) ?? 60
         keepWarmInBackground = try container.decodeIfPresent(Bool.self, forKey: .keepWarmInBackground) ?? true
+        backgroundFrameSavingEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .backgroundFrameSavingEnabled
+        ) ?? true
+        deviceProfile = try container.decodeIfPresent(
+            GuestDeviceProfile.self,
+            forKey: .deviceProfile
+        ) ?? .samsungTablet
         clipboardSyncEnabled = try container.decodeIfPresent(Bool.self, forKey: .clipboardSyncEnabled) ?? true
         directIMEEnabled = try container.decodeIfPresent(Bool.self, forKey: .directIMEEnabled) ?? true
         cameraEnabled = try container.decodeIfPresent(Bool.self, forKey: .cameraEnabled) ?? true
@@ -398,12 +414,21 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         resolutionPreset: "1080p",
         targetFPS: 60,
         keepWarmInBackground: true,
+        backgroundFrameSavingEnabled: true,
+        deviceProfile: .samsungTablet,
         clipboardSyncEnabled: true,
         directIMEEnabled: true,
         cameraEnabled: true,
         tabletMode: true,
         appDisplayOverrides: [:]
     )
+
+    static let backgroundFrameRate = 15
+
+    func effectiveTargetFPS(windowPresentable: Bool) -> Int {
+        guard backgroundFrameSavingEnabled, !windowPresentable else { return targetFPS }
+        return min(targetFPS, Self.backgroundFrameRate)
+    }
 
     static let resolutionOptions: [DisplayResolutionOption] = [
         DisplayResolutionOption(
@@ -462,9 +487,13 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
         return max(native.width, native.height) < max(output.width, output.height) ? native : output
     }
 
-    static func scrcpyNewDisplaySpec(tabletMode: Bool, interfaceScale: DisplayInterfaceScale = .standard) -> String {
+    static func scrcpyNewDisplaySpec(
+        tabletMode: Bool,
+        interfaceScale: DisplayInterfaceScale = .standard,
+        density: Int = DisplayInterfaceScale.standard.nativeDPI
+    ) -> String {
         let size = interfaceScale.nativePixelSize(tabletMode: tabletMode)
-        return "\(Int(size.width))x\(Int(size.height))/\(interfaceScale.nativeDPI)"
+        return "\(Int(size.width))x\(Int(size.height))/\(density)"
     }
 
     static func displayLabel(for preset: String, tabletMode: Bool) -> String {
@@ -511,7 +540,7 @@ struct ContainerPreferences: Codable, Equatable, Sendable {
     }
 
     var preferredDPI: Int {
-        interfaceScale.nativeDPI
+        Int(deviceProfile.identity.density) ?? interfaceScale.nativeDPI
     }
 }
 
@@ -563,7 +592,7 @@ struct ContainerTelemetry: Equatable, Sendable {
         totalRSSMiB: 0,
         emulatorRSSMiB: 0,
         hostClientRSSMiB: 0,
-        guestMemoryBudgetMiB: 6144,
+        guestMemoryBudgetMiB: Double(HostPerformanceProfile.current().guestMemoryMB),
         diskUsedGB: 0,
         presentedFPS: 0,
         frameIntervalP95Ms: 0,

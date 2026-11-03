@@ -223,7 +223,7 @@ echo "Generated SHA-256 manifest: $SHA256_PATH"
 
 if [[ "$PUBLISH" == "1" ]]; then
   # Release assets live beside the source; the app consumes them anonymously.
-  NOTES="Macdora ${TAG} · 早期预览（Build ${BUNDLE_BUILD}）。支持 macOS 15 及以上的 Apple Silicon Mac。本版改善 Agent 与本地插件的接入：支持声明相应能力的插件通过一次复制授权只读访问，在应用登录或服务恢复后继续接入，并可随时接回控制。具体业务功能取决于各插件；个人业务插件继续独立安装，不随公开安装包、默认插件清单或 Release 资产分发。轻量安装包不附带 Android 环境或第三方应用；首次使用按需下载，已有环境继续复用。此包使用 Developer ID 签名，已完成 Apple 公证；App 内已钉附公证票据。"
+  NOTES="Macdora ${TAG} · 早期预览（Build ${BUNDLE_BUILD}）。支持 macOS 15 及以上的 Apple Silicon Mac。本版完善原生运行环境与系统助手工作台：新增三星/小米机型 profile、120 Hz 主机档位、后台节能与显示电源控制、ANGLE/Vulkan 持久着色器缓存、应用任务复用和共享目录双向导入导出。系统助手插件继续以独立包分发，登录、验证码与支付留在用户手中。轻量安装包不附带 Android 环境或第三方应用；首次使用按需下载，已有环境继续复用。此包使用 Developer ID 签名，已完成 Apple 公证；App 内已钉附公证票据。"
   EXTRA_ASSETS=()
   if [[ -f "$PROJECT_ROOT/plugins/registry.json" && -f "$PROJECT_ROOT/plugins/dist/builtin.developer.location.auplugin" ]]; then
     EXTRA_ASSETS+=("$PROJECT_ROOT/plugins/registry.json" "$PROJECT_ROOT/plugins/dist/builtin.developer.location.auplugin" "$PROJECT_ROOT/plugins/dist/builtin.developer.location.auplugin.sha256")

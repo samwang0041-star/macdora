@@ -681,6 +681,79 @@ enum HostServiceHealthClient {
             if errno != EINTR { return false }
         }
     }
+
+    static func performRPC(
+        socketURL: URL,
+        method: String,
+        params: [String: Any] = [:],
+        timeout: TimeInterval = 15,
+        maxResponseBytes: Int = 2 * 1024 * 1024
+    ) async throws -> [String: Any] {
+        try await Task.detached(priority: .userInitiated) {
+            try performRPCBlocking(
+                socketURL: socketURL,
+                method: method,
+                params: params,
+                timeout: timeout,
+                maxResponseBytes: maxResponseBytes
+            )
+        }.value
+    }
+
+    private static func performRPCBlocking(
+        socketURL: URL,
+        method: String,
+        params: [String: Any],
+        timeout: TimeInterval,
+        maxResponseBytes: Int
+    ) throws -> [String: Any] {
+        let deadline = DispatchTime.now() + max(0.5, timeout)
+        guard let fd = connect(socketURL: socketURL, deadline: deadline) else {
+            throw NSError(domain: "HostServiceRPC", code: 1, userInfo: [NSLocalizedDescriptionKey: "无法连接插件宿主服务"])
+        }
+        defer { Darwin.close(fd) }
+
+        let requestID = Int.random(in: 1...Int(Int32.max))
+        let request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": requestID,
+            "method": method,
+            "params": params
+        ]
+        let requestData = try JSONSerialization.data(withJSONObject: request)
+        guard sendAll(fd: fd, data: requestData + Data([0x0A]), deadline: deadline) else {
+            throw NSError(domain: "HostServiceRPC", code: 2, userInfo: [NSLocalizedDescriptionKey: "发送插件请求失败"])
+        }
+
+        var received = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            guard waitForEvent(fd: fd, events: Int16(POLLIN), deadline: deadline),
+                  let count = readChunk(fd: fd, buffer: &buffer),
+                  count > 0 else {
+                throw NSError(domain: "HostServiceRPC", code: 3, userInfo: [NSLocalizedDescriptionKey: "插件服务响应超时"])
+            }
+            let chunk = Data(buffer.prefix(count))
+            if let newline = chunk.firstIndex(of: 0x0A) {
+                received.append(chunk[..<newline])
+                guard let obj = try JSONSerialization.jsonObject(with: received) as? [String: Any] else {
+                    throw NSError(domain: "HostServiceRPC", code: 4, userInfo: [NSLocalizedDescriptionKey: "插件响应格式无效"])
+                }
+                if let err = obj["error"] as? [String: Any],
+                   let msg = err["message"] as? String {
+                    throw NSError(domain: "HostServiceRPC", code: 5, userInfo: [NSLocalizedDescriptionKey: msg])
+                }
+                if let result = obj["result"] as? [String: Any] {
+                    return result
+                }
+                return [:]
+            }
+            guard received.count + chunk.count <= maxResponseBytes else {
+                throw NSError(domain: "HostServiceRPC", code: 6, userInfo: [NSLocalizedDescriptionKey: "插件响应超出大小限制"])
+            }
+            received.append(chunk)
+        }
+    }
 }
 
 private final class HostServiceProbeRace: @unchecked Sendable {
@@ -1386,7 +1459,16 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
               !Task.isCancelled else {
             return false
         }
+        var cleaned = stopped
         if stopped {
+            cleaned = await runDisableScript(bridge: bridge)
+        }
+        guard !isDeleted,
+              lifecycleGeneration == generation,
+              !Task.isCancelled else {
+            return false
+        }
+        if cleaned {
             healthState = .inactive
             runtimeStatusSummary = "未启用"
             return true
@@ -1395,6 +1477,27 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
         healthState = .degraded(Self.fixedHealthError)
         runtimeStatusSummary = "停用失败，请重试。"
         return false
+    }
+
+    private func runDisableScript(bridge: SystemPluginHostBridge) async -> Bool {
+        guard bridge.currentRuntimeState == .ready || bridge.currentRuntimeState == .running,
+              let relativePath = manifest.entrypoints.onDisable,
+              !relativePath.contains(".."),
+              !relativePath.hasPrefix("."),
+              !relativePath.contains("/.") else {
+            return true
+        }
+        let root = bundleDirectoryURL.standardizedFileURL
+        let scriptURL = root.appendingPathComponent(relativePath).standardizedFileURL
+        guard scriptURL.path.hasPrefix(root.path + "/"),
+              let script = try? String(contentsOf: scriptURL, encoding: .utf8) else {
+            return false
+        }
+        return await bridge.executeGuestShell(
+            script,
+            operation: "清理系统助手环境",
+            timeout: 20
+        )
     }
 
     func retire() {
@@ -2032,6 +2135,15 @@ final class HostServiceSystemPlugin: HotPluggableSystemPlugin, @unchecked Sendab
 
     private var currentAgentRuntimeConfiguration: HostServiceRuntimeConfiguration? {
         currentOwnedProcess()?.configuration
+    }
+
+    func activeSocketURL() -> URL? {
+        guard isEnabled, !isDeleted,
+              let owned = currentOwnedProcess(),
+              owned.handle.isRunning else {
+            return nil
+        }
+        return owned.configuration.socketURL
     }
 
     private func preparePrivateDirectories(

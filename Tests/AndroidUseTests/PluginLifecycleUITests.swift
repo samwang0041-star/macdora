@@ -254,4 +254,41 @@ struct PluginLifecycleUITests {
     private func descendants(in root: NSView) -> [NSView] {
         [root] + root.subviews.flatMap { descendants(in: $0) }
     }
+
+    @Test("Assistant plugin package verifies for local import and renders dedicated native workspace")
+    func assistantPluginPackageAndWorkspace() throws {
+        _ = NSApplication.shared
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let packageURL = repoRoot.appendingPathComponent("plugins/agent.mika.auplugin", isDirectory: true)
+        let manifest = try SystemPluginPackageFactory.verifyPluginDirectory(
+            packageURL,
+            trustPolicy: .developerLocalImport
+        )
+        #expect(manifest.id == "agent.mika")
+        #expect(manifest.driverType == "host_service")
+        #expect(manifest.capabilities.contains("ui.assistant.workspace"))
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("macdora-assistant-ws-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let hostPlugin = HostServiceSystemPlugin(
+            manifest: manifest,
+            bundleDirectoryURL: packageURL,
+            rootURL: root
+        )
+        let workspace = AssistantPluginWorkspaceView(plugin: hostPlugin)
+        workspace.frame = NSRect(x: 0, y: 0, width: 860, height: 560)
+        workspace.layoutSubtreeIfNeeded()
+        let renderedLabels = labels(in: workspace)
+        #expect(renderedLabels.contains("下发任务"))
+        #expect(renderedLabels.contains("后台显示观察窗"))
+
+        let cmd = RuntimePorts.observerCommandLine(scid: 0x1234abcd, displayID: 7)
+        #expect(cmd.contains("display_id=7"))
+        #expect(cmd.contains("control=false"))
+    }
 }

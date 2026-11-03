@@ -23,7 +23,8 @@ JAVA_HOME="${JAVA_HOME:-$JAVA_HOME_DEFAULT}"
 SOURCE_SHA256="a0d699fc7388b8252416c49e6293639de39ab76a03e7302ddced56c284d45200"
 SERVER_SHA256="764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536"
 MANUAL_BUILDER_SHA256="1d3df77343f35c6b2a82bd782bb265ecaca8431d9e09cae0e79b93756738f748"
-PATCH_SHA256="0a95edaed02b78f249cff01e38f259ed2b30406f16bfa4d4fa660ff954c10d03"
+PATCH_SHA256="6bbd0e46dc3f742ac3b0da98a15973d66c0851f651791360689443cfc27bb1f0"
+DISPLAY_REUSE_PATCH_SHA256="62d1122b6c27f42fffb8b234e685fc7d6a64cafac857c07e76b3ad643e0390dc"
 PLATFORM_ZIP_SHA256="37607369a28c5b640b3a7998868d45898ebcb777565a0e85f9acf36f29631d2e"
 BUILD_TOOLS_ZIP_SHA256="04e7f3a72044de4926fa038fa0e251a37bba1e1c3fb8beab6f8401bfd9eb4bf3"
 
@@ -60,6 +61,7 @@ require_sha256 "$UPSTREAM_ARCHIVE" "$SOURCE_SHA256"
 require_sha256 "$PROJECT_ROOT/.cache/upstream/scrcpy-server-v5.0.1" "$SERVER_SHA256"
 require_sha256 "$VENDOR_DIR/scripts/build_without_gradle.sh" "$MANUAL_BUILDER_SHA256"
 require_sha256 "$VENDOR_DIR/ordered-touch.patch" "$PATCH_SHA256"
+require_sha256 "$VENDOR_DIR/display-reuse.patch" "$DISPLAY_REUSE_PATCH_SHA256"
 require_sha256 "$PLATFORM_ARCHIVE" "$PLATFORM_ZIP_SHA256"
 require_sha256 "$BUILD_TOOLS_ARCHIVE" "$BUILD_TOOLS_ZIP_SHA256"
 require_sha1 "$PLATFORM_ARCHIVE" "2c1a80dd4d9f7d0e6dd336ec603d9b5c55a6f576"
@@ -84,6 +86,7 @@ cp -R "$UPSTREAM_DIR/server/src" "$SOURCE_DIR/"
 cp "$VENDOR_DIR/scripts/build_without_gradle.sh" "$BUILD_DIR/source/server/"
 
 patch --batch --fuzz=0 -p1 -d "$BUILD_DIR/source" < "$VENDOR_DIR/ordered-touch.patch"
+patch --batch --fuzz=0 -p1 -d "$BUILD_DIR/source" < "$VENDOR_DIR/display-reuse.patch"
 
 for path in \
     server/src/main/java/com/genymobile/scrcpy/control/ControlMessage.java \
@@ -226,6 +229,8 @@ grep -aFq "TouchFinishedPolicy" "$CHECK_DIR/classes.dex" \
     || die "Patched touch policy missing from DEX"
 grep -aFq "DisplayConfigurationCoordinator" "$CHECK_DIR/classes.dex" \
     || die "Display reconfiguration coordinator missing from DEX"
+grep -aFq "task reuse failed" "$CHECK_DIR/classes.dex" \
+    || die "Display task reuse patch missing from DEX"
 server_sha="$(sha256 "$SERVER")"
 
 cat > "$BUILD_DIR/BUILD-MANIFEST.json" <<EOF
@@ -235,6 +240,7 @@ cat > "$BUILD_DIR/BUILD-MANIFEST.json" <<EOF
   "sourceArchiveSHA256": "$SOURCE_SHA256",
   "upstreamServerSHA256": "$SERVER_SHA256",
   "orderedTouchPatchSHA256": "$PATCH_SHA256",
+  "displayReusePatchSHA256": "$DISPLAY_REUSE_PATCH_SHA256",
   "manualCompilerSHA256": "$MANUAL_BUILDER_SHA256",
   "androidPlatform": "36_r02",
   "androidPlatformArchiveSHA256": "$PLATFORM_ZIP_SHA256",

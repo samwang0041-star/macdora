@@ -1,0 +1,19 @@
+{
+  "algorithm": "developer-local-sha256",
+  "files": {
+    "README.md": "e244cbc60ac445e54851b50194e8e911917616005827724d3a63a1df42b304e8",
+    "bin/mika-host-service": "e06a768c277d7edf6c66fb2e2965f8a95494382aeaac38ba2374182e2758ac5b",
+    "manifest.json": "bbdf7de1eb76ee60847b49ea52f6b7653026aa3bd87191138b99336117b3b58f",
+    "resources/knowledge/wechat.md": "576f1f68089b37b5fd6035151ba2949f93c5e0d981416acf77767d430329000f",
+    "resources/plugin-config.json": "cf0a26a59f6e0faf4fc0d6f9386417488456c76d8d7fe1d9bfd2981a706553ca",
+    "resources/provision.sh": "6e60fb03ed88ee532c72f560ca488200f6108df66bf7125d70c8c0978c8e751a",
+    "resources/scrcpy-server-assistant.jar": "4486a75a6d341e1f5a7c1e82690386680aa39550a4e2bc04c3fc0e0b9eb84fd5",
+    "resources/uninstall.sh": "9eb36fabb45406b353a0173254ea8dd398a8f6a3f1cd65eebb0b2e9752720a79"
+  },
+  "keyID": "developer-local",
+  "manifestSHA256": "bbdf7de1eb76ee60847b49ea52f6b7653026aa3bd87191138b99336117b3b58f",
+  "pluginID": "agent.mika",
+  "publisher": "Macdora",
+  "signature": "d8afee23f589e66324ae8b8d1b7d5517991ede475f8b304a1ba027c3114d589f",
+  "version": "0.1.7"
+}

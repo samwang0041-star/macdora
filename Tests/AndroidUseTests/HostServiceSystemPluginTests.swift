@@ -17,9 +17,12 @@ final class HostServiceTestBridge: SystemPluginHostBridge {
         "ADB_SERVER_SOCKET": "tcp:127.0.0.1:5043",
         "UNRELATED_SECRET": "not-copied"
     ]
+    var guestShellScripts: [String] = []
+    var guestShellResult = true
 
     func executeGuestShell(_ script: String, operation: String, timeout: TimeInterval) async -> Bool {
-        true
+        guestShellScripts.append(script)
+        return guestShellResult
     }
 
     func sendEmulatorGeoFix(
@@ -68,7 +71,8 @@ private struct HostServiceFixture {
         pluginID: String = "dev.host.service",
         capabilities: [String] = ["host.service"],
         markerName: String = "started-count",
-        version: String = "1.0.0"
+        version: String = "1.0.0",
+        onDisable: String? = nil
     ) throws -> HostServiceFixture {
         let fm = FileManager.default
         let bundleURL = rootURL.appendingPathComponent("plugins/\(pluginID)", isDirectory: true)
@@ -167,6 +171,14 @@ private struct HostServiceFixture {
         }
         try binary.write(to: serviceURL, options: .atomic)
         try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: serviceURL.path)
+        if let onDisable {
+            let scriptURL = bundleURL.appendingPathComponent(onDisable)
+            try fm.createDirectory(
+                at: scriptURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data("#!/system/bin/sh\necho cleanup\n".utf8).write(to: scriptURL)
+        }
         let manifest = SystemPluginManifest(
             schemaVersion: 1,
             id: pluginID,
@@ -180,7 +192,10 @@ private struct HostServiceFixture {
             minHostVersion: "0.2.0",
             capabilities: capabilities,
             driverType: "host_service",
-            entrypoints: SystemPluginEntrypoints(hostService: "bin/service")
+            entrypoints: SystemPluginEntrypoints(
+                onDisable: onDisable,
+                hostService: "bin/service"
+            )
         )
         try JSONEncoder().encode(manifest).write(
             to: bundleURL.appendingPathComponent("manifest.json"),
@@ -1272,6 +1287,78 @@ struct HostServiceSystemPluginTests {
             pluginID: fixture.manifest.id
         )
         #expect(FileManager.default.fileExists(atPath: configuration.endpointURL.path))
+    }
+
+    @Test("Disable runs the guest cleanup hook after stopping the service")
+    @MainActor
+    func disableRunsGuestCleanupHook() async throws {
+        let root = try hostServiceTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try HostServiceFixture.create(
+            rootURL: root,
+            onDisable: "resources/uninstall.sh"
+        )
+        let plugin = HostServiceSystemPlugin(
+            manifest: fixture.manifest,
+            bundleDirectoryURL: fixture.bundleURL,
+            rootURL: root
+        )
+        let bridge = HostServiceTestBridge()
+        await plugin.activate(bridge: bridge)
+        #expect(plugin.healthState == .healthy)
+
+        #expect(await plugin.deactivate(bridge: bridge))
+        #expect(bridge.guestShellScripts == ["#!/system/bin/sh\necho cleanup\n"])
+        #expect(plugin.healthState == .inactive)
+        #expect(!plugin.isEnabled)
+    }
+
+    @Test("A failed guest cleanup keeps disable retryable")
+    @MainActor
+    func failedGuestCleanupKeepsDisableRetryable() async throws {
+        let root = try hostServiceTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try HostServiceFixture.create(
+            rootURL: root,
+            onDisable: "resources/uninstall.sh"
+        )
+        let plugin = HostServiceSystemPlugin(
+            manifest: fixture.manifest,
+            bundleDirectoryURL: fixture.bundleURL,
+            rootURL: root
+        )
+        let bridge = HostServiceTestBridge()
+        await plugin.activate(bridge: bridge)
+        #expect(plugin.healthState == .healthy)
+        bridge.guestShellResult = false
+
+        #expect(await plugin.deactivate(bridge: bridge) == false)
+        #expect(plugin.isEnabled)
+        #expect(plugin.healthState == .degraded(HostServiceSystemPlugin.fixedHealthError))
+    }
+
+    @Test("Disable without a ready runtime skips guest cleanup")
+    @MainActor
+    func disableWithoutRuntimeSkipsGuestCleanup() async throws {
+        let root = try hostServiceTestRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try HostServiceFixture.create(
+            rootURL: root,
+            onDisable: "resources/uninstall.sh"
+        )
+        let plugin = HostServiceSystemPlugin(
+            manifest: fixture.manifest,
+            bundleDirectoryURL: fixture.bundleURL,
+            rootURL: root
+        )
+        let bridge = HostServiceTestBridge()
+        bridge.currentRuntimeState = .stopped
+        await plugin.activate(bridge: bridge)
+        #expect(plugin.healthState == .waitingForRuntime)
+
+        #expect(await plugin.deactivate(bridge: bridge))
+        #expect(bridge.guestShellScripts.isEmpty)
+        #expect(plugin.healthState == .inactive)
     }
 
     @Test("Reconstructed manager adopts the shared owner without launching twice")

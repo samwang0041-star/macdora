@@ -140,6 +140,32 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(ContainerPreferences.resolutionOption(for: "1440p").menuTitle(tabletMode: true, interfaceScale: .large), "精细 · 2048 × 1280")
     }
 
+    func testDeviceProfileDensityReachesTheVirtualDisplay() {
+        let tablet = RuntimePorts.commandLine(
+            scid: 1,
+            tabletMode: true,
+            density: Int(GuestDeviceProfile.samsungTablet.identity.density)!
+        )
+        XCTAssertTrue(tablet.contains("new_display=2560x1600/240"))
+
+        let foldable = RuntimePorts.commandLine(
+            scid: 2,
+            tabletMode: false,
+            density: Int(GuestDeviceProfile.xiaomiFold.identity.density)!
+        )
+        XCTAssertTrue(foldable.contains("new_display=1600x2560/360"))
+    }
+
+    func testHighRefreshTargetReachesTheScrcpyServer() {
+        let command = RuntimePorts.commandLine(
+            scid: 1,
+            resolutionPreset: "1080p",
+            targetFPS: 120,
+            tabletMode: true
+        )
+        XCTAssertTrue(command.contains("max_fps=120"))
+    }
+
     func testLegacyDisplayPreferencesMigrateWithoutLosingAppOverrides() throws {
         for preset in ["960x600", "1280x800_comfortable", "1440x900", "1920x1200_hidpi"] {
             let legacy = Data("""
@@ -173,5 +199,25 @@ final class ProtocolTests: XCTestCase {
         XCTAssertFalse(prefs.tabletMode)
         XCTAssertEqual(prefs.targetFPS, 45)
         XCTAssertEqual(prefs.appDisplayOverrides["com.example.notes"], override)
+    }
+
+    func testBackgroundFrameSavingKeepsVisibleWindowsAtPreferredRate() throws {
+        let enabled = ContainerPreferences(targetFPS: 60, backgroundFrameSavingEnabled: true)
+        XCTAssertEqual(enabled.effectiveTargetFPS(windowPresentable: true), 60)
+        XCTAssertEqual(enabled.effectiveTargetFPS(windowPresentable: false), 15)
+
+        let disabled = ContainerPreferences(targetFPS: 45, backgroundFrameSavingEnabled: false)
+        XCTAssertEqual(disabled.effectiveTargetFPS(windowPresentable: false), 45)
+
+        let legacy = try JSONDecoder().decode(
+            ContainerPreferences.self,
+            from: Data(#"{"resolutionPreset":"1080p","targetFPS":60,"tabletMode":true}"#.utf8)
+        )
+        XCTAssertTrue(legacy.backgroundFrameSavingEnabled)
+    }
+
+    func testDisplayPowerMessageUsesTheExistingControlLayout() {
+        XCTAssertEqual(Array(Wire.displayPower(on: true)), [10, 1])
+        XCTAssertEqual(Array(Wire.displayPower(on: false)), [10, 0])
     }
 }

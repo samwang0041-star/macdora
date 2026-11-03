@@ -7,21 +7,53 @@ struct GuestDeviceIdentity: Equatable, Sendable {
     let device: String
     let name: String
     let board: String
+    let boardPlatform: String
+    let socModel: String
+    let firstAPILevel: String
+    let serial: String
+    let buildID: String
+    let buildIncremental: String
     let characteristics: String
     let density: String
     let fingerprint: String
 
-    static let tablet = GuestDeviceIdentity(
+    static let samsungTablet = GuestDeviceIdentity(
         brand: "Samsung",
         manufacturer: "Samsung",
         model: "SM-F926U",
         device: "SM-F926U",
         name: "SM-F926U",
         board: "SM-F926U",
+        boardPlatform: "lahaina",
+        socModel: "SM8350",
+        firstAPILevel: "30",
+        serial: "R5CT42M8H1N",
+        buildID: "V417IR",
+        buildIncremental: "eng.nioh.20241225.154630",
         characteristics: "tablet",
         density: "240",
         fingerprint: "Samsung/SM-F926U/SM-F926U:12/V417IR/eng.nioh.20241225.154630:user/release-keys"
     )
+
+    static let xiaomiFold = GuestDeviceIdentity(
+        brand: "Xiaomi",
+        manufacturer: "Xiaomi",
+        model: "2308CPXD0C",
+        device: "2308CPXD0C",
+        name: "2308CPXD0C",
+        board: "2308CPXD0C",
+        boardPlatform: "kalama",
+        socModel: "SM8550",
+        firstAPILevel: "32",
+        serial: "9F7A3C2D8E1B",
+        buildID: "W528JS",
+        buildIncremental: "1243",
+        characteristics: "nosdcard",
+        density: "360",
+        fingerprint: "Xiaomi/2308CPXD0C/2308CPXD0C:12/W528JS/1243:user/release-keys"
+    )
+
+    static let tablet = samsungTablet
 
     static let phone = GuestDeviceIdentity(
         brand: "Android",
@@ -30,6 +62,12 @@ struct GuestDeviceIdentity: Equatable, Sendable {
         device: "emu64a",
         name: "sdk_phone64_arm64",
         board: "goldfish_arm64",
+        boardPlatform: "goldfish",
+        socModel: "goldfish",
+        firstAPILevel: "37",
+        serial: "EMULATOR37X2X12X0",
+        buildID: "CE2A.260420.051.A3",
+        buildIncremental: "16571990",
         characteristics: "default",
         density: "420",
         fingerprint: "Android/sdk_phone64_arm64/emu64a:17/CE2A.260420.051.A3/16571990:userdebug/test-keys"
@@ -37,9 +75,31 @@ struct GuestDeviceIdentity: Equatable, Sendable {
 
 }
 
+enum GuestDeviceProfile: String, CaseIterable, Codable, Sendable {
+    case samsungTablet = "samsung_tablet"
+    case xiaomiFold = "xiaomi_fold"
+
+    var title: String {
+        switch self {
+        case .samsungTablet: return "三星折叠屏"
+        case .xiaomiFold: return "小米折叠屏"
+        }
+    }
+
+    var identity: GuestDeviceIdentity {
+        switch self {
+        case .samsungTablet: return GuestDeviceIdentity.samsungTablet
+        case .xiaomiFold: return GuestDeviceIdentity.xiaomiFold
+        }
+    }
+}
+
 /// Product-owned guest defaults, reapplied on boot, app launch, and display layout changes.
 /// Keep these in the application so a stock image and an upgraded environment behave alike.
 enum RuntimeSoftwareDefaults {
+    static let deviceIdentityVersion = 9
+    static let angleBlobCacheLimitBytes = 128 * 1024 * 1024
+
     static let guestSetupScript = """
     # The local virtual display must render protected application windows.
     settings put secure disable_secure_windows 1 >/dev/null 2>&1 || exit 1
@@ -57,7 +117,8 @@ enum RuntimeSoftwareDefaults {
     cmd deviceidle disable >/dev/null 2>&1 || true
     cmd netpolicy set restrict-background false >/dev/null 2>&1 || true
     settings put system min_refresh_rate 60.0 >/dev/null 2>&1 || true
-    settings put system peak_refresh_rate 60.0 >/dev/null 2>&1 || true
+    setprop debug.egl.blobcache.multifile true >/dev/null 2>&1 || true
+    setprop debug.egl.blobcache.multifile_limit \(angleBlobCacheLimitBytes) >/dev/null 2>&1 || true
     setprop debug.sf.latch_unsignaled 1 >/dev/null 2>&1 || true
     setprop debug.sf.auto_latch_unsignaled 1 >/dev/null 2>&1 || true
     setprop debug.sf.vsync_reactor_ignore_present_fences true >/dev/null 2>&1 || true
@@ -78,8 +139,8 @@ enum RuntimeSoftwareDefaults {
         return Data(bytes).base64EncodedString()
     }
 
-    static func guestDeviceIdentityScript() -> String {
-        let id = GuestDeviceIdentity.tablet
+    static func guestDeviceIdentityScript(profile: GuestDeviceProfile = .samsungTablet) -> String {
+        let id = profile.identity
         let charsB64 = propertyRecordBase64(id.characteristics)
         let densityB64 = propertyRecordBase64(id.density)
         let fingerprintB64 = propertyRecordBase64(id.fingerprint)
@@ -89,6 +150,23 @@ enum RuntimeSoftwareDefaults {
         let modelB64 = propertyRecordBase64(id.model)
         let deviceB64 = propertyRecordBase64(id.device)
         let nameB64 = propertyRecordBase64(id.name)
+        let boardPlatformB64 = propertyRecordBase64(id.boardPlatform)
+        let socManufacturerB64 = propertyRecordBase64("Qualcomm")
+        let socModelB64 = propertyRecordBase64(id.socModel)
+        let firstAPILevelB64 = propertyRecordBase64(id.firstAPILevel)
+        let buildTypeB64 = propertyRecordBase64("user")
+        let buildTagsB64 = propertyRecordBase64("release-keys")
+        let serialB64 = propertyRecordBase64(id.serial)
+        let buildProductB64 = propertyRecordBase64(id.device)
+        let buildIDB64 = propertyRecordBase64(id.buildID)
+        let buildIncrementalB64 = propertyRecordBase64(id.buildIncremental)
+        let buildFlavorB64 = propertyRecordBase64("\(id.device)-user")
+        let buildDescriptionB64 = propertyRecordBase64(
+            "\(id.device)-user 12 \(id.buildID) \(id.buildIncremental) release-keys"
+        )
+        let qemuMarkerB64 = propertyRecordBase64("")
+        let hardwareB64 = propertyRecordBase64("qcom")
+        let angleB64 = propertyRecordBase64("angle")
 
         return """
         su 0 sh -c '
@@ -114,6 +192,15 @@ enum RuntimeSoftwareDefaults {
         target_device="\(id.device)"
         target_name="\(id.name)"
         target_board="\(id.board)"
+        target_board_platform="\(id.boardPlatform)"
+        target_first_api="\(id.firstAPILevel)"
+        target_build_product="\(id.device)"
+        target_build_id="\(id.buildID)"
+        target_build_incremental="\(id.buildIncremental)"
+        target_build_flavor="\(id.device)-user"
+        target_build_description="\(id.device)-user 12 \(id.buildID) \(id.buildIncremental) release-keys"
+        target_hardware="qcom"
+        target_serial="\(id.serial)"
         target_chars="\(id.characteristics)"
         target_density="\(id.density)"
         target_fingerprint="\(id.fingerprint)"
@@ -123,9 +210,6 @@ enum RuntimeSoftwareDefaults {
         if [ -z "$cur_zygote_model" ]; then
           cur_zygote_model="\(GuestDeviceIdentity.phone.model)"
         elif [ -n "$cur_zygote_pid" ] && [ "$cur_zygote_pid" != "$live_zygote_pid" ]; then
-          cur_zygote_model="stale"
-        fi
-        if [ -f /system_ext/framework/androidx.window.extensions.jar ] && [ "$(getprop sys.androiduse.winext_patch)" != "v2" ]; then
           cur_zygote_model="stale"
         fi
         if [ "$cur_zygote_model" != "$target_model" ]; then
@@ -155,15 +239,118 @@ enum RuntimeSoftwareDefaults {
           done
           [ "$matched" = "1" ] || return 1
         }
+        patch_all_props() {
+          k="$1"; b64="$2"; key_len=${#k}; matched=0
+          for p in /dev/__properties__/*; do
+            [ -f "$p" ] || continue
+            case "$p" in */property_info) continue ;; esac
+            for off in $(grep -abo "$k" "$p" 2>/dev/null | cut -d: -f1); do
+              [ "$off" -ge 96 ] || continue
+              prev_hex=$(dd if="$p" bs=1 skip=$((off - 1)) count=1 2>/dev/null | od -An -tx1 | tr -d " \\n")
+              next_hex=$(dd if="$p" bs=1 skip=$((off + key_len)) count=1 2>/dev/null | od -An -tx1 | tr -d " \\n")
+              if [ "$prev_hex" = "00" ] && [ "$next_hex" = "00" ]; then
+                pos=$((off - 96))
+                echo "$b64" | base64 -d | dd of="$p" bs=1 seek="$pos" conv=notrunc 2>/dev/null || return 1
+                matched=1
+              fi
+            done
+          done
+          [ "$matched" = "1" ]
+        }
+        configure_qcom_graphics() {
+          egl_dir="/vendor/lib64/egl"
+          hw_dir="/vendor/lib64/hw"
+          [ -d "$egl_dir" ] && [ -d "$hw_dir" ] || return 0
+          if [ -e /system/lib64/libEGL_angle.so ] && [ -e /system/lib64/libGLESv2_angle.so ]; then
+            patch_all_props "ro.hardware.egl" "\(angleB64)" || return 0
+            if [ -e "$hw_dir/vulkan.qcom.so" ]; then
+              patch_all_props "ro.hardware.vulkan" "\(hardwareB64)" || return 0
+            fi
+            [ "$(getprop ro.hardware.egl)" = "angle" ] || return 0
+            return 0
+          fi
+          [ -e "$hw_dir/vulkan.ranchu.so" ] || return 0
+          mount -o rw,remount /vendor >/dev/null 2>&1 || true
+          [ -e "$egl_dir/libEGL_qcom.so" ] || \\
+            ln -s libEGL_emulation.so "$egl_dir/libEGL_qcom.so" >/dev/null 2>&1 || return 0
+          [ -e "$egl_dir/libGLESv1_CM_qcom.so" ] || \\
+            ln -s libGLESv1_CM_emulation.so "$egl_dir/libGLESv1_CM_qcom.so" >/dev/null 2>&1 || return 0
+          [ -e "$egl_dir/libGLESv2_qcom.so" ] || \\
+            ln -s libGLESv2_emulation.so "$egl_dir/libGLESv2_qcom.so" >/dev/null 2>&1 || return 0
+          [ -e "$hw_dir/vulkan.qcom.so" ] || \\
+            ln -s vulkan.ranchu.so "$hw_dir/vulkan.qcom.so" >/dev/null 2>&1 || return 0
+          patch_all_props "ro.hardware.egl" "\(hardwareB64)" || return 0
+          patch_all_props "ro.hardware.vulkan" "\(hardwareB64)" || return 0
+          [ "$(getprop ro.hardware.egl)" = "$target_hardware" ] || return 0
+          [ "$(getprop ro.hardware.vulkan)" = "$target_hardware" ] || return 0
+        }
+        configure_qcom_graphics || true
         if [ "$(getprop ro.product.model)" != "$target_model" ] || \\
            [ "$(getprop ro.product.brand)" != "$target_brand" ] || \\
            [ "$(getprop ro.product.manufacturer)" != "$target_manufacturer" ] || \\
            [ "$(getprop ro.build.characteristics)" != "$target_chars" ] || \\
-           [ "$(getprop qemu.sf.lcd_density)" != "$target_density" ]; then
+           [ "$(getprop qemu.sf.lcd_density)" != "$target_density" ] || \\
+           [ "$(getprop ro.product.first_api_level)" != "$target_first_api" ] || \\
+           [ "$(getprop ro.board.platform)" != "$target_board_platform" ] || \\
+           [ "$(getprop ro.build.type)" != "user" ] || \\
+           [ "$(getprop ro.build.tags)" != "release-keys" ] || \\
+           [ "$(getprop ro.build.product)" != "$target_build_product" ] || \\
+           [ "$(getprop ro.build.id)" != "$target_build_id" ] || \\
+           [ "$(getprop ro.build.version.incremental)" != "$target_build_incremental" ] || \\
+           [ "$(getprop ro.build.flavor)" != "$target_build_flavor" ] || \\
+           [ "$(getprop ro.build.description)" != "$target_build_description" ] || \\
+           [ -n "$(getprop ro.kernel.qemu)" ] || \\
+           [ -n "$(getprop ro.boot.qemu)" ] || \\
+           [ "$(getprop ro.hardware)" != "$target_hardware" ] || \\
+           [ "$(getprop ro.boot.hardware)" != "$target_hardware" ] || \\
+           [ "$(getprop ro.serialno)" != "$target_serial" ] || \\
+           [ "$(getprop ro.boot.serialno)" != "$target_serial" ] || \\
+           [ "$(getprop ro.system.build.fingerprint)" != "$target_fingerprint" ] || \\
+           [ "$(getprop ro.product.build.fingerprint)" != "$target_fingerprint" ] || \\
+           [ "$(getprop ro.system_ext.build.fingerprint)" != "$target_fingerprint" ] || \\
+           [ "$(getprop ro.vendor.build.fingerprint)" != "$target_fingerprint" ] || \\
+           [ "$(getprop ro.vendor_dlkm.build.fingerprint)" != "$target_fingerprint" ] || \\
+           [ "$(getprop ro.system_dlkm.build.fingerprint)" != "$target_fingerprint" ] || \\
+           [ "$(getprop ro.odm.build.fingerprint)" != "$target_fingerprint" ] || \\
+           [ "$(getprop ro.boot.hardware.vulkan)" != "$target_hardware" ] || \\
+           [ "$(getprop ro.soc.manufacturer)" != "Qualcomm" ] || \\
+           [ "$(getprop ro.soc.model)" != "\(id.socModel)" ] || \\
+           [ "$(getprop ro.product.system_dlkm.brand)" != "$target_brand" ] || \\
+           [ "$(getprop ro.product.system_dlkm.manufacturer)" != "$target_manufacturer" ] || \\
+           [ "$(getprop ro.product.system_dlkm.model)" != "$target_model" ] || \\
+           [ "$(getprop ro.product.system_dlkm.device)" != "$target_device" ] || \\
+           [ "$(getprop ro.product.system_dlkm.name)" != "$target_name" ]; then
+          [ -n "$(getprop qemu.sf.lcd_density)" ] || setprop qemu.sf.lcd_density "$target_density" >/dev/null 2>&1 || true
           patch_prop "u:object_r:build_prop:s0" "ro.build.characteristics" "\(charsB64)"
+          patch_prop "u:object_r:build_prop:s0" "ro.build.type" "\(buildTypeB64)"
+          patch_prop "u:object_r:build_prop:s0" "ro.build.tags" "\(buildTagsB64)"
+          patch_prop "u:object_r:build_prop:s0" "ro.build.product" "\(buildProductB64)"
+          patch_prop "u:object_r:build_prop:s0" "ro.build.id" "\(buildIDB64)"
+          patch_prop "u:object_r:build_prop:s0" "ro.build.version.incremental" "\(buildIncrementalB64)"
+          patch_prop "u:object_r:build_prop:s0" "ro.build.flavor" "\(buildFlavorB64)"
+          patch_prop "u:object_r:build_prop:s0" "ro.build.description" "\(buildDescriptionB64)"
+          patch_prop "u:object_r:build_prop:s0" "ro.build.display.id" "\(buildIDB64)"
+          patch_prop "u:object_r:exported_default_prop:s0" "ro.kernel.qemu" "\(qemuMarkerB64)"
+          patch_prop "u:object_r:bootloader_prop:s0" "ro.boot.qemu" "\(qemuMarkerB64)"
+          patch_all_props "ro.hardware" "\(hardwareB64)" || exit 1
+          patch_all_props "ro.boot.hardware" "\(hardwareB64)" || exit 1
+          patch_prop "u:object_r:bootloader_prop:s0" "ro.boot.hardware.vulkan" "\(hardwareB64)" || true
+          patch_prop "u:object_r:serialno_prop:s0" "ro.serialno" "\(serialB64)"
+          patch_prop "u:object_r:serialno_prop:s0" "ro.boot.serialno" "\(serialB64)"
           patch_prop "u:object_r:qemu_sf_lcd_density_prop:s0" "qemu.sf.lcd_density" "\(densityB64)"
           patch_prop "u:object_r:fingerprint_prop:s0" "ro.build.fingerprint" "\(fingerprintB64)"
+          patch_all_props "ro.system.build.fingerprint" "\(fingerprintB64)" || true
+          patch_all_props "ro.product.build.fingerprint" "\(fingerprintB64)" || true
+          patch_all_props "ro.system_ext.build.fingerprint" "\(fingerprintB64)" || true
+          patch_all_props "ro.vendor.build.fingerprint" "\(fingerprintB64)" || true
+          patch_all_props "ro.vendor_dlkm.build.fingerprint" "\(fingerprintB64)" || true
+          patch_all_props "ro.system_dlkm.build.fingerprint" "\(fingerprintB64)" || true
+          patch_all_props "ro.odm.build.fingerprint" "\(fingerprintB64)" || true
           patch_prop "u:object_r:build_vendor_prop:s0" "ro.product.board" "\(boardB64)"
+          patch_prop "u:object_r:build_vendor_prop:s0" "ro.product.first_api_level" "\(firstAPILevelB64)"
+          patch_prop "u:object_r:exported_default_prop:s0" "ro.board.platform" "\(boardPlatformB64)"
+          patch_prop "u:object_r:soc_prop:s0" "ro.soc.manufacturer" "\(socManufacturerB64)"
+          patch_prop "u:object_r:soc_prop:s0" "ro.soc.model" "\(socModelB64)"
           for ns in "" "system." "product." "system_ext."; do
             patch_prop "u:object_r:build_prop:s0" "ro.product.${ns}brand" "\(brandB64)"
             patch_prop "u:object_r:build_prop:s0" "ro.product.${ns}manufacturer" "\(manufacturerB64)"
@@ -185,8 +372,13 @@ enum RuntimeSoftwareDefaults {
             patch_prop "u:object_r:build_odm_prop:s0" "ro.product.${ns}device" "\(deviceB64)"
             patch_prop "u:object_r:build_odm_prop:s0" "ro.product.${ns}name" "\(nameB64)"
           done
+          patch_prop "u:object_r:default_prop:s0" "ro.product.system_dlkm.brand" "\(brandB64)"
+          patch_prop "u:object_r:default_prop:s0" "ro.product.system_dlkm.manufacturer" "\(manufacturerB64)"
+          patch_prop "u:object_r:default_prop:s0" "ro.product.system_dlkm.model" "\(modelB64)"
+          patch_prop "u:object_r:default_prop:s0" "ro.product.system_dlkm.device" "\(deviceB64)"
+          patch_prop "u:object_r:default_prop:s0" "ro.product.system_dlkm.name" "\(nameB64)"
         fi
-        for ns in "" "system." "product." "system_ext." "vendor." "vendor_dlkm." "odm."; do
+        for ns in "" "system." "product." "system_ext." "vendor." "vendor_dlkm." "system_dlkm." "odm."; do
           [ "$(getprop "ro.product.${ns}model")" = "$target_model" ] || exit 1
           [ "$(getprop "ro.product.${ns}brand")" = "$target_brand" ] || exit 1
           [ "$(getprop "ro.product.${ns}manufacturer")" = "$target_manufacturer" ] || exit 1
@@ -194,18 +386,47 @@ enum RuntimeSoftwareDefaults {
           [ "$(getprop "ro.product.${ns}name")" = "$target_name" ] || exit 1
         done
         [ "$(getprop ro.product.board)" = "$target_board" ] || exit 1
+        [ "$(getprop ro.product.first_api_level)" = "$target_first_api" ] || exit 1
+        [ "$(getprop ro.board.platform)" = "$target_board_platform" ] || exit 1
+        [ "$(getprop ro.soc.manufacturer)" = "Qualcomm" ] || exit 1
+        [ "$(getprop ro.soc.model)" = "\(id.socModel)" ] || exit 1
         [ "$(getprop ro.build.characteristics)" = "$target_chars" ] || exit 1
+        [ "$(getprop ro.build.type)" = "user" ] || exit 1
+        [ "$(getprop ro.build.tags)" = "release-keys" ] || exit 1
+        [ "$(getprop ro.build.product)" = "$target_build_product" ] || exit 1
+        [ "$(getprop ro.build.id)" = "$target_build_id" ] || exit 1
+        [ "$(getprop ro.build.version.incremental)" = "$target_build_incremental" ] || exit 1
+        [ "$(getprop ro.build.flavor)" = "$target_build_flavor" ] || exit 1
+        [ "$(getprop ro.build.description)" = "$target_build_description" ] || exit 1
+        [ -z "$(getprop ro.kernel.qemu)" ] || exit 1
+        [ -z "$(getprop ro.boot.qemu)" ] || exit 1
+        [ "$(getprop ro.hardware)" = "$target_hardware" ] || exit 1
+        [ "$(getprop ro.boot.hardware)" = "$target_hardware" ] || exit 1
+        [ "$(getprop ro.serialno)" = "$target_serial" ] || exit 1
+        [ "$(getprop ro.boot.serialno)" = "$target_serial" ] || exit 1
+        settings put global device_name "$target_model" >/dev/null 2>&1 || true
+        settings put secure bluetooth_name "$target_model" >/dev/null 2>&1 || true
         [ "$(getprop qemu.sf.lcd_density)" = "$target_density" ] || exit 1
         [ "$(getprop ro.build.fingerprint)" = "$target_fingerprint" ] || exit 1
+        setprop gsm.operator.alpha "CHINA MOBILE" >/dev/null 2>&1 || true
+        setprop gsm.operator.numeric 46000 >/dev/null 2>&1 || true
+        setprop gsm.operator.iso-country cn >/dev/null 2>&1 || true
+        setprop gsm.operator.isroaming false >/dev/null 2>&1 || true
+        setprop gsm.sim.operator.alpha "China Mobile GSM" >/dev/null 2>&1 || true
+        setprop gsm.sim.operator.numeric 460000 >/dev/null 2>&1 || true
+        setprop gsm.sim.operator.iso-country cn >/dev/null 2>&1 || true
         # Application authentication belongs to the application. A missing or
         # stale boot-scoped Zygote marker must not erase it.
-        if [ "$cur_zygote_model" != "$target_model" ]; then
-          if [ -f /system_ext/framework/androidx.window.extensions.jar ] && [ "$(getprop sys.androiduse.winext_patch)" != "v2" ]; then
-            for p in /system_ext/framework/androidx.window.extensions.jar \\
-                     /system_ext/framework/oat/arm64/androidx.window.extensions.odex \\
-                     /system_ext/framework/oat/arm64/androidx.window.extensions.vdex; do
-              while umount -l "$p" 2>/dev/null; do :; done
-            done
+        winext_updated=0
+        if [ -f /system_ext/framework/androidx.window.extensions.jar ] && [ "$(getprop sys.androiduse.winext_patch)" != "v2" ]; then
+          for p in /system_ext/framework/androidx.window.extensions.jar \\
+                   /system_ext/framework/oat/arm64/androidx.window.extensions.odex \\
+                   /system_ext/framework/oat/arm64/androidx.window.extensions.vdex; do
+            while umount -l "$p" 2>/dev/null; do :; done
+          done
+          if [ ! -s /data/local/tmp/winext_rebuilt.jar ] || \\
+             [ ! -s /data/local/tmp/winext_rebuilt.odex ] || \\
+             [ ! -s /data/local/tmp/winext_rebuilt.vdex ]; then
             echo "\(windowExtensionsPatchPrefixBase64)" | base64 -d | gzip -d > /data/local/tmp/winext_rebuilt.jar || exit 1
             unzip -p /system_ext/framework/androidx.window.extensions.jar classes.dex >> /data/local/tmp/winext_rebuilt.jar || exit 1
             echo "\(windowExtensionsPatchSuffixBase64)" | base64 -d | gzip -d >> /data/local/tmp/winext_rebuilt.jar || exit 1
@@ -215,19 +436,22 @@ enum RuntimeSoftwareDefaults {
               --oat-file=/data/local/tmp/winext_rebuilt.odex \\
               --output-vdex=/data/local/tmp/winext_rebuilt.vdex \\
               --instruction-set=arm64 --compiler-filter=speed >/dev/null 2>&1 || exit 1
-            chmod 644 /data/local/tmp/winext_rebuilt.jar /data/local/tmp/winext_rebuilt.odex /data/local/tmp/winext_rebuilt.vdex || exit 1
-            chcon u:object_r:system_file:s0 /data/local/tmp/winext_rebuilt.jar /data/local/tmp/winext_rebuilt.odex /data/local/tmp/winext_rebuilt.vdex || exit 1
-            mount -o bind,ro /data/local/tmp/winext_rebuilt.jar /system_ext/framework/androidx.window.extensions.jar || exit 1
-            mount -o bind,ro /data/local/tmp/winext_rebuilt.odex /system_ext/framework/oat/arm64/androidx.window.extensions.odex || exit 1
-            mount -o bind,ro /data/local/tmp/winext_rebuilt.vdex /system_ext/framework/oat/arm64/androidx.window.extensions.vdex || exit 1
-            setprop sys.androiduse.winext_patch "v2" >/dev/null 2>&1 || exit 1
           fi
+          chmod 644 /data/local/tmp/winext_rebuilt.jar /data/local/tmp/winext_rebuilt.odex /data/local/tmp/winext_rebuilt.vdex || exit 1
+          chcon u:object_r:system_file:s0 /data/local/tmp/winext_rebuilt.jar /data/local/tmp/winext_rebuilt.odex /data/local/tmp/winext_rebuilt.vdex || exit 1
+          mount -o bind,ro /data/local/tmp/winext_rebuilt.jar /system_ext/framework/androidx.window.extensions.jar || exit 1
+          mount -o bind,ro /data/local/tmp/winext_rebuilt.odex /system_ext/framework/oat/arm64/androidx.window.extensions.odex || exit 1
+          mount -o bind,ro /data/local/tmp/winext_rebuilt.vdex /system_ext/framework/oat/arm64/androidx.window.extensions.vdex || exit 1
+          setprop sys.androiduse.winext_patch "v2" >/dev/null 2>&1 || exit 1
+          winext_updated=1
+        fi
+        if [ "$cur_zygote_model" != "$target_model" ] || [ "$winext_updated" = "1" ]; then
           setprop ctl.restart zygote >/dev/null 2>&1 || exit 1
           sleep 1
           i=0
           ready=0
           new_zygote_pid=""
-          while [ $i -lt 80 ]; do
+          while [ $i -lt 160 ]; do
             new_zygote_pid="$(pidof zygote64 2>/dev/null || pidof zygote 2>/dev/null || true)"
             if [ -n "$new_zygote_pid" ] && [ "$new_zygote_pid" != "$live_zygote_pid" ] && \\
                dumpsys activity activities >/dev/null 2>&1 && \\
@@ -254,6 +478,228 @@ enum RuntimeSoftwareDefaults {
         disable_slirp_ipv6
         chown shell:shell /data/local/tmp/android-use-scrcpy.jar 2>/dev/null || true
         ' || exit 1
+        """
+    }
+
+    /// Runs from `/vendor` at `post-fs`, before the first zygote is started.
+    /// The boot property service already owns the `ro.product.*` records at
+    /// this point, so the same record rewrite used by the recovery script is
+    /// applied here without waiting for adbd or restarting a live zygote.
+    static func earlyDeviceIdentityScript(profile: GuestDeviceProfile = .samsungTablet) -> String {
+        let id = profile.identity
+        let charsB64 = propertyRecordBase64(id.characteristics)
+        let densityB64 = propertyRecordBase64(id.density)
+        let fingerprintB64 = propertyRecordBase64(id.fingerprint)
+        let boardB64 = propertyRecordBase64(id.board)
+        let brandB64 = propertyRecordBase64(id.brand)
+        let manufacturerB64 = propertyRecordBase64(id.manufacturer)
+        let modelB64 = propertyRecordBase64(id.model)
+        let deviceB64 = propertyRecordBase64(id.device)
+        let nameB64 = propertyRecordBase64(id.name)
+        let boardPlatformB64 = propertyRecordBase64(id.boardPlatform)
+        let socManufacturerB64 = propertyRecordBase64("Qualcomm")
+        let socModelB64 = propertyRecordBase64(id.socModel)
+        let qemuMarkerB64 = propertyRecordBase64("")
+        let hardwareB64 = propertyRecordBase64("qcom")
+        let firstAPILevelB64 = propertyRecordBase64(id.firstAPILevel)
+        let buildTypeB64 = propertyRecordBase64("user")
+        let buildTagsB64 = propertyRecordBase64("release-keys")
+        let buildProductB64 = propertyRecordBase64(id.device)
+        let buildIDB64 = propertyRecordBase64(id.buildID)
+        let buildIncrementalB64 = propertyRecordBase64(id.buildIncremental)
+        let serialB64 = propertyRecordBase64(id.serial)
+        let buildFlavorB64 = propertyRecordBase64("\(id.device)-user")
+        let buildDescriptionB64 = propertyRecordBase64(
+            "\(id.device)-user 12 \(id.buildID) \(id.buildIncremental) release-keys"
+        )
+
+        return """
+        #!/system/bin/sh
+        fail=0
+        patch_prop() {
+          f="$1"; k="$2"; b64="$3"
+          key_len=${#k}
+          matched=0
+          for p in "/dev/__properties__/$f" "/dev/__properties__/appcompat_override/$f"; do
+            [ -f "$p" ] || continue
+            file_matched=0
+            for off in $(grep -abo "$k" "$p" 2>/dev/null | cut -d: -f1); do
+              [ "$off" -ge 96 ] || continue
+              prev_hex=$(dd if="$p" bs=1 skip=$((off - 1)) count=1 2>/dev/null | od -An -tx1 | tr -d " \\n")
+              next_hex=$(dd if="$p" bs=1 skip=$((off + key_len)) count=1 2>/dev/null | od -An -tx1 | tr -d " \\n")
+              if [ "$prev_hex" = "00" ] && [ "$next_hex" = "00" ]; then
+                pos=$((off - 96))
+                echo "$b64" | base64 -d | dd of="$p" bs=1 seek="$pos" conv=notrunc 2>/dev/null || return 1
+                file_matched=1
+                matched=1
+                break
+              fi
+            done
+            [ "$file_matched" = "1" ] || return 1
+          done
+          [ "$matched" = "1" ] || return 1
+        }
+        patch_all_props() {
+          k="$1"; b64="$2"; key_len=${#k}; matched=0
+          for p in /dev/__properties__/*; do
+            [ -f "$p" ] || continue
+            case "$p" in */property_info) continue ;; esac
+            for off in $(grep -abo "$k" "$p" 2>/dev/null | cut -d: -f1); do
+              [ "$off" -ge 96 ] || continue
+              prev_hex=$(dd if="$p" bs=1 skip=$((off - 1)) count=1 2>/dev/null | od -An -tx1 | tr -d " \\n")
+              next_hex=$(dd if="$p" bs=1 skip=$((off + key_len)) count=1 2>/dev/null | od -An -tx1 | tr -d " \\n")
+              if [ "$prev_hex" = "00" ] && [ "$next_hex" = "00" ]; then
+                pos=$((off - 96))
+                echo "$b64" | base64 -d | dd of="$p" bs=1 seek="$pos" conv=notrunc 2>/dev/null || return 1
+                matched=1
+              fi
+            done
+          done
+          [ "$matched" = "1" ]
+        }
+        patch_prop "u:object_r:build_prop:s0" "ro.build.characteristics" "\(charsB64)" || fail=1
+        patch_prop "u:object_r:build_prop:s0" "ro.build.type" "\(buildTypeB64)" || fail=1
+        patch_prop "u:object_r:build_prop:s0" "ro.build.tags" "\(buildTagsB64)" || fail=1
+        patch_prop "u:object_r:build_prop:s0" "ro.build.product" "\(buildProductB64)" || fail=1
+        patch_prop "u:object_r:build_prop:s0" "ro.build.id" "\(buildIDB64)" || fail=1
+        patch_prop "u:object_r:build_prop:s0" "ro.build.version.incremental" "\(buildIncrementalB64)" || fail=1
+        patch_prop "u:object_r:build_prop:s0" "ro.build.flavor" "\(buildFlavorB64)" || fail=1
+        patch_prop "u:object_r:build_prop:s0" "ro.build.description" "\(buildDescriptionB64)" || fail=1
+        patch_prop "u:object_r:build_prop:s0" "ro.build.display.id" "\(buildIDB64)" || fail=1
+        patch_prop "u:object_r:exported_default_prop:s0" "ro.kernel.qemu" "\(qemuMarkerB64)" || fail=1
+        patch_prop "u:object_r:bootloader_prop:s0" "ro.boot.qemu" "\(qemuMarkerB64)" || fail=1
+        patch_all_props "ro.hardware" "\(hardwareB64)" || fail=1
+        patch_all_props "ro.boot.hardware" "\(hardwareB64)" || fail=1
+        patch_prop "u:object_r:qemu_sf_lcd_density_prop:s0" "qemu.sf.lcd_density" "\(densityB64)" || fail=1
+        patch_prop "u:object_r:fingerprint_prop:s0" "ro.build.fingerprint" "\(fingerprintB64)" || fail=1
+        patch_prop "u:object_r:build_prop:s0" "ro.system.build.fingerprint" "\(fingerprintB64)" || true
+        patch_prop "u:object_r:build_prop:s0" "ro.product.build.fingerprint" "\(fingerprintB64)" || true
+        patch_prop "u:object_r:build_prop:s0" "ro.system_ext.build.fingerprint" "\(fingerprintB64)" || true
+        patch_prop "u:object_r:build_vendor_prop:s0" "ro.vendor.build.fingerprint" "\(fingerprintB64)" || true
+        patch_prop "u:object_r:build_vendor_prop:s0" "ro.vendor_dlkm.build.fingerprint" "\(fingerprintB64)" || true
+        patch_prop "u:object_r:default_prop:s0" "ro.system_dlkm.build.fingerprint" "\(fingerprintB64)" || true
+        patch_prop "u:object_r:build_odm_prop:s0" "ro.odm.build.fingerprint" "\(fingerprintB64)" || true
+        patch_prop "u:object_r:build_vendor_prop:s0" "ro.product.board" "\(boardB64)" || fail=1
+        patch_prop "u:object_r:build_vendor_prop:s0" "ro.product.first_api_level" "\(firstAPILevelB64)" || fail=1
+        patch_prop "u:object_r:serialno_prop:s0" "ro.serialno" "\(serialB64)" || fail=1
+        patch_prop "u:object_r:serialno_prop:s0" "ro.boot.serialno" "\(serialB64)" || fail=1
+        patch_prop "u:object_r:exported_default_prop:s0" "ro.board.platform" "\(boardPlatformB64)" || fail=1
+        patch_prop "u:object_r:soc_prop:s0" "ro.soc.manufacturer" "\(socManufacturerB64)" || fail=1
+        patch_prop "u:object_r:soc_prop:s0" "ro.soc.model" "\(socModelB64)" || fail=1
+        patch_prop "u:object_r:bootloader_prop:s0" "ro.boot.hardware.vulkan" "\(hardwareB64)" || true
+        for ns in "" "system." "product." "system_ext."; do
+          patch_prop "u:object_r:build_prop:s0" "ro.product.${ns}brand" "\(brandB64)" || fail=1
+          patch_prop "u:object_r:build_prop:s0" "ro.product.${ns}manufacturer" "\(manufacturerB64)" || fail=1
+          patch_prop "u:object_r:build_prop:s0" "ro.product.${ns}model" "\(modelB64)" || fail=1
+          patch_prop "u:object_r:build_prop:s0" "ro.product.${ns}device" "\(deviceB64)" || fail=1
+          patch_prop "u:object_r:build_prop:s0" "ro.product.${ns}name" "\(nameB64)" || fail=1
+        done
+        for ns in "vendor." "vendor_dlkm."; do
+          patch_prop "u:object_r:build_vendor_prop:s0" "ro.product.${ns}brand" "\(brandB64)" || fail=1
+          patch_prop "u:object_r:build_vendor_prop:s0" "ro.product.${ns}manufacturer" "\(manufacturerB64)" || fail=1
+          patch_prop "u:object_r:build_vendor_prop:s0" "ro.product.${ns}model" "\(modelB64)" || fail=1
+          patch_prop "u:object_r:build_vendor_prop:s0" "ro.product.${ns}device" "\(deviceB64)" || fail=1
+          patch_prop "u:object_r:build_vendor_prop:s0" "ro.product.${ns}name" "\(nameB64)" || fail=1
+        done
+        for ns in "odm."; do
+          patch_prop "u:object_r:build_odm_prop:s0" "ro.product.${ns}brand" "\(brandB64)" || fail=1
+          patch_prop "u:object_r:build_odm_prop:s0" "ro.product.${ns}manufacturer" "\(manufacturerB64)" || fail=1
+          patch_prop "u:object_r:build_odm_prop:s0" "ro.product.${ns}model" "\(modelB64)" || fail=1
+          patch_prop "u:object_r:build_odm_prop:s0" "ro.product.${ns}device" "\(deviceB64)" || fail=1
+          patch_prop "u:object_r:build_odm_prop:s0" "ro.product.${ns}name" "\(nameB64)" || fail=1
+        done
+        patch_prop "u:object_r:default_prop:s0" "ro.product.system_dlkm.brand" "\(brandB64)" || true
+        patch_prop "u:object_r:default_prop:s0" "ro.product.system_dlkm.manufacturer" "\(manufacturerB64)" || true
+        patch_prop "u:object_r:default_prop:s0" "ro.product.system_dlkm.model" "\(modelB64)" || true
+        patch_prop "u:object_r:default_prop:s0" "ro.product.system_dlkm.device" "\(deviceB64)" || true
+        patch_prop "u:object_r:default_prop:s0" "ro.product.system_dlkm.name" "\(nameB64)" || true
+        setprop androiduse.device_identity 1 >/dev/null 2>&1 || true
+        setprop androiduse.device_identity_version \(deviceIdentityVersion) >/dev/null 2>&1 || true
+        setprop androiduse.early_profile "\(profile.rawValue)" >/dev/null 2>&1 || true
+        setprop gsm.operator.alpha "CHINA MOBILE" >/dev/null 2>&1 || true
+        setprop gsm.operator.numeric 46000 >/dev/null 2>&1 || true
+        setprop gsm.operator.iso-country cn >/dev/null 2>&1 || true
+        setprop gsm.operator.isroaming false >/dev/null 2>&1 || true
+        setprop gsm.sim.operator.alpha "China Mobile GSM" >/dev/null 2>&1 || true
+        setprop gsm.sim.operator.numeric 460000 >/dev/null 2>&1 || true
+        setprop gsm.sim.operator.iso-country cn >/dev/null 2>&1 || true
+        setprop debug.egl.blobcache.multifile true >/dev/null 2>&1 || true
+        setprop debug.egl.blobcache.multifile_limit \(angleBlobCacheLimitBytes) >/dev/null 2>&1 || true
+        if [ "$fail" = "0" ]; then
+          setprop androiduse.device_identity_ok 1 >/dev/null 2>&1 || true
+          setprop sys.androiduse.zygote_model "\(id.model)" >/dev/null 2>&1 || true
+          setprop sys.androiduse.zygote_pid "" >/dev/null 2>&1 || true
+        else
+          setprop androiduse.device_identity_ok 0 >/dev/null 2>&1 || true
+        fi
+        exit "$fail"
+        """
+    }
+
+    static let earlyDeviceIdentityInitRC = """
+
+    # ANDROIDUSE_DEVICE_IDENTITY_V1
+    service androiduse-identity /system/bin/sh /vendor/etc/androiduse-identity.sh
+        class core
+        user root
+        group root
+        oneshot
+        seclabel u:r:su:s0
+        disabled
+
+    on post-fs
+        start androiduse-identity
+
+    on post-fs-data
+        wait_for_prop androiduse.device_identity 1
+    """
+
+    static let earlyWindowExtensionsInitRC = """
+
+    # ANDROIDUSE_WINEXT_V1
+    service androiduse-winext /system/bin/sh /vendor/etc/androiduse-winext.sh
+        class core
+        user root
+        group root
+        oneshot
+        seclabel u:r:su:s0
+        disabled
+
+    on post-fs-data
+        start androiduse-winext
+        wait_for_prop androiduse.winext_ready 1
+    """
+
+    /// Applies the prebuilt window-extension bind mounts at `post-fs-data`,
+    /// after `/data` is available but before `zygote-start`. The artifacts are
+    /// built once by the recovery path and then reused on every cold boot.
+    static func earlyWindowExtensionsScript() -> String {
+        """
+        #!/system/bin/sh
+        ok=0
+        if [ -s /data/local/tmp/winext_rebuilt.jar ] && \\
+           [ -s /data/local/tmp/winext_rebuilt.odex ] && \\
+           [ -s /data/local/tmp/winext_rebuilt.vdex ]; then
+          for p in /system_ext/framework/androidx.window.extensions.jar \\
+                   /system_ext/framework/oat/arm64/androidx.window.extensions.odex \\
+                   /system_ext/framework/oat/arm64/androidx.window.extensions.vdex; do
+            while umount -l "$p" 2>/dev/null; do :; done
+          done
+          chmod 644 /data/local/tmp/winext_rebuilt.jar /data/local/tmp/winext_rebuilt.odex /data/local/tmp/winext_rebuilt.vdex
+          chcon u:object_r:system_file:s0 /data/local/tmp/winext_rebuilt.jar /data/local/tmp/winext_rebuilt.odex /data/local/tmp/winext_rebuilt.vdex
+          if mount -o bind,ro /data/local/tmp/winext_rebuilt.jar /system_ext/framework/androidx.window.extensions.jar && \\
+             mount -o bind,ro /data/local/tmp/winext_rebuilt.odex /system_ext/framework/oat/arm64/androidx.window.extensions.odex && \\
+             mount -o bind,ro /data/local/tmp/winext_rebuilt.vdex /system_ext/framework/oat/arm64/androidx.window.extensions.vdex; then
+            ok=1
+          fi
+        fi
+        if [ "$ok" = "1" ]; then
+          setprop sys.androiduse.winext_patch v2 >/dev/null 2>&1 || true
+        else
+          setprop sys.androiduse.winext_patch pending >/dev/null 2>&1 || true
+        fi
+        setprop androiduse.winext_ready 1 >/dev/null 2>&1 || true
+        exit 0
         """
     }
 }

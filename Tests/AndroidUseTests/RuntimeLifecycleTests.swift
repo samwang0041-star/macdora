@@ -250,6 +250,40 @@ final class RuntimeLifecycleTests: XCTestCase {
         }
     }
 
+    func testStartupRecoversOwnedADBTransportFromOfflineState() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        fixture.registry.getStateReplies = ["offline\n"]
+
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+
+        XCTAssertGreaterThanOrEqual(fixture.registry.getStateCalls, 2)
+        XCTAssertEqual(fixture.registry.adbReconnectOfflineCalls, 1)
+        XCTAssertEqual(fixture.controller.state, .ready)
+        _ = await fixture.controller.stop()
+    }
+
+    func testRuntimeUsesGuestAngleAndPersistentShaderCacheByDefault() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+
+        let arguments = try XCTUnwrap(fixture.registry.emulatorArguments.last)
+        XCTAssertTrue(arguments.contains("GuestAngle"))
+        XCTAssertTrue(arguments.contains("androidboot.hardware.egl=angle"))
+        let script = try XCTUnwrap(fixture.registry.guestEnvironmentScripts.last)
+        XCTAssertTrue(script.contains("setprop debug.egl.blobcache.multifile true"))
+        XCTAssertTrue(
+            script.contains(
+                "setprop debug.egl.blobcache.multifile_limit \(RuntimeSoftwareDefaults.angleBlobCacheLimitBytes)"
+            )
+        )
+        _ = await fixture.controller.stop()
+    }
+
     func testDeviceIdentitySetupPreservesApplicationDataAndFailsClosed() async throws {
         let tabletB64 = RuntimeSoftwareDefaults.propertyRecordBase64("SM-F926U")
         let tabletBytes = try XCTUnwrap(Data(base64Encoded: tabletB64))
@@ -262,6 +296,28 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertTrue(tabletScript.contains("target_model=\"SM-F926U\""))
         XCTAssertTrue(tabletScript.contains("target_chars=\"tablet\""))
         XCTAssertTrue(tabletScript.contains("target_density=\"240\""))
+        XCTAssertTrue(tabletScript.contains("target_board_platform=\"lahaina\""))
+        XCTAssertTrue(tabletScript.contains("target_first_api=\"30\""))
+        XCTAssertTrue(tabletScript.contains("target_build_id=\"V417IR\""))
+        XCTAssertTrue(tabletScript.contains("target_build_incremental=\"eng.nioh.20241225.154630\""))
+        XCTAssertTrue(tabletScript.contains("target_serial=\"R5CT42M8H1N\""))
+        XCTAssertTrue(tabletScript.contains("\"ro.serialno\""))
+        XCTAssertTrue(tabletScript.contains("\"ro.boot.serialno\""))
+        XCTAssertTrue(tabletScript.contains("\"ro.build.type\""))
+        XCTAssertTrue(tabletScript.contains("\"ro.build.tags\""))
+        XCTAssertTrue(tabletScript.contains("\"ro.build.product\""))
+        XCTAssertTrue(tabletScript.contains("\"ro.build.description\""))
+        XCTAssertTrue(tabletScript.contains("settings put global device_name"))
+        XCTAssertTrue(tabletScript.contains("settings put secure bluetooth_name"))
+        XCTAssertTrue(tabletScript.contains("\"ro.kernel.qemu\""))
+        XCTAssertTrue(tabletScript.contains("\"ro.boot.qemu\""))
+        XCTAssertTrue(tabletScript.contains("patch_all_props \"ro.hardware\""))
+        XCTAssertTrue(tabletScript.contains("patch_all_props \"ro.boot.hardware\""))
+        XCTAssertTrue(tabletScript.contains("configure_qcom_graphics"))
+        XCTAssertTrue(tabletScript.contains("libEGL_qcom.so"))
+        XCTAssertTrue(tabletScript.contains("vulkan.qcom.so"))
+        XCTAssertTrue(tabletScript.contains("libEGL_angle.so"))
+        XCTAssertTrue(tabletScript.contains("ro.hardware.egl"))
         XCTAssertTrue(tabletScript.contains("u:object_r:build_prop:s0"))
         XCTAssertTrue(tabletScript.contains("u:object_r:build_vendor_prop:s0"))
         XCTAssertTrue(tabletScript.contains("u:object_r:build_odm_prop:s0"))
@@ -278,14 +334,15 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertFalse(tabletScript.contains("/data/data/"), "Generic guest setup must not inspect or mutate application-private data.")
         XCTAssertFalse(tabletScript.contains("am force-stop"), "Shared environment setup must not force-stop individual applications.")
 
-        // Zygote model state must be marked pending before restart and committed only after readiness.
+        // Zygote model state must be marked pending before a single post-patch restart.
         let pendingIndex = try XCTUnwrap(tabletScript.range(of: "setprop sys.androiduse.zygote_model \"pending\"")?.lowerBound)
         let patchFnIndex = try XCTUnwrap(tabletScript.range(of: "patch_prop() {")?.lowerBound)
         let restartIndex = try XCTUnwrap(tabletScript.range(of: "setprop ctl.restart zygote")?.lowerBound)
         let readyCheckIndex = try XCTUnwrap(tabletScript.range(of: "[ \"$ready\" = \"1\" ] || exit 1")?.lowerBound)
         let commitIndex = try XCTUnwrap(tabletScript.range(of: "setprop sys.androiduse.zygote_model \"$target_model\" >/dev/null 2>&1 || exit 1")?.lowerBound)
-        XCTAssertLessThan(pendingIndex, patchFnIndex)
+        XCTAssertFalse(tabletScript.contains("setprop ctl.stop zygote"))
         XCTAssertLessThan(pendingIndex, restartIndex)
+        XCTAssertLessThan(patchFnIndex, restartIndex)
         XCTAssertLessThan(restartIndex, readyCheckIndex)
         XCTAssertLessThan(readyCheckIndex, commitIndex)
 
@@ -483,9 +540,25 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertFalse(args.contains("NoDelayCloseColorBuffer"))
         XCTAssertTrue(args.contains("-NoDelayCloseColorBuffer"))
         XCTAssertTrue(args.contains("VulkanVirtualQueue"))
-        XCTAssertFalse(args.contains("GuestAngle"))
-        XCTAssertTrue(args.contains("-GuestAngle"))
-        XCTAssertTrue(args.contains("androidboot.hardware.egl=emulation"))
+        XCTAssertTrue(args.contains("GuestAngle"))
+        XCTAssertFalse(args.contains("-GuestAngle"))
+        XCTAssertTrue(args.contains("androidboot.hardware.egl=angle"))
+        XCTAssertEqual(
+            Array(args.prefix(4)),
+            [
+                "-a",
+                "/usr/bin/env",
+                "DYLD_INSERT_LIBRARIES=\(fixture.controller.paths.cameraSyncDylibURL.path)",
+                fixture.controller.paths.runtimeURL.appendingPathComponent("emulator/emulator").path
+            ]
+        )
+        XCTAssertTrue(args.contains("-audio"))
+        XCTAssertTrue(args.contains("coreaudio"))
+        XCTAssertTrue(args.contains("-allow-host-audio"))
+        XCTAssertFalse(args.contains("-no-audio"))
+        XCTAssertTrue(args.contains("-vsync-rate"))
+        let refreshIndex = try XCTUnwrap(args.firstIndex(of: "-vsync-rate"))
+        XCTAssertTrue(["60", "120"].contains(args[refreshIndex + 1]))
         let env = try XCTUnwrap(fixture.registry.emulatorEnvironments.first)
         XCTAssertEqual(env["ANDROID_EMU_VK_ICD"], "moltenvk")
         XCTAssertEqual(env["MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS"], "0")
@@ -495,9 +568,13 @@ final class RuntimeLifecycleTests: XCTestCase {
         let setupScripts = RuntimeSoftwareDefaults.guestSetupScript
         XCTAssertTrue(setupScripts.contains("cmd power set-fixed-performance-mode-enabled true"))
         XCTAssertTrue(setupScripts.contains("settings put system min_refresh_rate 60.0"))
-        XCTAssertTrue(setupScripts.contains("settings put system peak_refresh_rate 60.0"))
+        XCTAssertFalse(setupScripts.contains("settings put system peak_refresh_rate"))
         XCTAssertTrue(setupScripts.contains("setprop debug.sf.vsync_reactor_ignore_present_fences true"))
         XCTAssertTrue(setupScripts.contains("setprop debug.sf.latch_unsignaled 1"))
+        XCTAssertTrue(setupScripts.contains("setprop debug.egl.blobcache.multifile true"))
+        XCTAssertTrue(setupScripts.contains(
+            "setprop debug.egl.blobcache.multifile_limit \(RuntimeSoftwareDefaults.angleBlobCacheLimitBytes)"
+        ))
         let stopped = await fixture.controller.stop()
         XCTAssertTrue(stopped)
     }
@@ -653,7 +730,7 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertNotEqual(resized.port, same.port, "只调整界面大小也必须更新 Android 显示。")
         XCTAssertEqual(fixture.controller.displaySessionConfig(for: firstPackage)?.interfaceScale, .small)
         XCTAssertEqual(fixture.controller.displayEndpoint(for: "dev.example.calendar")?.port, reconfiguredCalendar.port)
-        XCTAssertTrue(try XCTUnwrap(fixture.registry.displayCommands.last).contains("new_display=3200x2000/320 max_size=1280"))
+        XCTAssertTrue(try XCTUnwrap(fixture.registry.displayCommands.last).contains("new_display=3200x2000/240 max_size=1280"))
         XCTAssertEqual(fixture.registry.servers.filter(\.isRunning).count, 4)
 
         // Opening a 5th concurrent app must fail with maxConcurrentDisplaysReached(4)
@@ -684,6 +761,85 @@ final class RuntimeLifecycleTests: XCTestCase {
 
         let stopped = await fixture.controller.stop()
         XCTAssertTrue(stopped)
+    }
+
+    func testCarrierIdentityConfigurationRewritesSimProfileIdempotently() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("android-use-carrier-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let operatorURL = root.appendingPathComponent("numeric_operator.xml")
+        let profileURL = root.appendingPathComponent("iccprofile_for_sim0.xml")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("""
+        <IccProfile>
+          <EF name="EF_IMSI"><CIMI>310260000000000</CIMI></EF>
+        </IccProfile>
+        """.utf8).write(to: profileURL)
+        try Data("""
+        <resources>
+          <string-array name="numeric_to_operator">
+            <item numeric="310260">T-Mobile=TMOBILE</item>
+          </string-array>
+        </resources>
+        """.utf8).write(to: operatorURL)
+
+        try RuntimeController.repairCarrierIdentityConfiguration(
+            profileURL: profileURL,
+            operatorURL: operatorURL,
+            fileManager: .default
+        )
+        let firstProfile = try String(contentsOf: profileURL, encoding: .utf8)
+        let firstOperators = try String(contentsOf: operatorURL, encoding: .utf8)
+        XCTAssertTrue(firstProfile.contains("<CIMI>460000000000000</CIMI>"))
+        XCTAssertTrue(firstOperators.contains(#"numeric="46000""#))
+
+        try RuntimeController.repairCarrierIdentityConfiguration(
+            profileURL: profileURL,
+            operatorURL: operatorURL,
+            fileManager: .default
+        )
+        XCTAssertEqual(try String(contentsOf: profileURL, encoding: .utf8), firstProfile)
+        XCTAssertEqual(try String(contentsOf: operatorURL, encoding: .utf8), firstOperators)
+    }
+
+    func testImportFileCopiesToDownloadFolderWithLongTransferBudget() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        let fileURL = fixture.root.appendingPathComponent("report 1.pdf")
+        try Data("shared file".utf8).write(to: fileURL)
+
+        let remotePath = try await fixture.controller.importFileToDownload(fileURL)
+
+        XCTAssertEqual(remotePath, "/sdcard/Download/Macdora/report 1.pdf")
+        let copy = try XCTUnwrap(fixture.registry.secureCopies.last)
+        XCTAssertEqual(copy.localURL, fileURL)
+        XCTAssertEqual(copy.remotePath, remotePath)
+        XCTAssertEqual(copy.timeout, 300)
+        XCTAssertEqual(
+            fixture.registry.mediaScanURIs,
+            ["file:///sdcard/Download/Macdora/report%201.pdf"]
+        )
+        _ = await fixture.controller.stop()
+    }
+
+    func testExportDownloadFolderUsesLongTransferBudget() async throws {
+        let fixture = try LifecycleFixture()
+        defer { fixture.remove() }
+        try await fixture.controller.prepare()
+        try await fixture.controller.start()
+        let destination = fixture.root.appendingPathComponent("exports", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        let exportedPath = try await fixture.controller.exportDownloadFolder(to: destination)
+
+        XCTAssertEqual(exportedPath, destination.appendingPathComponent("Macdora").path)
+        let pull = try XCTUnwrap(fixture.registry.pullRequests.last)
+        XCTAssertEqual(pull.remotePath, "/sdcard/Download/Macdora")
+        XCTAssertEqual(pull.localPath, destination.path)
+        XCTAssertEqual(pull.timeout, 300)
+        _ = await fixture.controller.stop()
     }
 }
 
@@ -738,6 +894,9 @@ private final class LifecycleRegistry: @unchecked Sendable {
     var guestEnvironmentScripts: [String] = []
     var zygoteRestartCommands = 0
     var guestZygoteModel: String?
+    var getStateReplies: [String] = []
+    var getStateCalls = 0
+    var adbReconnectOfflineCalls = 0
     var installedPackages = Set<String>()
     var uninstalledPackages: [String] = []
     var failNextCatalogRefresh = false
@@ -748,6 +907,9 @@ private final class LifecycleRegistry: @unchecked Sendable {
     var failOfficeApply = false
     var failOfficeRestore = false
     var officeApplyGate: LifecycleGate?
+    var secureCopies: [(localURL: URL, remotePath: String, timeout: TimeInterval)] = []
+    var pullRequests: [(remotePath: String, localPath: String, timeout: TimeInterval)] = []
+    var mediaScanURIs: [String] = []
     func withLock<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
 }
 
@@ -755,7 +917,10 @@ private final class LifecycleRunner: ProcessExecuting, @unchecked Sendable {
     let registry: LifecycleRegistry
     init(_ registry: LifecycleRegistry) { self.registry = registry }
     func launch(_ invocation: ProcessInvocation, operation: String, onExit: @escaping @Sendable (ProcessExit) -> Void) async throws -> any OwnedProcessHandle {
-        let kind: LifecycleHandle.Kind = invocation.arguments.contains("nodaemon") ? .adb : (invocation.executableURL.lastPathComponent == "emulator" ? .emulator : .display)
+        let isEmulator = invocation.arguments.contains("-avd")
+        let kind: LifecycleHandle.Kind = invocation.arguments.contains("nodaemon")
+            ? .adb
+            : (isEmulator ? .emulator : .display)
         let handle = LifecycleHandle(kind, onExit: onExit)
         registry.withLock {
             switch kind {
@@ -776,6 +941,17 @@ private final class LifecycleRunner: ProcessExecuting, @unchecked Sendable {
     }
     func run(_ invocation: ProcessInvocation) async throws -> ProcessResult {
         let args = invocation.arguments
+        if args.contains("pull") {
+            registry.withLock {
+                registry.pullRequests.append((args[args.count - 2], args.last ?? "", invocation.timeout))
+            }
+        }
+        if args.contains("android.intent.action.MEDIA_SCANNER_SCAN_FILE"),
+           let uri = args.last {
+            registry.withLock {
+                registry.mediaScanURIs.append(uri)
+            }
+        }
         if let script = args.last, script.contains("# macdora-office-awake:") {
             if script.contains("# macdora-office-awake:apply"), let gate = registry.officeApplyGate {
                 await gate.pause()
@@ -891,7 +1067,17 @@ private final class LifecycleRunner: ProcessExecuting, @unchecked Sendable {
             }
         }
         let reply: String
-        if args.last == "get-state" { reply = "device\n" }
+        if args.suffix(2) == ["reconnect", "offline"] {
+            registry.withLock { registry.adbReconnectOfflineCalls += 1 }
+            reply = "reconnecting offline [device]\n"
+        }
+        else if args.last == "get-state" {
+            reply = registry.withLock {
+                registry.getStateCalls += 1
+                guard !registry.getStateReplies.isEmpty else { return "device\n" }
+                return registry.getStateReplies.removeFirst()
+            }
+        }
         else if args.last == "sys.boot_completed" { reply = "1\n" }
         else if args.last == "connectivity" {
             reply = registry.withLock {
@@ -934,7 +1120,7 @@ private extension LifecycleRegistry {
             line: line
         )
         XCTAssertTrue(
-            script.contains("wm density 320 -d 0"),
+            script.contains("wm density 240 -d 0"),
             file: file,
             line: line
         )
@@ -976,7 +1162,17 @@ private final class LifecycleEnvironment: ControllerEnvironment, @unchecked Send
         if shouldBlock, let gate { await gate.pause() }
         _ = registry.withLock { registry.forwardPorts.remove(allocation.localPort) }
     }
-    func secureCopy(adbURL: URL, localURL: URL, remotePath: String, environment: [String: String]) async throws {}
+    func secureCopy(
+        adbURL: URL,
+        localURL: URL,
+        remotePath: String,
+        environment: [String: String],
+        timeout: TimeInterval
+    ) async throws {
+        registry.withLock {
+            registry.secureCopies.append((localURL, remotePath, timeout))
+        }
+    }
     func portIsAvailable(_ port: UInt16) -> Bool {
         registry.withLock {
             if port == 5043 { return registry.adb?.isRunning != true }

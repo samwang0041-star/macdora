@@ -14,3 +14,10 @@ evidence/private/
 *.p12
 *.p8
 *.keystore
+
+# Vendored Android component build outputs
+Vendor/mika-0.1.33/.gradle/
+Vendor/mika-0.1.33/.kotlin/
+Vendor/mika-0.1.33/build/
+Vendor/mika-0.1.33/*/build/
+Vendor/mika-0.1.33/local.properties

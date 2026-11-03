@@ -22,6 +22,9 @@ final class AppWindowSession {
     var endpoint: DisplayEndpoint?
     var appliedDisplayPreference: AppDisplayPreference?
     var appliedTargetFPS: Int?
+    var policyRetryAfter: TimeInterval = 0
+    var hiddenSince: TimeInterval?
+    var displayPoweredOn = true
     var displayUpdateTask: Task<Void, Never>?
     var displayUpdateRevision: UInt64 = 0
     var directInputConnected = false
@@ -50,6 +53,8 @@ final class AppWindowSession {
         endpoint = nil
         appliedDisplayPreference = nil
         appliedTargetFPS = nil
+        hiddenSince = nil
+        displayPoweredOn = true
         directInputConnected = false
         presenceTimer?.invalidate()
         presenceTimer = nil
@@ -68,6 +73,9 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     private var appSessions: [String: AppWindowSession] = [:]
     private var operation: Task<Void, Never>?
     private var telemetryTimer: Timer?
+    private var framePolicyTimer: Timer?
+    private var backgroundActivity: NSObjectProtocol?
+    private var cacheCleanupTask: Task<Void, Never>?
     private var terminating = false
     private var isRestartingForUpdate = false
     private var keyboardMenu: HostKeyboardMenu?
@@ -101,6 +109,13 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         return appSessions[activePackage] ?? appSessions.values.first
     }
 
+    private func isPresentable(_ session: AppWindowSession) -> Bool {
+        guard !NSApp.isHidden, let window = session.window.window else { return false }
+        return window.isVisible
+            && !window.isMiniaturized
+            && window.occlusionState.contains(.visible)
+    }
+
     private func resolvedAppMetadata(for package: String) -> ContainerApp {
         runtime.cachedContainerApps().first(where: { $0.package == package })
             ?? ContainerApp.metadata(for: package)
@@ -125,7 +140,8 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             self?.appSessions[pkg]?.window.performExplicitClose()
         }
         manager.onInstall = { [weak self] in self?.chooseAPK() }
-        manager.onDropAPK = { [weak self] url in self?.installAPKFile(url) }
+        manager.onDropFiles = { [weak self] urls in self?.handleDroppedFiles(urls) }
+        manager.onExportDownload = { [weak self] in self?.exportDownloadFolder() }
         manager.onStartRuntime = { [weak self] in self?.startContainerOnly() }
         manager.onStop = { [weak self] in self?.stopRuntime() }
         manager.onRefreshApps = { [weak self] in self?.refreshAppsCatalog() }
@@ -228,6 +244,25 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         MacdoraUpdateController.shared.checkOnLaunch()
         refreshTelemetry()
         startTelemetryTimer()
+        startFramePolicyTimer()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationVisibilityChanged),
+            name: NSApplication.didHideNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWillHide),
+            name: NSApplication.willHideNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationVisibilityChanged),
+            name: NSApplication.didUnhideNotification,
+            object: nil
+        )
 
         if let sectionEnv = ProcessInfo.processInfo.environment["ANDROID_USE_INITIAL_SECTION"] {
             switch sectionEnv.lowercased() {
@@ -402,6 +437,9 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         operation?.cancel()
         telemetryTimer?.invalidate()
         telemetryTimer = nil
+        framePolicyTimer?.invalidate()
+        framePolicyTimer = nil
+        holdBackgroundActivity(false)
         for session in appSessions.values {
             session.openTask?.cancel()
             session.stopStreamAndTimers()
@@ -421,6 +459,83 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func startFramePolicyTimer() {
+        framePolicyTimer?.invalidate()
+        framePolicyTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.evaluateFramePolicy()
+            }
+        }
+    }
+
+    private func evaluateFramePolicy() {
+        guard !appSessions.isEmpty else {
+            holdBackgroundActivity(false)
+            return
+        }
+        let allWindowsHidden = appSessions.values.allSatisfy { !isPresentable($0) }
+        holdBackgroundActivity(allWindowsHidden && runtime.shouldKeepRuntimeInBackground)
+
+        let now = CACurrentMediaTime()
+        let preferences = runtime.containerPreferences
+        for session in appSessions.values {
+            let presentable = isPresentable(session)
+            guard session.stream != nil,
+                  session.endpoint != nil,
+                  !session.isOpening else { continue }
+            if presentable {
+                session.hiddenSince = nil
+                if !session.displayPoweredOn {
+                    session.stream?.setDisplayPower(true)
+                    session.displayPoweredOn = true
+                }
+            } else {
+                if session.hiddenSince == nil {
+                    session.hiddenSince = now
+                }
+                if let hiddenSince = session.hiddenSince,
+                   DisplayPowerPolicy.shouldPowerOff(
+                       backgroundSavingEnabled: preferences.backgroundFrameSavingEnabled,
+                       hiddenFor: now - hiddenSince
+                   ),
+                   session.displayPoweredOn {
+                    session.stream?.setDisplayPower(false)
+                    session.displayPoweredOn = false
+                }
+            }
+
+            guard session.hasPresentedFrame,
+                  session.displayPoweredOn,
+                  now >= session.policyRetryAfter else { continue }
+            let desired = preferences.effectiveTargetFPS(windowPresentable: presentable)
+            guard session.appliedTargetFPS != desired else { continue }
+            scheduleDisplayUpdate(for: session, announce: false, isPolicy: true)
+        }
+    }
+
+    @objc private func applicationVisibilityChanged() {
+        evaluateFramePolicy()
+    }
+
+    @objc private func applicationWillHide() {
+        holdBackgroundActivity(true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.evaluateFramePolicy()
+        }
+    }
+
+    private func holdBackgroundActivity(_ hold: Bool) {
+        if hold, backgroundActivity == nil {
+            backgroundActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Keep Android application sessions active while their windows are hidden"
+            )
+        } else if !hold, let activity = backgroundActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            backgroundActivity = nil
+        }
+    }
+
     private func refreshTelemetry() {
         let now = CACurrentMediaTime()
         var primaryFPS = 0.0
@@ -435,7 +550,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                let first = session.presentationTimes.first,
                let last = session.presentationTimes.last,
                last > first {
-                fps = min(60.0, Double(session.presentationTimes.count - 1) / max(0.25, now - first))
+                fps = min(120.0, Double(session.presentationTimes.count - 1) / max(0.25, now - first))
                 var intervals: [Double] = []
                 for i in 1..<session.presentationTimes.count {
                     intervals.append((session.presentationTimes[i] - session.presentationTimes[i - 1]) * 1000.0)
@@ -652,9 +767,13 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 try Task.checkCancellation()
                 if self.runtime.cameraEnabled,
                    AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined {
-                    let allowed = await AVCaptureDevice.requestAccess(for: .video)
-                    self.runtime.cameraEnabled = allowed
-                    self.syncPreferencesToManager()
+                    Task { @MainActor [weak self] in
+                        let allowed = await AVCaptureDevice.requestAccess(for: .video)
+                        guard let self, !allowed else { return }
+                        self.manager.show(
+                            detail: "未获得摄像头权限，应用仍可正常使用；可在系统设置中授权。"
+                        )
+                    }
                 }
                 try Task.checkCancellation()
                 if self.runtime.state != .ready && self.runtime.state != .running {
@@ -829,8 +948,15 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         syncPreferencesToManager()
     }
 
-    private func scheduleDisplayUpdate(for session: AppWindowSession) {
+    private func scheduleDisplayUpdate(
+        for session: AppWindowSession,
+        announce: Bool = true,
+        isPolicy: Bool = false
+    ) {
         session.displayUpdateRevision &+= 1
+        if isPolicy, CACurrentMediaTime() < session.policyRetryAfter {
+            return
+        }
         guard !session.isOpening, session.stream != nil,
               session.hasPresentedFrame, session.hasObservedTarget,
               session.displayUpdateTask == nil else { return }
@@ -842,8 +968,11 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             }
             while !Task.isCancelled, session.generation == generation,
                   let stream = session.stream, let endpoint = session.endpoint {
-                let preference = self.runtime.containerPreferences.displayPreference(for: session.package)
-                let fps = self.runtime.containerPreferences.targetFPS
+                let preferences = self.runtime.containerPreferences
+                let preference = preferences.displayPreference(for: session.package)
+                let fps = preferences.effectiveTargetFPS(
+                    windowPresentable: self.isPresentable(session)
+                )
                 guard session.appliedDisplayPreference != preference || session.appliedTargetFPS != fps else { return }
                 let revision = session.displayUpdateRevision
                 let size = preference.interfaceScale.nativePixelSize(tabletMode: preference.tabletMode)
@@ -851,32 +980,53 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
                 let output = ContainerPreferences.pixelSize(for: preference.resolutionPreset, tabletMode: preference.tabletMode, interfaceScale: preference.interfaceScale)
                 let configuration = DisplayStreamConfiguration(
                     nativeWidth: Int(size.width), nativeHeight: Int(size.height),
-                    density: preference.interfaceScale.nativeDPI,
+                    density: Int(preferences.deviceProfile.identity.density)
+                        ?? preference.interfaceScale.nativeDPI,
                     maxSize: Int(max(quality.width, quality.height)), maxFPS: fps
                 )
-                session.window.surface.inputEnabled = false
-                session.window.surface.beginPointerInteraction()
-                session.window.surface.setInputFocus(nil)
-                self.manager.show(detail: "正在调整 \(self.resolvedAppMetadata(for: session.package).title) 的显示…")
+                let pausesInput = session.appliedDisplayPreference != preference
+                if pausesInput {
+                    session.window.surface.inputEnabled = false
+                    session.window.surface.beginPointerInteraction()
+                    session.window.surface.setInputFocus(nil)
+                }
+                if announce {
+                    self.manager.show(detail: "正在调整 \(self.resolvedAppMetadata(for: session.package).title) 的显示…")
+                }
                 let succeeded = await withCheckedContinuation { continuation in
                     stream.updateDisplay(configuration) { continuation.resume(returning: $0) }
                 }
                 guard !Task.isCancelled, session.generation == generation, session.stream === stream else { return }
-                guard succeeded, self.runtime.confirmDisplayConfiguration(package: session.package, endpoint: endpoint, preference: preference, targetFPS: fps) else {
+                guard succeeded, self.runtime.confirmDisplayConfiguration(
+                    package: session.package,
+                    endpoint: endpoint,
+                    preference: preference,
+                    targetFPS: preferences.targetFPS
+                ) else {
+                    if isPolicy {
+                        session.policyRetryAfter = CACurrentMediaTime() + 3
+                    }
                     if let applied = session.appliedDisplayPreference {
                         session.window.applyDisplayMode(tabletMode: applied.tabletMode, preferredPixelSize: session.window.surface.pixelSize, resolutionPreset: applied.resolutionPreset, interfaceScale: applied.interfaceScale)
                     }
-                    session.window.surface.inputEnabled = true
-                    session.window.showInputIssue("显示调整未获确认，请重试或恢复推荐。")
-                    self.manager.show(detail: "显示调整未完成，请重试或恢复推荐。")
+                    if pausesInput {
+                        session.window.surface.inputEnabled = true
+                    }
+                    if announce {
+                        session.window.showInputIssue("显示调整未获确认，请重试或恢复推荐。")
+                        self.manager.show(detail: "显示调整未完成，请重试或恢复推荐。")
+                    }
                     return
                 }
                 session.appliedDisplayPreference = preference
                 session.appliedTargetFPS = fps
-                session.window.applyDisplayMode(tabletMode: preference.tabletMode, preferredPixelSize: output, resolutionPreset: preference.resolutionPreset, interfaceScale: preference.interfaceScale)
-                session.window.surface.inputEnabled = true
-                if revision == session.displayUpdateRevision {
-                    self.manager.show(detail: "已应用显示设置：\(ContainerPreferences.resolutionOption(for: preference.resolutionPreset).shortTitle) · 界面\(preference.interfaceScale.percentage)% · \(fps)Hz。")
+                session.policyRetryAfter = 0
+                if pausesInput {
+                    session.window.applyDisplayMode(tabletMode: preference.tabletMode, preferredPixelSize: output, resolutionPreset: preference.resolutionPreset, interfaceScale: preference.interfaceScale)
+                    session.window.surface.inputEnabled = true
+                }
+                if revision == session.displayUpdateRevision, announce {
+                    self.manager.show(detail: "已应用显示设置：\(ContainerPreferences.resolutionOption(for: preference.resolutionPreset).shortTitle) · 界面\(preference.interfaceScale.percentage)% · \(preferences.targetFPS)Hz。")
                     return
                 }
             }
@@ -922,6 +1072,8 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         let stream = VideoStream()
         session.stream = stream
         session.endpoint = endpoint
+        session.hiddenSince = nil
+        session.displayPoweredOn = true
         if let actual = runtime.displaySessionConfig(for: session.package) {
             session.appliedDisplayPreference = AppDisplayPreference(resolutionPreset: actual.resolutionPreset, tabletMode: actual.tabletMode, interfaceScale: actual.interfaceScale)
             session.appliedTargetFPS = actual.targetFPS
@@ -1199,6 +1351,88 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func handleDroppedFiles(_ urls: [URL]) {
+        let files = urls.filter(\.isFileURL)
+        guard !files.isEmpty else { return }
+        guard files.count == 1 else {
+            processDroppedFiles(files)
+            return
+        }
+        if files[0].pathExtension.lowercased() == "apk" {
+            installAPKFile(files[0])
+        } else {
+            importFileToDownload(files[0])
+        }
+    }
+
+    private func processDroppedFiles(_ urls: [URL]) {
+        guard !runtime.state.isBusy, !terminating else { return }
+        operation = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.runtime.prepare()
+                try await self.runtime.start()
+                for (index, url) in urls.enumerated() {
+                    self.manager.show(detail: "正在处理 \(index + 1)/\(urls.count)：\(url.lastPathComponent)…")
+                    if url.pathExtension.lowercased() == "apk" {
+                        try await self.runtime.installAPK(url)
+                    } else {
+                        _ = try await self.runtime.importFileToDownload(url)
+                    }
+                }
+                let apps = await self.runtime.refreshContainerApps()
+                self.syncManagerApps(apps)
+                self.manager.show(detail: "已处理 \(urls.count) 个文件。")
+            } catch {
+                self.manager.update(.failed(error.localizedDescription))
+            }
+        }
+    }
+
+    private func importFileToDownload(_ url: URL) {
+        guard !runtime.state.isBusy, !terminating else { return }
+        let fileName = url.lastPathComponent
+        operation = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.runtime.prepare()
+                try await self.runtime.start()
+                self.manager.show(detail: "正在导入 \(fileName)…")
+                _ = try await self.runtime.importFileToDownload(url)
+                self.manager.show(detail: "\(fileName) 已存入 Download/Macdora。")
+            } catch {
+                self.manager.update(.failed(error.localizedDescription))
+            }
+        }
+    }
+
+    private func exportDownloadFolder() {
+        guard !runtime.state.isBusy, !terminating else { return }
+        let panel = NSOpenPanel()
+        panel.title = "导出 Android 文件"
+        panel.message = "选择 Mac 上的文件夹，Download/Macdora 会复制到其中。"
+        panel.prompt = "导出"
+        panel.allowsMultipleSelection = false
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.beginSheetModal(for: manager.window!) { [weak self] result in
+            guard result == .OK, let url = panel.url, let self else { return }
+            self.operation = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.runtime.prepare()
+                    try await self.runtime.start()
+                    self.manager.show(detail: "正在导出 Download/Macdora…")
+                    _ = try await self.runtime.exportDownloadFolder(to: url)
+                    self.manager.show(detail: "已导出到 \(url.lastPathComponent)/Macdora。")
+                } catch {
+                    self.manager.update(.failed(error.localizedDescription))
+                }
+            }
+        }
+    }
+
     private func stopRuntime() {
         guard !runtime.state.isBusy, !terminating else { return }
         operation?.cancel()
@@ -1282,6 +1516,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         manager.updatePreferences(
             cameraEnabled: runtime.cameraEnabled,
             canChangeCamera: canChangeCamera,
+            canChangeDeviceProfile: runtime.state == .stopped,
             rootPath: runtime.rootURL.path,
             preferences: runtime.containerPreferences,
             readiness: runtime.evaluateReadinessChecks(metalAvailable: metalAvailable),
@@ -1295,6 +1530,7 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         let displayChanged = previous.resolutionPreset != prefs.resolutionPreset
             || previous.tabletMode != prefs.tabletMode
             || previous.interfaceScale != prefs.interfaceScale
+        let deviceProfileChanged = previous.deviceProfile != prefs.deviceProfile
         if displayChanged {
             for pkg in appSessions.keys {
                 var override = updatedPrefs.displayPreference(for: pkg)
@@ -1339,7 +1575,9 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             previous.displayPreference(for: $0) != updatedPrefs.displayPreference(for: $0)
                 || previous.targetFPS != updatedPrefs.targetFPS
         }
-        if !packagesToReconfigure.isEmpty {
+        if deviceProfileChanged {
+            manager.show(detail: "设备机型已保存，下次启动运行环境时生效。")
+        } else if !packagesToReconfigure.isEmpty {
             manager.show(detail: "已保存显示选择，正在应用到打开的窗口…")
             for pkg in packagesToReconfigure {
                 if let session = appSessions[pkg] { scheduleDisplayUpdate(for: session) }
@@ -1365,14 +1603,28 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func clearContainerCache() {
+        guard cacheCleanupTask == nil else { return }
         let freedBytes = runtime.clearTemporaryLogsAndStaging()
-        refreshTelemetry()
-        syncPreferencesToManager()
-        let freedMB = Double(freedBytes) / (1024.0 * 1024.0)
-        let msg = freedBytes > 0
-            ? String(format: "已释放 %.1f MB 缓存空间，应用数据与登录状态已保留。", freedMB)
-            : "缓存已清理，应用数据与登录状态已保留。"
-        manager.show(detail: msg)
+        manager.show(detail: "正在清理缓存…")
+        cacheCleanupTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let trimmed = await self.runtime.trimGuestStorage()
+            self.cacheCleanupTask = nil
+            self.refreshTelemetry()
+            self.syncPreferencesToManager()
+            let freedMB = Double(freedBytes) / (1024.0 * 1024.0)
+            let msg: String
+            if trimmed {
+                msg = freedBytes > 0
+                    ? String(format: "已释放 %.1f MB 缓存并回收存储空间，应用数据与登录状态已保留。", freedMB)
+                    : "已回收存储空间，应用数据与登录状态已保留。"
+            } else {
+                msg = freedBytes > 0
+                    ? String(format: "已释放 %.1f MB 缓存空间，应用数据与登录状态已保留。", freedMB)
+                    : "缓存已清理，应用数据与登录状态已保留。"
+            }
+            self.manager.show(detail: msg)
+        }
     }
 
     private func setCameraEnabled(_ enabled: Bool) {
@@ -1493,6 +1745,8 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
             terminating = true
             operation?.cancel()
             telemetryTimer?.invalidate(); telemetryTimer = nil
+            framePolicyTimer?.invalidate(); framePolicyTimer = nil
+            holdBackgroundActivity(false)
             for session in appSessions.values {
                 session.openTask?.cancel()
                 session.stopStreamAndTimers()
@@ -1502,6 +1756,8 @@ final class ProductAppDelegate: NSObject, NSApplicationDelegate {
         if terminating { return .terminateLater }
         terminating = true; operation?.cancel()
         telemetryTimer?.invalidate(); telemetryTimer = nil
+        framePolicyTimer?.invalidate(); framePolicyTimer = nil
+        holdBackgroundActivity(false)
         for session in appSessions.values {
             session.generation = UUID()
             session.openTask?.cancel()

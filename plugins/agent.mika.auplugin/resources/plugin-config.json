@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "display": {
+    "width": 1080,
+    "height": 1920,
+    "dpi": 320,
+    "maxFPS": 10,
+    "scid": "4d434152"
+  },
+  "tools": {
+    "maxSteps": 25
+  },
+  "targetApps": [
+    "com.tencent.mm"
+  ]
+}

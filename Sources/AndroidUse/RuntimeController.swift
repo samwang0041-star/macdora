@@ -20,6 +20,7 @@ enum RuntimeError: LocalizedError, Equatable {
     case displayUnavailable
     case displayExited
     case serverTransferFailed
+    case fileTransferFailed
     case bootTimedOut
     case networkNotReady
     case insecurePath
@@ -47,6 +48,7 @@ enum RuntimeError: LocalizedError, Equatable {
         case .displayUnavailable: return "Android 显示服务未能建立。"
         case .displayExited: return "Android 显示服务已结束。"
         case .serverTransferFailed: return "无法准备本地显示组件。"
+        case .fileTransferFailed: return "文件传输失败。"
         case .bootTimedOut: return "Android 环境在 90 秒内未能启动。"
         case .networkNotReady: return "Android 已启动，但未能在启动期限内连接默认网络。请检查 Mac 网络后重试。"
         case .insecurePath: return "本地私有目录安全性检查失败。"
@@ -781,9 +783,27 @@ protocol ControllerEnvironment: Sendable {
         adbURL: URL,
         localURL: URL,
         remotePath: String,
-        environment: [String: String]
+        environment: [String: String],
+        timeout: TimeInterval
     ) async throws
     func portIsAvailable(_ port: UInt16) -> Bool
+}
+
+extension ControllerEnvironment {
+    func secureCopy(
+        adbURL: URL,
+        localURL: URL,
+        remotePath: String,
+        environment: [String: String]
+    ) async throws {
+        try await secureCopy(
+            adbURL: adbURL,
+            localURL: localURL,
+            remotePath: remotePath,
+            environment: environment,
+            timeout: 30
+        )
+    }
 }
 
 struct RuntimeConnectionPorts: Sendable {
@@ -860,7 +880,8 @@ struct SystemControllerEnvironment: ControllerEnvironment {
         adbURL: URL,
         localURL: URL,
         remotePath: String,
-        environment: [String: String]
+        environment: [String: String],
+        timeout: TimeInterval
     ) async throws {
         let result = try await runner.run(ProcessInvocation(
             executableURL: adbURL,
@@ -869,7 +890,7 @@ struct SystemControllerEnvironment: ControllerEnvironment {
                 "push", localURL.path, remotePath
             ],
             environment: environment,
-            timeout: 30,
+            timeout: timeout,
             captureOutput: true,
             outputLimit: 16 * 1024
         ))
@@ -1009,12 +1030,14 @@ enum RuntimePorts {
         resolutionPreset: String = "1080p",
         targetFPS: Int = 60,
         tabletMode: Bool = true,
-        interfaceScale: DisplayInterfaceScale = .standard
+        interfaceScale: DisplayInterfaceScale = .standard,
+        density: Int = DisplayInterfaceScale.standard.nativeDPI
     ) -> String {
         let scidHex = String(format: "%08x", scid)
         let displaySpec = ContainerPreferences.scrcpyNewDisplaySpec(
             tabletMode: tabletMode,
-            interfaceScale: interfaceScale
+            interfaceScale: interfaceScale,
+            density: density
         )
         let pixelSize = ContainerPreferences.pixelSize(
             for: resolutionPreset,
@@ -1031,7 +1054,7 @@ enum RuntimePorts {
         } else {
             bitRate = 24_000_000
         }
-        let clampedFPS = [30, 45, 60].contains(targetFPS) ? targetFPS : 60
+        let clampedFPS = [30, 45, 60, 90, 120].contains(targetFPS) ? targetFPS : 60
         return "CLASSPATH=/data/local/tmp/android-use-scrcpy.jar"
             + " app_process / com.genymobile.scrcpy.Server 5.0.1"
             + " tunnel_forward=true audio=false control=true"
@@ -1042,7 +1065,26 @@ enum RuntimePorts {
             + " send_device_meta=false send_dummy_byte=false"
             + " send_frame_meta=true send_stream_meta=true keep_active=true"
             + " log_level=warn scid=\(scidHex)"
-            + " vd_destroy_content=true"
+            + " vd_destroy_content=false"
+    }
+
+    static func observerCommandLine(
+        scid: UInt32,
+        displayID: Int,
+        maxSize: Int = 1280,
+        targetFPS: Int = 30
+    ) -> String {
+        let scidHex = String(format: "%08x", scid)
+        let clampedFPS = [15, 30, 45, 60].contains(targetFPS) ? targetFPS : 30
+        return "CLASSPATH=/data/local/tmp/android-use-scrcpy.jar"
+            + " app_process / com.genymobile.scrcpy.Server 5.0.1"
+            + " tunnel_forward=true audio=false control=false"
+            + " video_codec=h264 video_bit_rate=8000000 max_fps=\(clampedFPS)"
+            + " video_codec_options=low-latency=1"
+            + " display_id=\(displayID) max_size=\(maxSize)"
+            + " send_device_meta=false send_dummy_byte=false"
+            + " send_frame_meta=true send_stream_meta=true"
+            + " log_level=warn scid=\(scidHex)"
     }
 }
 
@@ -1164,6 +1206,7 @@ final class RuntimeController: SystemPluginHostBridge {
     private let hooks: RuntimeControllerHooks
     private var generation: UInt64 = 0
     private var activeOperations: Set<UUID> = []
+    private var lastADBTransportRecovery: TimeInterval?
     private var preparingTask: Task<Void, Error>?
     private var startingTask: Task<Void, Error>?
     private var installingTask: Task<Void, Error>?
@@ -1547,6 +1590,26 @@ final class RuntimeController: SystemPluginHostBridge {
         return freed
     }
 
+    func trimGuestStorage() async -> Bool {
+        guard isPrepared, state == .ready || state == .running,
+              adbServerProcess?.isRunning == true else { return false }
+        let script = """
+        sync
+        trimmed=0
+        pm trim-caches 8G >/dev/null 2>&1 && trimmed=1
+        sm fstrim >/dev/null 2>&1 && trimmed=1
+        [ "$trimmed" = "1" ] || exit 1
+        sync
+        """
+        guard let result = try? await runADB(
+            ["shell", script],
+            operation: "回收 Android 存储空间",
+            timeout: 60
+        ), result.exitCode == 0, !result.timedOut else { return false }
+        cachedDiskUsageGB = nil
+        return true
+    }
+
     convenience init() {
         let root: URL
         do {
@@ -1824,6 +1887,78 @@ final class RuntimeController: SystemPluginHostBridge {
             }
             _ = await refreshContainerApps()
         }
+    }
+
+    func importFileToDownload(_ url: URL) async throws -> String {
+        guard !state.isBusy else { throw RuntimeError.busy("导入文件") }
+        guard isPrepared else { throw RuntimeError.installNotPrepared }
+        guard state == .ready || state == .running,
+              emulatorProcess?.isRunning == true,
+              adbServerProcess?.isRunning == true else {
+            throw RuntimeError.runtimeNotReady
+        }
+        let fileName = url.lastPathComponent
+        guard !fileName.isEmpty, fileName != "/" else {
+            throw RuntimeError.fileTransferFailed
+        }
+        let operationGeneration = generation
+        let remoteDirectory = "/sdcard/Download/Macdora"
+        try await requireADB(
+            ["shell", "mkdir", "-p", remoteDirectory],
+            operation: "准备文件目录",
+            timeout: 10
+        )
+        guard generation == operationGeneration, !isStopping else {
+            throw CancellationError()
+        }
+        do {
+            try await environmentProvider.secureCopy(
+                adbURL: paths.adbURL,
+                localURL: url,
+                remotePath: "\(remoteDirectory)/\(fileName)",
+                environment: runtimeEnvironment(),
+                timeout: 300
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw RuntimeError.fileTransferFailed
+        }
+        guard generation == operationGeneration, !isStopping else {
+            throw CancellationError()
+        }
+        let encodedFileName = fileName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? fileName
+        let scanPath = "\(remoteDirectory)/\(encodedFileName)"
+        _ = try? await runADB(
+            ["shell", "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", "file://\(scanPath)"],
+            operation: "刷新文件索引",
+            timeout: 10
+        )
+        return "\(remoteDirectory)/\(fileName)"
+    }
+
+    func exportDownloadFolder(to directoryURL: URL) async throws -> String {
+        guard !state.isBusy else { throw RuntimeError.busy("导出文件") }
+        guard isPrepared else { throw RuntimeError.installNotPrepared }
+        guard state == .ready || state == .running,
+              emulatorProcess?.isRunning == true,
+              adbServerProcess?.isRunning == true else {
+            throw RuntimeError.runtimeNotReady
+        }
+        let operationGeneration = generation
+        let remoteDirectory = "/sdcard/Download/Macdora"
+        let result = try await runADB(
+            ["pull", remoteDirectory, directoryURL.path],
+            operation: "导出 Download",
+            timeout: 300
+        )
+        guard generation == operationGeneration, !isStopping else {
+            throw CancellationError()
+        }
+        guard result.exitCode == 0 else {
+            throw RuntimeError.fileTransferFailed
+        }
+        return directoryURL.appendingPathComponent("Macdora").path
     }
 
     func isPackageInstalled(_ package: String) async throws -> Bool {
@@ -2239,7 +2374,9 @@ final class RuntimeController: SystemPluginHostBridge {
                 resolutionPreset: targetPreset,
                 targetFPS: prefs.targetFPS,
                 tabletMode: targetTabletMode,
-                interfaceScale: targetInterfaceScale
+                interfaceScale: targetInterfaceScale,
+                density: Int(prefs.deviceProfile.identity.density)
+                    ?? targetInterfaceScale.nativeDPI
             )
             let handle = try await runner.launch(
                 ProcessInvocation(
@@ -2569,7 +2706,7 @@ final class RuntimeController: SystemPluginHostBridge {
             totalRSSMiB: totalRSS,
             emulatorRSSMiB: emuMetric.rssMiB,
             hostClientRSSMiB: hostMetric.rssMiB,
-            guestMemoryBudgetMiB: 6144,
+            guestMemoryBudgetMiB: Double(HostPerformanceProfile.current().guestMemoryMB),
             diskUsedGB: sampleDiskUsageGB(now: now),
             presentedFPS: presentedFPS,
             frameIntervalP95Ms: frameIntervalP95Ms,
@@ -2763,6 +2900,7 @@ final class RuntimeController: SystemPluginHostBridge {
         operationGeneration: UInt64
     ) async throws {
         try await launchOwnedADBServer(environment: prepared.environment)
+        lastADBTransportRecovery = nil
         guard isOperationCurrent(operationGeneration), !isStopping else {
             throw CancellationError()
         }
@@ -2781,6 +2919,8 @@ final class RuntimeController: SystemPluginHostBridge {
         emulatorEnvironment["MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION"] = "1"
         emulatorEnvironment["MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS"] = "0"
         emulatorEnvironment["MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS"] = "0"
+        emulatorEnvironment["MVK_CONFIG_FAST_MATH_ENABLED"] = "1"
+        let performanceProfile = HostPerformanceProfile.current()
         var launchArguments = [
             "-avd", "android-use",
             "-port", String(emulatorPort),
@@ -2789,7 +2929,12 @@ final class RuntimeController: SystemPluginHostBridge {
             "-no-metrics",
             "-no-snapshot",
             "-no-boot-anim",
-            "-no-audio",
+            "-audio", "coreaudio",
+            "-allow-host-audio",
+            "-memory", String(performanceProfile.guestMemoryMB),
+            "-cores", String(performanceProfile.guestCPUCount),
+            "-vsync-rate", String(performanceProfile.guestRefreshRate),
+            "-writable-system",
             "-feature", "Vulkan",
             "-feature", "GLDirectMem",
             "-feature", "GLESDynamicVersion",
@@ -2807,9 +2952,7 @@ final class RuntimeController: SystemPluginHostBridge {
         ]
         let disablesGuestAngle = emulatorEnvironment["ANDROID_USE_FORCE_GUEST_ANGLE"] == "0"
             || emulatorEnvironment["ANDROID_USE_GUEST_GL_BACKEND"] == "translator"
-        let enablesGuestAngle = emulatorEnvironment["ANDROID_USE_FORCE_GUEST_ANGLE"] == "1"
-            || emulatorEnvironment["ANDROID_USE_GUEST_GL_BACKEND"] == "angle"
-        if enablesGuestAngle && !disablesGuestAngle {
+        if !disablesGuestAngle {
             launchArguments += [
                 "-feature", "GuestAngle",
                 "-prop", "androidboot.hardware.egl=angle"
@@ -2823,10 +2966,16 @@ final class RuntimeController: SystemPluginHostBridge {
             "-camera-front",
             launchCameraEnabled ? "webcam0" : "none"
         ]
+        var emulatorSchedulerArguments = ["-a", "/usr/bin/env"]
+        if let insertedLibrary = emulatorEnvironment["DYLD_INSERT_LIBRARIES"] {
+            emulatorSchedulerArguments.append("DYLD_INSERT_LIBRARIES=\(insertedLibrary)")
+        }
+        emulatorSchedulerArguments.append(emitterPath().path)
+        emulatorSchedulerArguments += launchArguments
         let launched = try await runner.launch(
             ProcessInvocation(
-                executableURL: emitterPath(),
-                arguments: launchArguments,
+                executableURL: URL(fileURLWithPath: "/usr/sbin/taskpolicy"),
+                arguments: emulatorSchedulerArguments,
                 environment: emulatorEnvironment,
                 timeout: 90 * 60,
                 captureOutput: true,
@@ -2843,6 +2992,8 @@ final class RuntimeController: SystemPluginHostBridge {
         let deadline = Date().addingTimeInterval(90)
         var observedBootComplete = false
         var observedNetworkReady = false
+        var preparedGuestOnBoot = false
+        var earlyIdentityHookChecked = false
         while Date() < deadline {
             try Task.checkCancellation()
             guard isOperationCurrent(operationGeneration), !isStopping else {
@@ -2858,19 +3009,52 @@ final class RuntimeController: SystemPluginHostBridge {
                     operation: "检查 Android 设备",
                     timeout: 3
                 )
+                let deviceState = String(decoding: result.stdout, as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 if result.exitCode == 0, !result.timedOut,
-                   String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "device" {
+                   deviceState == "device" {
                     let boot = try await runADB(
                         ["shell", "getprop", "sys.boot_completed"],
                         operation: "检查 Android 启动",
                         timeout: 3
                     )
-                    if boot.exitCode == 0,
-                       String(decoding: boot.stdout, as: UTF8.self)
-                        .trimmingCharacters(in: .whitespacesAndNewlines) == "1" {
+                    let bootCompleted = boot.exitCode == 0
+                        && String(decoding: boot.stdout, as: UTF8.self)
+                            .trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+                    if bootCompleted {
                         observedBootComplete = true
-                        // Boot completion precedes the first connected default network.
-                        // Prepare the guest while both boot and connectivity are ready.
+                        if !earlyIdentityHookChecked {
+                            earlyIdentityHookChecked = true
+                            do {
+                                try await installEarlyDeviceIdentityHookIfNeeded(
+                                    profile: containerPreferences.deviceProfile,
+                                    operationGeneration: operationGeneration
+                                )
+                            } catch is CancellationError {
+                                throw CancellationError()
+                            } catch {
+                                // The post-boot recovery path remains the
+                                // fallback for images without a writable vendor layer.
+                            }
+                        }
+                        if !preparedGuestOnBoot {
+                            guard isOperationCurrent(operationGeneration), !isStopping else {
+                                throw CancellationError()
+                            }
+                            do {
+                                try await prepareGuestEnvironmentForApp(
+                                    package: DefaultApp.package,
+                                    updateDefaultDisplayGeometry: true,
+                                    operationGeneration: operationGeneration
+                                )
+                                preparedGuestOnBoot = true
+                            } catch is CancellationError {
+                                throw CancellationError()
+                            } catch {
+                                observedNetworkReady = true
+                                throw error
+                            }
+                        }
                         let network = try await runADB(
                             ["shell", "dumpsys", "connectivity"],
                             operation: "检查 Android 网络",
@@ -2879,14 +3063,6 @@ final class RuntimeController: SystemPluginHostBridge {
                         if network.exitCode == 0, !network.timedOut,
                            RuntimeNetworkParser.hasConnectedInternetDefaultNetwork(network.stdout) {
                             observedNetworkReady = true
-                            guard isOperationCurrent(operationGeneration), !isStopping else {
-                                throw CancellationError()
-                            }
-                            try await prepareGuestEnvironmentForApp(
-                                package: DefaultApp.package,
-                                updateDefaultDisplayGeometry: true,
-                                operationGeneration: operationGeneration
-                            )
                             guard isOperationCurrent(operationGeneration), !isStopping else {
                                 throw CancellationError()
                             }
@@ -2899,6 +3075,8 @@ final class RuntimeController: SystemPluginHostBridge {
                             return
                         }
                     }
+                } else {
+                    await recoverOwnedADBTransportIfNeeded()
                 }
             } catch is CancellationError { throw CancellationError() }
             catch {
@@ -3069,6 +3247,47 @@ final class RuntimeController: SystemPluginHostBridge {
             configURL: configURL,
             fileManager: fileManager
         )
+        let modemURL = paths.avdURL.appendingPathComponent("modem_simulator", isDirectory: true)
+        try Self.repairCarrierIdentityConfiguration(
+            profileURL: modemURL.appendingPathComponent("iccprofile_for_sim0.xml"),
+            operatorURL: modemURL.appendingPathComponent(
+                "etc/modem_simulator/files/numeric_operator.xml"
+            ),
+            fileManager: fileManager
+        )
+    }
+
+    nonisolated static func repairCarrierIdentityConfiguration(
+        profileURL: URL,
+        operatorURL: URL,
+        fileManager: FileManager
+    ) throws {
+        let imsi = "460000000000000"
+        if fileManager.fileExists(atPath: profileURL.path) {
+            let profile = try String(contentsOf: profileURL, encoding: .utf8)
+            if let start = profile.range(of: "<CIMI>"),
+               let end = profile.range(of: "</CIMI>", range: start.upperBound..<profile.endIndex) {
+                let current = profile[start.upperBound..<end.lowerBound]
+                if current != imsi {
+                    let repaired = profile.replacingCharacters(
+                        in: start.lowerBound..<end.upperBound,
+                        with: "<CIMI>\(imsi)</CIMI>"
+                    )
+                    try Data(repaired.utf8).write(to: profileURL, options: .atomic)
+                }
+            }
+        }
+        if fileManager.fileExists(atPath: operatorURL.path) {
+            let mapping = try String(contentsOf: operatorURL, encoding: .utf8)
+            if !mapping.contains(#"numeric="46000""#),
+               let closing = mapping.range(of: "</string-array>") {
+                let repaired = mapping.replacingCharacters(
+                    in: closing.lowerBound..<closing.lowerBound,
+                    with: "        <item numeric=\"46000\">CHINA MOBILE=CMCC</item>\n    "
+                )
+                try Data(repaired.utf8).write(to: operatorURL, options: .atomic)
+            }
+        }
     }
 
     private func launchOwnedADBServer(
@@ -3275,19 +3494,22 @@ final class RuntimeController: SystemPluginHostBridge {
         let compatAction = "enable"
         let resolvedScale = interfaceScale ?? (updateDefaultDisplayGeometry ? globalPref.interfaceScale : desiredPref.interfaceScale)
         let pixelSize = resolvedScale.nativePixelSize(tabletMode: isHorizontal)
-        let dpi = resolvedScale.nativeDPI
+        let dpi = Int(globalPref.deviceProfile.identity.density)
+            ?? resolvedScale.nativeDPI
         let d0Size = "\(Int(pixelSize.width))x\(Int(pixelSize.height))"
         let d0Density = "\(dpi)"
+        let guestRefreshRate = HostPerformanceProfile.current().guestRefreshRate
         let d0Commands = updateDefaultDisplayGeometry
             ? """
             wm size \(d0Size) -d 0 >/dev/null 2>&1 || true
             wm density \(d0Density) -d 0 >/dev/null 2>&1 || true
             """
             : ""
-        let identityScript = RuntimeSoftwareDefaults.guestDeviceIdentityScript()
+        let identityScript = RuntimeSoftwareDefaults.guestDeviceIdentityScript(profile: globalPref.deviceProfile)
         let script = """
         \(identityScript)
         \(RuntimeSoftwareDefaults.guestSetupScript)
+        settings put system peak_refresh_rate \(guestRefreshRate).0 >/dev/null 2>&1 || true
         wm dismiss-keyguard >/dev/null 2>&1 || true
         wm set-ignore-orientation-request \(ignoreOrientation) >/dev/null 2>&1 || true
         \(d0Commands)
@@ -3307,7 +3529,7 @@ final class RuntimeController: SystemPluginHostBridge {
         fi
         """
         let task = Task<Void, Error> { [self] in
-            let result = try await self.runADB(["shell", script], operation: "配置应用运行环境", timeout: 25)
+            let result = try await self.runADB(["shell", script], operation: "配置应用运行环境", timeout: 45)
             guard result.exitCode == 0, !result.timedOut else {
                 throw RuntimeError.adbCommandFailed("配置应用运行环境")
             }
@@ -3319,6 +3541,162 @@ final class RuntimeController: SystemPluginHostBridge {
             }
         }
         try await task.value
+    }
+
+    /// Installs the MuMu-style early identity hook in the persistent vendor
+    /// overlay. The hook runs at `post-fs`, before zygote, so Android never
+    /// observes the stock emulator model during the first boot.
+    private func earlyIdentityHookIsActive(profile: GuestDeviceProfile) async -> Bool {
+        guard let values = try? await readEarlyIdentitySnapshot() else { return false }
+        let identity = profile.identity
+        return values["marker"] == "1"
+            && values["version"] == String(RuntimeSoftwareDefaults.deviceIdentityVersion)
+            && values["ok"] == "1"
+            && values["profile"] == profile.rawValue
+            && values["model"] == identity.model
+            && values["kernel_qemu"] == ""
+            && values["boot_qemu"] == ""
+            && values["hardware"] == "qcom"
+            && values["boot_hardware"] == "qcom"
+            && values["vulkan"] == "qcom"
+            && values["soc_manufacturer"] == "Qualcomm"
+            && values["soc_model"] == identity.socModel
+            && values["system_dlkm_model"] == identity.model
+            && values["system_fingerprint"] == identity.fingerprint
+            && values["vendor_fingerprint"] == identity.fingerprint
+    }
+
+    private func readEarlyIdentitySnapshot() async throws -> [String: String] {
+        let command = """
+        printf 'marker=%s\\n' "$(getprop androiduse.device_identity)"
+        printf 'version=%s\\n' "$(getprop androiduse.device_identity_version)"
+        printf 'ok=%s\\n' "$(getprop androiduse.device_identity_ok)"
+        printf 'profile=%s\\n' "$(getprop androiduse.early_profile)"
+        printf 'model=%s\\n' "$(getprop ro.product.model)"
+        printf 'kernel_qemu=%s\\n' "$(getprop ro.kernel.qemu)"
+        printf 'boot_qemu=%s\\n' "$(getprop ro.boot.qemu)"
+        printf 'hardware=%s\\n' "$(getprop ro.hardware)"
+        printf 'boot_hardware=%s\\n' "$(getprop ro.boot.hardware)"
+        printf 'vulkan=%s\\n' "$(getprop ro.boot.hardware.vulkan)"
+        printf 'soc_manufacturer=%s\\n' "$(getprop ro.soc.manufacturer)"
+        printf 'soc_model=%s\\n' "$(getprop ro.soc.model)"
+        printf 'system_dlkm_model=%s\\n' "$(getprop ro.product.system_dlkm.model)"
+        printf 'system_fingerprint=%s\\n' "$(getprop ro.system.build.fingerprint)"
+        printf 'vendor_fingerprint=%s\\n' "$(getprop ro.vendor.build.fingerprint)"
+        """
+        let result = try await runADB(
+            ["shell", command],
+            operation: "检查启动期设备身份",
+            timeout: 5
+        )
+        guard result.exitCode == 0, !result.timedOut else {
+            throw RuntimeError.adbCommandFailed("检查启动期设备身份")
+        }
+        var values: [String: String] = [:]
+        for line in String(decoding: result.stdout, as: UTF8.self).split(separator: "\n") {
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            values[String(line[..<separator])] = String(line[line.index(after: separator)...])
+        }
+        return values
+    }
+
+    private func installEarlyDeviceIdentityHookIfNeeded(
+        profile: GuestDeviceProfile,
+        operationGeneration: UInt64
+    ) async throws {
+        let snapshot = try await readEarlyIdentitySnapshot()
+        if await earlyIdentityHookIsActive(profile: profile) {
+            return
+        }
+        let markerValue = snapshot["marker"] ?? ""
+        guard markerValue.isEmpty || markerValue == "0" || markerValue == "1" else {
+            return
+        }
+
+        let root = try await runADB(["root"], operation: "获取 Android 管理权限", timeout: 10)
+        guard root.exitCode == 0, !root.timedOut else { return }
+        try await waitForADBDevice(timeout: 15)
+        guard isOperationCurrent(operationGeneration), !isStopping else {
+            throw CancellationError()
+        }
+
+        let remount = try await runADB(["remount"], operation: "挂载可写系统分区", timeout: 30)
+        guard remount.exitCode == 0, !remount.timedOut else { return }
+
+        let scriptURL = paths.appSupportURL.appendingPathComponent("androiduse-identity.sh")
+        let winextURL = paths.appSupportURL.appendingPathComponent("androiduse-winext.sh")
+        let identityRCURL = paths.appSupportURL.appendingPathComponent("androiduse-identity.rc")
+        let winextRCURL = paths.appSupportURL.appendingPathComponent("androiduse-winext.rc")
+        try Data(RuntimeSoftwareDefaults.earlyDeviceIdentityScript(profile: profile).utf8)
+            .write(to: scriptURL, options: .atomic)
+        try Data(RuntimeSoftwareDefaults.earlyWindowExtensionsScript().utf8)
+            .write(to: winextURL, options: .atomic)
+        try Data(RuntimeSoftwareDefaults.earlyDeviceIdentityInitRC.utf8)
+            .write(to: identityRCURL, options: .atomic)
+        try Data(RuntimeSoftwareDefaults.earlyWindowExtensionsInitRC.utf8)
+            .write(to: winextRCURL, options: .atomic)
+
+        try await requireADB(
+            ["push", scriptURL.path, "/vendor/etc/androiduse-identity.sh"],
+            operation: "安装启动期设备身份脚本"
+        )
+        try await requireADB(
+            ["push", winextURL.path, "/vendor/etc/androiduse-winext.sh"],
+            operation: "安装启动期窗口扩展脚本"
+        )
+        try await requireADB(
+            ["push", identityRCURL.path, "/data/local/tmp/androiduse-identity.rc"],
+            operation: "安装启动期设备身份服务"
+        )
+        try await requireADB(
+            ["push", winextRCURL.path, "/data/local/tmp/androiduse-winext.rc"],
+            operation: "安装启动期窗口扩展服务"
+        )
+
+        let apply = """
+        set -e
+        rc="$(ls /vendor/etc/init/hw/init.$(getprop ro.hardware).rc 2>/dev/null | head -n 1 || true)"
+        [ -n "$rc" ] || rc=/vendor/etc/init/hw/init.ranchu.rc
+        chmod 755 /vendor/etc/androiduse-identity.sh /vendor/etc/androiduse-winext.sh
+        awk '/^service androiduse-identity|^# ANDROIDUSE_/ {exit} {print}' "$rc" > /data/local/tmp/androiduse.rc.base
+        cat /data/local/tmp/androiduse.rc.base /data/local/tmp/androiduse-identity.rc /data/local/tmp/androiduse-winext.rc > "$rc"
+        grep -q ANDROIDUSE_DEVICE_IDENTITY_V1 "$rc"
+        grep -q ANDROIDUSE_WINEXT_V1 "$rc"
+        """
+        try await requireADB(["shell", apply], operation: "启用启动期设备身份注入")
+        try await requireADB(
+            ["shell", "setprop", "androiduse.early_profile", profile.rawValue],
+            operation: "记录启动期设备机型"
+        )
+    }
+
+    private func waitForADBDevice(timeout: TimeInterval) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            try Task.checkCancellation()
+            let result = try await runADB(["get-state"], operation: "等待 Android 设备", timeout: 3)
+            if result.exitCode == 0,
+               String(decoding: result.stdout, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines) == "device" {
+                return
+            }
+            await recoverOwnedADBTransportIfNeeded()
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        throw RuntimeError.adbTimedOut("等待 Android 设备")
+    }
+
+    private func recoverOwnedADBTransportIfNeeded() async {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let lastADBTransportRecovery, now - lastADBTransportRecovery < 2 {
+            return
+        }
+        lastADBTransportRecovery = now
+        _ = try? await runADB(
+            ["reconnect", "offline"],
+            operation: "恢复 Android 连接",
+            timeout: 5
+        )
     }
 
     @discardableResult
@@ -3381,8 +3759,12 @@ final class RuntimeController: SystemPluginHostBridge {
         return result
     }
 
-    private func requireADB(_ arguments: [String], operation: String) async throws {
-        let result = try await runADB(arguments, operation: operation, timeout: 30)
+    private func requireADB(
+        _ arguments: [String],
+        operation: String,
+        timeout: TimeInterval = 30
+    ) async throws {
+        let result = try await runADB(arguments, operation: operation, timeout: timeout)
         guard result.exitCode == 0, !result.timedOut else {
             throw RuntimeError.adbCommandFailed(operation)
         }
@@ -3576,6 +3958,13 @@ final class RuntimeController: SystemPluginHostBridge {
         unreapedProcesses.removeAll()
         _ = await stopProcessesWithoutBlockingMainActor(pending)
         if let emulator = emulatorProcess {
+            if emulator.isRunning, adbServerProcess?.isRunning == true {
+                _ = try? await runADB(
+                    ["shell", "su", "0", "sh", "-c", "sync; sync"],
+                    operation: "同步 Android 数据落盘",
+                    timeout: 5
+                )
+            }
             _ = try? await runADB(
                 ["emu", "kill"],
                 operation: "关闭 Android 环境",

@@ -1,0 +1,1238 @@
+#!/usr/bin/env python3
+"""Macdora 系统助手 — 原生宿主服务。
+
+不安装任何 Android 应用：在 guest 内由宿主启动一个系统级 scrcpy 会话创建后台虚拟显示，
+通过 adb 的系统通道（screencap / input / am / IME）操作任意应用，代理循环与模型调用全部在 Mac 侧。
+"""
+
+import base64
+import fcntl
+import json
+import os
+import random
+import re
+import shlex
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+
+SOCKET_PATH = os.environ.get("MACDORA_PLUGIN_SOCKET_PATH", "")
+STATE_DIR = Path(os.environ.get("MACDORA_PLUGIN_STATE_DIR", "."))
+PLUGIN_ID = os.environ.get("MACDORA_PLUGIN_ID", "agent.mika")
+INSTANCE_ID = os.environ.get("MACDORA_PLUGIN_INSTANCE_ID", "")
+HOST_PID = int(os.environ.get("MACDORA_HOST_PID", "0") or 0)
+BUNDLE_DIR = Path(os.environ.get("MACDORA_PLUGIN_BUNDLE_DIR", ".")).resolve()
+ADB_PATH = os.environ.get("MACDORA_ADB_PATH", "")
+ADB_SERIAL = os.environ.get("MACDORA_ADB_SERIAL", "")
+MAGPIE_BASE_URL = os.environ.get("MACDORA_MAGPIE_GATEWAY", "http://127.0.0.1:3425/v1").rstrip("/")
+MAGPIE_MODELS_TTL = 30.0
+MAGPIE_MODELS_ERROR_TTL = 15.0
+PREFERRED_MODELS = (
+    "auto/gemini-4-argon",
+    "workbuddy/deepseek-v4.1-flash",
+    "codex/gpt-6.1-sol",
+)
+
+CONFIG_PATH = STATE_DIR / "config.json"
+DISPLAY_JAR_DEVICE = "/data/local/tmp/macdora-assistant-scrcpy.jar"
+DISPLAY_STATE = {"displayId": -1, "sfId": None, "server": None, "drain": None, "forwardPort": None, "scid": None}
+DISPLAY_LOCK = threading.Lock()
+DISPLAY_LAST_USED = 0.0
+DISPLAY_IDLE_SECONDS = 300.0
+ACTIVE_TASK_STATUSES = ("starting", "running", "queued", "waiting_for_answer", "waiting_on_phone")
+MODEL_CACHE = {"at": None, "models": [], "ready": False, "detail": "尚未检测"}
+MODEL_CACHE_LOCK = threading.Lock()
+STATUS = {
+    "phase": "starting",
+    "detail": "启动中",
+    "displayId": -1,
+    "modelConfigured": False,
+    "gatewayReady": False,
+    "model": "",
+}
+STATUS_LOCK = threading.Lock()
+TASKS = {}
+TASKS_LOCK = threading.Lock()
+IME_PORT = 0
+
+
+def set_status(phase, detail="", **extra):
+    with STATUS_LOCK:
+        STATUS["phase"] = phase
+        STATUS["detail"] = detail
+        for key, value in extra.items():
+            STATUS[key] = value
+
+
+def status_snapshot():
+    with STATUS_LOCK:
+        return dict(STATUS)
+
+
+def mark_display_used():
+    global DISPLAY_LAST_USED
+    DISPLAY_LAST_USED = time.monotonic()
+
+
+def load_saved_config():
+    defaults = {"model": "", "reasoning_effort": "", "max_steps": 25}
+    if CONFIG_PATH.is_file():
+        try:
+            data = json.loads(CONFIG_PATH.read_text())
+            defaults.update({k: v for k, v in data.items() if k in defaults})
+        except Exception:
+            pass
+    return defaults
+
+
+def magpie_models_url():
+    if MAGPIE_BASE_URL.endswith("/models"):
+        return MAGPIE_BASE_URL
+    if MAGPIE_BASE_URL.endswith("/v1"):
+        return MAGPIE_BASE_URL + "/models"
+    return MAGPIE_BASE_URL + "/v1/models"
+
+
+def magpie_api_key():
+    configured = os.environ.get("MACDORA_MAGPIE_API_KEY", "").strip()
+    if configured:
+        return configured
+    path = Path.home() / ".config" / "magpie" / "caller-keys.json"
+    try:
+        entries = json.loads(path.read_text())
+        for entry in entries if isinstance(entries, list) else []:
+            name = str(entry.get("name", "")).lower()
+            if "macdora" in name or "mika" in name:
+                return str(entry.get("secret", "")).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def discover_models():
+    now = time.monotonic()
+    with MODEL_CACHE_LOCK:
+        ttl = MAGPIE_MODELS_TTL if MODEL_CACHE["ready"] else MAGPIE_MODELS_ERROR_TTL
+        if MODEL_CACHE["at"] is not None and now - MODEL_CACHE["at"] < ttl:
+            return [dict(item) for item in MODEL_CACHE["models"]], MODEL_CACHE["ready"], MODEL_CACHE["detail"]
+
+    models = []
+    ready = False
+    detail = ""
+    try:
+        headers = {}
+        key = magpie_api_key()
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        request = urllib.request.Request(magpie_models_url(), headers=headers)
+        with urllib.request.urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read().decode())
+        for item in payload.get("data", []):
+            modalities = item.get("modalities") or {}
+            if not item.get("tool_call") or "image" not in (modalities.get("input") or []):
+                continue
+            model_id = str(item.get("id", "")).strip()
+            if not model_id:
+                continue
+            levels = item.get("reasoning_levels")
+            if not isinstance(levels, list):
+                levels = [
+                    entry.get("effort")
+                    for entry in (item.get("supported_reasoning_levels") or [])
+                    if isinstance(entry, dict)
+                ]
+            levels = list(dict.fromkeys(
+                str(level).strip() for level in levels if str(level).strip()
+            ))
+            models.append({
+                "id": model_id,
+                "name": str(item.get("display_name") or item.get("magpie_label") or model_id),
+                "reasoning_levels": levels,
+            })
+        models.sort(key=lambda item: (
+            PREFERRED_MODELS.index(item["id"]) if item["id"] in PREFERRED_MODELS else len(PREFERRED_MODELS)
+        ))
+        ready = True
+        detail = "已连接" if models else "没有支持视觉与工具调用的模型"
+    except Exception as exc:
+        detail = f"未连接：{exc}"
+
+    with MODEL_CACHE_LOCK:
+        MODEL_CACHE.update({"at": time.monotonic(), "models": models, "ready": ready, "detail": detail})
+    return [dict(item) for item in models], ready, detail
+
+
+def resolve_model(saved_model, models):
+    ids = [item["id"] for item in models]
+    if saved_model and (not ids or saved_model in ids):
+        return saved_model
+    for preferred in PREFERRED_MODELS:
+        if preferred in ids:
+            return preferred
+    return ids[0] if ids else ""
+
+
+def resolve_effort(saved_effort, model_id, models):
+    for item in models:
+        if item["id"] == model_id:
+            return saved_effort if saved_effort in item.get("reasoning_levels", []) else ""
+    return saved_effort
+
+
+def load_config():
+    saved = load_saved_config()
+    models, ready, detail = discover_models()
+    model = resolve_model(saved.get("model", ""), models)
+    return {
+        "base_url": MAGPIE_BASE_URL,
+        "model": model,
+        "reasoning_effort": resolve_effort(saved.get("reasoning_effort", ""), model, models),
+        "api_key": magpie_api_key(),
+        "max_steps": saved.get("max_steps", 25),
+        "models": models,
+        "gateway_ready": ready,
+        "gateway_detail": detail,
+    }
+
+
+def save_config(config):
+    stored = {
+        "model": config.get("model", ""),
+        "max_steps": config.get("max_steps", 25),
+    }
+    if config.get("reasoning_effort"):
+        stored["reasoning_effort"] = config["reasoning_effort"]
+    tmp = CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(stored, ensure_ascii=False, indent=2))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONFIG_PATH)
+
+
+def public_config(config):
+    return {
+        "base_url": config.get("base_url", ""),
+        "model": config.get("model", ""),
+        "reasoning_effort": config.get("reasoning_effort", ""),
+        "models": config.get("models", []),
+        "gateway_ready": bool(config.get("gateway_ready")),
+        "gateway_detail": config.get("gateway_detail", ""),
+        "max_steps": config.get("max_steps", 25),
+    }
+
+
+def adb(*args, timeout=60, stdin_text=None):
+    if not ADB_PATH:
+        raise RuntimeError("MACDORA_ADB_PATH 未提供")
+    command = [ADB_PATH]
+    if ADB_SERIAL:
+        command += ["-s", ADB_SERIAL]
+    command += list(args)
+    return subprocess.run(command, input=stdin_text, capture_output=True, text=True, timeout=timeout)
+
+
+def adb_shell(command, timeout=60):
+    return adb("shell", command, timeout=timeout)
+
+
+def shell_text(command, timeout=30):
+    result = adb_shell(command, timeout=timeout)
+    return result.stdout if result.returncode == 0 else ""
+
+
+def tail(result, limit=300):
+    return (result.stderr or result.stdout or "").strip()[-limit:]
+
+
+def sha256_file(path):
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def run_payload(name, env_prefix=""):
+    body = (BUNDLE_DIR / "resources" / name).read_text()
+    return adb("shell", f"{env_prefix} sh", timeout=120, stdin_text=body)
+
+
+# ---------------------------------------------------------------- assistant display
+
+def surfaceflinger_displays():
+    text = shell_text("dumpsys SurfaceFlinger --display-id")
+    entries = {}
+    for match in re.finditer(
+        r"Display (\d+) \(Virtual display\): displayName=\"([^\"]*)\" uniqueId=\"([^\"]*)\"",
+        text,
+    ):
+        entries[int(match.group(1))] = (match.group(2), match.group(3))
+    return entries
+
+
+def display_unique_id(display_id):
+    text = shell_text("dumpsys display")
+    match = re.search(
+        rf"displayId={display_id}, uniqueId='([^']+)'",
+        text,
+    )
+    return match.group(1) if match else None
+
+
+def resolve_sf_display(display_id):
+    try:
+        after = surfaceflinger_displays()
+    except Exception:
+        return None
+    unique_id = display_unique_id(display_id)
+    if not unique_id:
+        return None
+    matches = [
+        sf_id
+        for sf_id, (name, candidate) in after.items()
+        if name == "scrcpy" and candidate == unique_id
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def start_assistant_display():
+    with DISPLAY_LOCK:
+        return start_assistant_display_locked()
+
+
+def start_assistant_display_locked():
+    stop_assistant_display_locked()
+    try:
+        # 只清理本助手自己的显示会话，不触碰运行时的其他窗口。
+        adb_shell("pkill -f macdora-assistant-scrcpy.jar", timeout=15)
+        config = load_json_resource("plugin-config.json")
+        display_cfg = config.get("display", {})
+        width = int(display_cfg.get("width", 1080))
+        height = int(display_cfg.get("height", 1920))
+        dpi = int(display_cfg.get("dpi", 320))
+        max_fps = int(display_cfg.get("maxFPS", 10))
+        scid = "%08x" % random.getrandbits(31)
+        jar = BUNDLE_DIR / "resources" / "scrcpy-server-assistant.jar"
+        if not jar.is_file():
+            raise RuntimeError("缺少系统助手显示组件")
+        digest = sha256_file(jar)[:16]
+        remote_digest = shell_text(f"sha256sum {DISPLAY_JAR_DEVICE} 2>/dev/null | cut -c1-16").strip()
+        if remote_digest != digest:
+            pushed = adb("push", str(jar), DISPLAY_JAR_DEVICE, timeout=120)
+            print(f"display: push rc={pushed.returncode}", file=sys.stderr, flush=True)
+            if pushed.returncode != 0:
+                raise RuntimeError("推送显示组件失败：" + tail(pushed))
+        command = (
+            f"CLASSPATH={DISPLAY_JAR_DEVICE} app_process / com.genymobile.scrcpy.Server 5.0.1"
+            f" tunnel_forward=true audio=false control=false"
+            f" video_codec=h264 video_bit_rate=4000000 max_fps={max_fps}"
+            f" new_display={width}x{height}/{dpi} max_size={max(width, height)}"
+            f" vd_system_decorations=false display_ime_policy=local clipboard_autosync=false"
+            f" send_device_meta=false send_dummy_byte=false send_frame_meta=true send_stream_meta=true"
+            f" keep_active=true log_level=info scid={scid} vd_destroy_content=false"
+        )
+        command_line = [ADB_PATH] + (["-s", ADB_SERIAL] if ADB_SERIAL else []) + ["shell", command]
+        server = subprocess.Popen(command_line, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        DISPLAY_STATE["server"] = server
+        DISPLAY_STATE["scid"] = scid
+        lines = []
+
+        def read_output():
+            assert server.stdout is not None
+            for line in server.stdout:
+                lines.append(line)
+                print("server: " + line.strip(), file=sys.stderr, flush=True)
+
+        threading.Thread(target=read_output, daemon=True).start()
+
+        # 等 guest 中该 scid 的抽象套接字就绪，再建立转发与视频连接。
+        socket_ready = False
+        deadline = time.time() + 10
+        probe = f"grep -c '@scrcpy_{scid}$' /proc/net/unix"
+        while time.time() < deadline and server.poll() is None:
+            if shell_text(probe).strip() not in ("", "0"):
+                socket_ready = True
+                break
+            time.sleep(0.2)
+        if not socket_ready:
+            raise RuntimeError("后台显示会话未就绪")
+
+        port = free_port()
+        forwarded = adb("forward", f"tcp:{port}", f"localabstract:scrcpy_{scid}", timeout=15)
+        if forwarded.returncode != 0:
+            raise RuntimeError("adb forward 失败：" + tail(forwarded))
+        DISPLAY_STATE["forwardPort"] = port
+
+        def drain():
+            sock = None
+            deadline = time.time() + 10
+            while time.time() < deadline and server.poll() is None:
+                try:
+                    candidate = socket.create_connection(("127.0.0.1", port), timeout=1)
+                except Exception:
+                    time.sleep(0.15)
+                    continue
+                candidate.settimeout(2)
+                try:
+                    first = candidate.recv(1 << 20)
+                except socket.timeout:
+                    first = b"?"
+                except OSError:
+                    first = b""
+                if first:
+                    sock = candidate
+                    break
+                candidate.close()
+                time.sleep(0.15)
+            if sock is None:
+                return
+            while server.poll() is None:
+                try:
+                    if not sock.recv(1 << 20):
+                        break
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+        threading.Thread(target=drain, daemon=True).start()
+
+        display_id = -1
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            for line in list(lines):
+                match = re.search(r"New display: .*\(id=(\d+)\)", line)
+                if match:
+                    display_id = int(match.group(1))
+                    break
+            if display_id >= 0:
+                break
+            if server.poll() is not None:
+                break
+            time.sleep(0.1)
+        if display_id < 0:
+            raise RuntimeError("后台显示创建失败")
+        sf_id = resolve_sf_display(display_id)
+        if sf_id is None:
+            time.sleep(0.5)
+            sf_id = resolve_sf_display(display_id)
+        if sf_id is None:
+            raise RuntimeError("后台显示与 SurfaceFlinger 未关联")
+        DISPLAY_STATE["displayId"] = display_id
+        DISPLAY_STATE["sfId"] = sf_id
+        mark_display_used()
+        return display_id
+    except Exception:
+        stop_assistant_display_locked()
+        raise
+
+
+def stop_assistant_display_locked():
+    server = DISPLAY_STATE.get("server")
+    port = DISPLAY_STATE.get("forwardPort")
+    scid = DISPLAY_STATE.get("scid")
+    if scid:
+        try:
+            adb_shell(f"pkill -f scid={scid}", timeout=10)
+        except Exception:
+            pass
+    DISPLAY_STATE.update({"displayId": -1, "sfId": None, "server": None, "drain": None, "forwardPort": None, "scid": None})
+    if server is not None:
+        try:
+            server.terminate()
+        except Exception:
+            pass
+    if port:
+        try:
+            adb("forward", "--remove", f"tcp:{port}", timeout=10)
+        except Exception:
+            pass
+
+
+def display_idle_monitor():
+    while True:
+        time.sleep(30)
+        if DISPLAY_STATE.get("displayId", -1) < 0:
+            continue
+        with TASKS_LOCK:
+            busy = any(item.status in ACTIVE_TASK_STATUSES for item in TASKS.values())
+        if busy or time.monotonic() - DISPLAY_LAST_USED < DISPLAY_IDLE_SECONDS:
+            continue
+        with DISPLAY_LOCK:
+            stop_assistant_display_locked()
+        set_status("ready", "就绪", displayId=-1)
+
+
+def ensure_display():
+    with DISPLAY_LOCK:
+        server = DISPLAY_STATE.get("server")
+        if DISPLAY_STATE.get("displayId", -1) < 0 or server is None or server.poll() is not None:
+            return start_assistant_display_locked()
+        mark_display_used()
+        return DISPLAY_STATE["displayId"]
+
+
+def active_display_payload():
+    with DISPLAY_LOCK:
+        display_id = DISPLAY_STATE.get("displayId", -1)
+        server = DISPLAY_STATE.get("server")
+        if display_id < 0 or server is None or server.poll() is not None:
+            return {"display_id": -1, "active": False}
+        mark_display_used()
+        png = capture(display_id)
+        jpeg_b64, _ = png_to_jpeg_base64(png)
+        width, height = display_size()
+        return {
+            "display_id": display_id,
+            "active": True,
+            "width": width,
+            "height": height,
+            "jpeg_base64": jpeg_b64,
+        }
+
+
+def capture(display_id):
+    sf_id = DISPLAY_STATE.get("sfId")
+    if sf_id is None:
+        sf_id = resolve_sf_display(display_id)
+        DISPLAY_STATE["sfId"] = sf_id
+    if sf_id is None:
+        raise RuntimeError("未找到后台显示画面")
+    result = adb_bytes("exec-out", f"screencap -d {sf_id} -p", timeout=20)
+    if result.returncode != 0 or not result.stdout:
+        fresh = resolve_sf_display(display_id)
+        if fresh is not None and fresh != sf_id:
+            DISPLAY_STATE["sfId"] = fresh
+            result = adb_bytes("exec-out", f"screencap -d {fresh} -p", timeout=20)
+    if result.returncode != 0 or not result.stdout:
+        raise RuntimeError("截图失败")
+    return result.stdout
+
+
+def adb_bytes(*args, timeout=30):
+    command = [ADB_PATH] + (["-s", ADB_SERIAL] if ADB_SERIAL else []) + list(args)
+    return subprocess.run(command, capture_output=True, timeout=timeout)
+
+
+def png_to_jpeg_base64(png_bytes):
+    with tempfile.TemporaryDirectory(prefix="macdora-shot-") as workdir:
+        png_path = Path(workdir) / "shot.png"
+        jpg_path = Path(workdir) / "shot.jpg"
+        png_path.write_bytes(png_bytes)
+        subprocess.run(
+            ["sips", "-s", "format", "jpeg", "-Z", "1024", str(png_path), "--out", str(jpg_path)],
+            capture_output=True, timeout=20,
+        )
+        if not jpg_path.is_file():
+            return base64.b64encode(png_bytes).decode(), "image/png"
+        return base64.b64encode(jpg_path.read_bytes()).decode(), "image/jpeg"
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+# ---------------------------------------------------------------- input
+
+def input_tap(display_id, x, y):
+    adb_shell(f"input -d {display_id} tap {x} {y}")
+
+
+def input_swipe(display_id, x1, y1, x2, y2, duration_ms):
+    adb_shell(f"input -d {display_id} swipe {x1} {y1} {x2} {y2} {duration_ms}")
+
+
+def input_key(display_id, key):
+    key_events = {
+        "BACK": "KEYCODE_BACK",
+        "HOME": "KEYCODE_HOME",
+        "ENTER": "KEYCODE_ENTER",
+        "APP_SWITCH": "KEYCODE_APP_SWITCH",
+        "DEL": "KEYCODE_DEL",
+    }
+    keyevent = key_events.get(str(key).strip().upper())
+    if keyevent is None:
+        raise ValueError("不支持的按键")
+    adb_shell(f"input -d {display_id} keyevent {keyevent}")
+
+
+def input_text_ascii(display_id, text):
+    escaped = text.replace(" ", "%s")
+    adb_shell(f"input -d {display_id} text {shlex.quote(escaped)}")
+
+
+def commit_text_via_ime(display_id, text):
+    global IME_PORT
+    if not IME_PORT:
+        IME_PORT = free_port()
+        adb("forward", f"tcp:{IME_PORT}", "localabstract:androiduse_ime_v1", timeout=10)
+    sock = socket.create_connection(("127.0.0.1", IME_PORT), timeout=3)
+    sock.settimeout(1.5)
+
+    def rx(count):
+        buffer = b""
+        while len(buffer) < count:
+            chunk = sock.recv(count - len(buffer))
+            if not chunk:
+                raise EOFError("ime closed")
+            buffer += chunk
+        return buffer
+
+    rx(6)
+    encoder = text.encode("utf-8")
+    if not encoder or len(encoder) > 4096:
+        raise RuntimeError("文字长度超出输入限制")
+    deadline = time.time() + 3
+    epoch = None
+    while time.time() < deadline:
+        try:
+            kind = rx(1)[0]
+        except socket.timeout:
+            continue
+        if kind == 1:
+            state = rx(10)
+            if state[0] == 1:
+                epoch = struct.unpack(">Q", state[2:10])[0]
+                break
+    if epoch is None:
+        sock.close()
+        raise RuntimeError("当前没有可输入的文字框，请先点击输入框")
+    seq = 1
+    sock.sendall(bytes([0x41, 0x55, 2, 2]) + struct.pack(">I", seq)
+                 + struct.pack(">Q", 0) + struct.pack(">Q", 0) + struct.pack(">i", -1) + struct.pack(">H", 0))
+    confirmed = None
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        try:
+            kind = rx(1)[0]
+        except socket.timeout:
+            continue
+        if kind == 3:
+            reply = rx(26)
+            status = reply[4]
+            confirm_epoch = struct.unpack(">Q", reply[5:13])[0]
+            pointer = struct.unpack(">Q", reply[13:21])[0]
+            display = struct.unpack(">i", reply[21:25])[0]
+            if status == 0 and (display < 0 or display == display_id):
+                confirmed = (confirm_epoch, pointer, display)
+                break
+        elif kind == 2:
+            rx(5)
+    if confirmed is None:
+        sock.close()
+        raise RuntimeError("输入框已切换，请重新点击输入框")
+    confirm_epoch, pointer, display = confirmed
+    seq = 2
+    sock.sendall(bytes([0x41, 0x55, 2, 1]) + struct.pack(">I", seq)
+                 + struct.pack(">Q", confirm_epoch) + struct.pack(">Q", pointer)
+                 + struct.pack(">i", display) + struct.pack(">H", len(encoder)) + encoder)
+    time.sleep(0.35)
+    sock.close()
+
+
+def type_text(display_id, text):
+    if all(ord(ch) < 128 for ch in text):
+        try:
+            input_text_ascii(display_id, text)
+            return
+        except Exception:
+            pass
+    commit_text_via_ime(display_id, text)
+
+
+# ---------------------------------------------------------------- resources
+
+def load_json_resource(name):
+    return json.loads((BUNDLE_DIR / "resources" / name).read_text())
+
+
+# ---------------------------------------------------------------- agent loop
+
+SYSTEM_PROMPT = """你是 Macdora 的系统级 Android 助手，运行在宿主机上，通过系统通道操作 Android 环境中的任意应用。
+
+工作方式：
+- 当前操作发生在一块不可见的后台虚拟显示（ID 见运行上下文），不会打扰用户的前台窗口。
+- 每一步你会看到一张当前屏幕截图。先看清屏幕，再决定动作。
+- 坐标使用 0-999 的归一化坐标，(0,0) 是左上角，(999,999) 是右下角。
+- 点击前确认目标在屏幕上；如果目标不在当前屏幕，先滑动或返回。
+- 输入中文等非 ASCII 文字前，必须先点击文字输入框使其获得焦点，再调用 phone_type。
+- 发送消息、提交表单等对外动作执行前，核对收件人与内容；无法确认时调用 need_user。
+- 看到登录、密码、扫码、验证码或“作为平板登录”页面，立即调用 need_user 并说明需要你完成什么；不要尝试输入密码或点击登录。
+- 支付步骤一律调用 need_user，交回用户。
+- 完成任务后调用 task_done，并给出简短结果。
+- 不要过度解释，直接行动；每轮只调用一个工具。
+
+常用流程：
+- 打开应用：phone_launch_app，然后 phone_screenshot 确认。
+- 发送消息：启动微信 → 点击搜索/聊天 → 点击输入框 → phone_type → 点击发送 → 截图核对。
+- 读取列表/聊天记录：截图后上滑，重复直到足够。
+"""
+
+WECHAT_NOTE = ""
+try:
+    WECHAT_NOTE = (BUNDLE_DIR / "resources" / "knowledge" / "wechat.md").read_text()
+except Exception:
+    pass
+
+
+TOOLS = [
+    {"type": "function", "function": {"name": "phone_screenshot", "description": "重新截取后台显示并查看当前画面。", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "phone_tap", "description": "点击归一化坐标 (0-999)。", "parameters": {"type": "object", "properties": {"x": {"type": "integer", "minimum": 0, "maximum": 999}, "y": {"type": "integer", "minimum": 0, "maximum": 999}}, "required": ["x", "y"]}}},
+    {"type": "function", "function": {"name": "phone_swipe", "description": "从起点滑到终点，用于滚动或切换页面。", "parameters": {"type": "object", "properties": {"x1": {"type": "integer"}, "y1": {"type": "integer"}, "x2": {"type": "integer"}, "y2": {"type": "integer"}, "duration_ms": {"type": "integer", "minimum": 100, "maximum": 2000}}, "required": ["x1", "y1", "x2", "y2"]}}},
+    {"type": "function", "function": {"name": "phone_type", "description": "向当前聚焦的文字输入框输入文本（支持中文）。", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}},
+    {"type": "function", "function": {"name": "phone_key", "description": "发送系统按键：BACK / HOME / ENTER / APP_SWITCH / DEL。", "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}}},
+    {"type": "function", "function": {"name": "phone_launch_app", "description": "在后台显示上启动应用。", "parameters": {"type": "object", "properties": {"package": {"type": "string"}}, "required": ["package"]}}},
+    {"type": "function", "function": {"name": "phone_list_apps", "description": "列出已安装的第三方应用包名与名称。", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "phone_wait", "description": "等待一段时间让界面加载。", "parameters": {"type": "object", "properties": {"seconds": {"type": "number", "minimum": 0.2, "maximum": 10}}, "required": ["seconds"]}}},
+    {"type": "function", "function": {"name": "system_shell", "description": "以 shell 身份执行系统命令（power/网络/文件/设置等），谨慎使用。", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "need_user", "description": "需要用户亲自处理（登录、验证码、支付、无法识别的界面）时调用，等待用户回答后继续。", "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]}}},
+    {"type": "function", "function": {"name": "task_done", "description": "任务完成，返回简短结果。", "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}}},
+]
+
+
+class Task:
+    def __init__(self, goal):
+        self.id = str(uuid.uuid4())
+        self.goal = goal
+        self.status = "running"
+        self.steps = 0
+        self.progress = ""
+        self.answer = None
+        self.reason = None
+        self.question = None
+        self.created_at = int(time.time() * 1000)
+        self.cancelled = False
+        self.inbox = []
+        self.lock = threading.Lock()
+
+    def describe(self):
+        with self.lock:
+            return {
+                "task_id": self.id,
+                "status": self.status,
+                "goal": self.goal,
+                "step": self.steps,
+                "progress": self.progress,
+                "answer": self.answer,
+                "reason": self.reason,
+                "question": self.question,
+            }
+
+
+def task_thread(task, config):
+    display_id = -1
+    try:
+        display_id = ensure_display()
+        set_status(
+            "ready",
+            "就绪",
+            displayId=display_id,
+            modelConfigured=bool(config.get("gateway_ready") and config.get("model")),
+            gatewayReady=bool(config.get("gateway_ready")),
+            model=config.get("model", ""),
+        )
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if WECHAT_NOTE:
+            messages.append({"role": "system", "content": "应用知识（微信）：\n" + WECHAT_NOTE[:6000]})
+        messages.append({"role": "user", "content": f"任务：{task.goal}"})
+        max_steps = int(config.get("max_steps") or 25)
+        for step in range(1, max_steps + 1):
+            if task.cancelled:
+                finish_task(task, "cancelled", reason="用户已停止")
+                return
+            with task.lock:
+                task.steps = step
+                pending = task.inbox
+                task.inbox = []
+            for text in pending:
+                messages.append({"role": "user", "content": f"补充说明：{text}"})
+            try:
+                png = capture(display_id)
+                jpeg_b64, mime = png_to_jpeg_base64(png)
+            except Exception as exc:
+                finish_task(task, "failed", reason=f"截图失败：{exc}")
+                return
+            view = {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"第 {step} 步，当前屏幕："},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{jpeg_b64}"}},
+                ],
+            }
+            reply, error = call_model_while_active(task, config, messages + [view])
+            if task.cancelled:
+                finish_task(task, "cancelled", reason="用户已停止")
+                return
+            if reply is None:
+                finish_task(task, "failed", reason=error)
+                return
+            choices = reply.get("choices")
+            if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                finish_task(task, "failed", reason="Magpie 返回了无效响应")
+                return
+            message = choices[0].get("message")
+            if not isinstance(message, dict):
+                finish_task(task, "failed", reason="Magpie 返回了空响应")
+                return
+            tool_calls = message.get("tool_calls") or []
+            content = (message.get("content") or "").strip()
+            if not tool_calls:
+                if not content:
+                    finish_task(task, "failed", reason="Magpie 返回了空响应")
+                    return
+                finish_task(task, "done", answer=content)
+                return
+            if not isinstance(tool_calls, list):
+                finish_task(task, "failed", reason="Magpie 返回了无效工具调用")
+                return
+            parsed_calls = []
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    finish_task(task, "failed", reason="Magpie 返回了无效工具调用")
+                    return
+                function = call.get("function")
+                if not isinstance(function, dict):
+                    finish_task(task, "failed", reason="Magpie 返回了无效工具调用")
+                    return
+                name = str(function.get("name") or "")
+                try:
+                    args = json.loads(function.get("arguments") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    finish_task(task, "failed", reason="工具参数不是有效 JSON")
+                    return
+                if not name or not isinstance(args, dict):
+                    finish_task(task, "failed", reason="Magpie 返回了无效工具调用")
+                    return
+                parsed_calls.append((call, name, args))
+            if content:
+                with task.lock:
+                    task.progress = content[:200]
+            messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+            for index, (call, name, args) in enumerate(parsed_calls):
+                if task.cancelled:
+                    finish_task(task, "cancelled", reason="用户已停止")
+                    return
+                if name in ("task_done", "need_user") and index != len(parsed_calls) - 1:
+                    finish_task(task, "failed", reason="结束工具必须单独调用")
+                    return
+                if name == "task_done":
+                    finish_task(task, "done", answer=str(args.get("summary") or "完成"))
+                    return
+                if name == "need_user":
+                    answer = wait_for_task_answer(task, str(args.get("reason") or "需要用户处理"))
+                    if answer is None:
+                        finish_task(task, "cancelled", reason="用户已停止")
+                        return
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": str(call.get("id") or ""),
+                        "content": f"用户回答：{answer}",
+                    })
+                    continue
+                result = execute_tool(display_id, name, args)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": str(call.get("id") or ""),
+                    "content": result,
+                })
+            time.sleep(random.uniform(0.15, 0.4))
+        finish_task(task, "failed", reason="步数已用完")
+    except Exception as exc:
+        finish_task(task, "failed", reason=str(exc))
+
+
+def finish_task(task, status, answer=None, reason=None):
+    with task.lock:
+        task.status = status
+        if answer is not None:
+            task.answer = answer
+        if reason is not None:
+            task.reason = reason
+
+
+def wait_for_task_answer(task, question):
+    with task.lock:
+        task.status = "waiting_for_answer"
+        task.question = question
+        task.progress = question[:200]
+    while True:
+        with task.lock:
+            if task.cancelled:
+                return None
+            if task.inbox:
+                answer = "\n".join(task.inbox)
+                task.inbox = []
+                task.status = "running"
+                task.question = None
+                return answer
+        time.sleep(0.2)
+
+
+def execute_tool(display_id, name, args):
+    try:
+        if name == "phone_screenshot":
+            return "已截取当前屏幕。"
+        if name == "phone_tap":
+            width, height = display_size()
+            x = round(int(args.get("x", 500)) * (width - 1) / 999)
+            y = round(int(args.get("y", 500)) * (height - 1) / 999)
+            input_tap(display_id, x, y)
+            return f"已点击 ({args.get('x')}, {args.get('y')})"
+        if name == "phone_swipe":
+            width, height = display_size()
+            points = []
+            for key in ("x1", "y1", "x2", "y2"):
+                value = int(args.get(key, 500))
+                points.append(round(value * ((width if key in ("x1", "x2") else height) - 1) / 999))
+            input_swipe(display_id, points[0], points[1], points[2], points[3], int(args.get("duration_ms", 350)))
+            return "已滑动"
+        if name == "phone_type":
+            type_text(display_id, str(args.get("text", "")))
+            return "已输入文字"
+        if name == "phone_key":
+            key = str(args.get("key", "BACK")).upper()
+            input_key(display_id, key)
+            return f"已发送按键 {key}"
+        if name == "phone_launch_app":
+            package = str(args.get("package", "")).strip()
+            if not re.fullmatch(r"[A-Za-z0-9._]+", package):
+                return "启动失败：包名无效"
+            resolved = adb_shell(
+                f"cmd package resolve-activity --brief -a android.intent.action.MAIN"
+                f" -c android.intent.category.LAUNCHER {package}",
+                timeout=30,
+            )
+            component = ""
+            for line in reversed((resolved.stdout or "").splitlines()):
+                candidate = line.strip()
+                if "/" in candidate and not candidate.startswith("priority="):
+                    component = candidate
+                    break
+            if not component:
+                return f"启动失败：无法解析 {package} 的入口"
+            started = adb_shell(
+                f"am start --display {display_id} -a android.intent.action.MAIN"
+                f" -c android.intent.category.LAUNCHER -n {component}",
+                timeout=30,
+            )
+            detail = (started.stderr or started.stdout or "").strip()
+            if started.returncode != 0 or "Error:" in detail or "Exception occurred" in detail:
+                return f"启动失败：{detail[-300:]}"
+            return f"已启动 {package}（{component}）"
+        if name == "phone_list_apps":
+            data = shell_text("pm list packages -3")
+            return "\n".join(line.replace("package:", "") for line in data.splitlines() if line.strip()) or "没有第三方应用"
+        if name == "phone_wait":
+            time.sleep(float(args.get("seconds", 1)))
+            return "已等待"
+        if name == "system_shell":
+            command = str(args.get("command", ""))
+            result = adb_shell(command, timeout=30)
+            return (result.stdout or result.stderr or "").strip()[:4000] or "已执行"
+    except Exception as exc:
+        return f"操作失败：{exc}"
+    return "未知工具"
+
+
+def display_size():
+    config = load_json_resource("plugin-config.json")
+    display_cfg = config.get("display", {})
+    return int(display_cfg.get("width", 1080)), int(display_cfg.get("height", 1920))
+
+
+def call_model(config, messages):
+    base_url = (config.get("base_url") or "").rstrip("/")
+    if not base_url:
+        return None, "Magpie 网关地址未配置"
+    if not config.get("model"):
+        return None, "Magpie 没有可用的视觉模型"
+    if base_url.endswith("/chat/completions"):
+        url = base_url
+    elif base_url.endswith("/v1"):
+        url = base_url + "/chat/completions"
+    else:
+        url = base_url + "/v1/chat/completions"
+    body = {
+        "model": config.get("model"),
+        "messages": messages,
+        "tools": TOOLS,
+        "tool_choice": "auto",
+        "temperature": 0.2,
+        "max_tokens": 1200,
+    }
+    if config.get("reasoning_effort"):
+        body["reasoning_effort"] = config["reasoning_effort"]
+    headers = {"Content-Type": "application/json"}
+    if config.get("api_key"):
+        headers["Authorization"] = f"Bearer {config['api_key']}"
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return json.loads(response.read().decode()), ""
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(300).decode(errors="replace").strip()
+        return None, f"Magpie 返回 HTTP {exc.code}：{detail}"
+    except Exception as exc:
+        return None, f"Magpie 网关调用失败：{exc}"
+
+
+def call_model_while_active(task, config, messages):
+    if task.cancelled:
+        return None, "用户已停止"
+    outcome = {}
+    completed = threading.Event()
+
+    def invoke():
+        outcome["reply"] = call_model(config, messages)
+        completed.set()
+
+    threading.Thread(target=invoke, daemon=True).start()
+    while not completed.wait(0.25):
+        if task.cancelled:
+            return None, "用户已停止"
+    return outcome.get("reply", (None, "Magpie 调用失败"))
+
+
+# ---------------------------------------------------------------- rpc
+
+def dispatch_method(method, params):
+    if method == "macdora.ping":
+        return {"pluginId": PLUGIN_ID, "instanceId": INSTANCE_ID, "ready": True}
+    if method == "mika.status":
+        config = load_config()
+        snapshot = status_snapshot()
+        snapshot["modelConfigured"] = bool(config.get("gateway_ready") and config.get("model"))
+        snapshot["gatewayReady"] = bool(config.get("gateway_ready"))
+        snapshot["model"] = config.get("model", "")
+        snapshot["displayId"] = DISPLAY_STATE.get("displayId", -1)
+        return snapshot
+    if method == "mika.config.get":
+        return public_config(load_config())
+    if method == "mika.config.set":
+        config = load_saved_config()
+        if isinstance(params.get("model"), str):
+            config["model"] = params["model"].strip()
+        if isinstance(params.get("reasoning_effort"), str):
+            config["reasoning_effort"] = params["reasoning_effort"].strip()
+        if isinstance(params.get("max_steps"), int) and 1 <= params["max_steps"] <= 60:
+            config["max_steps"] = params["max_steps"]
+        models, _, _ = discover_models()
+        config["model"] = resolve_model(config.get("model", ""), models)
+        config["reasoning_effort"] = resolve_effort(
+            config.get("reasoning_effort", ""),
+            config["model"],
+            models,
+        )
+        save_config(config)
+        resolved = load_config()
+        set_status(
+            "ready",
+            "就绪",
+            modelConfigured=bool(resolved.get("gateway_ready") and resolved.get("model")),
+            gatewayReady=bool(resolved.get("gateway_ready")),
+            model=resolved.get("model", ""),
+        )
+        return public_config(resolved)
+    if method == "mika.task.start":
+        goal = str(params.get("goal") or "").strip()
+        if not goal:
+            raise ValueError("任务目标不能为空")
+        config = load_config()
+        if not config.get("gateway_ready") or not config.get("model"):
+            raise ValueError(f"Magpie 网关不可用：{config.get('gateway_detail', '未连接')}")
+        if DISPLAY_STATE.get("displayId", -1) < 0:
+            start_assistant_display()
+        task = Task(goal)
+        with TASKS_LOCK:
+            running = next(
+                (item for item in TASKS.values() if item.status in ACTIVE_TASK_STATUSES),
+                None,
+            )
+            if running is not None:
+                raise ValueError(f"已有任务正在执行：{running.goal}")
+            TASKS[task.id] = task
+        threading.Thread(target=task_thread, args=(task, config), daemon=True).start()
+        return task.describe()
+    if method == "mika.task.list":
+        limit = int(params.get("limit") or 10)
+        with TASKS_LOCK:
+            tasks = list(TASKS.values())[-limit:]
+        return {"tasks": [task.describe() for task in reversed(tasks)]}
+    if method == "mika.task.get":
+        task = TASKS.get(str(params.get("taskId") or ""))
+        if task is None:
+            raise ValueError("任务不存在")
+        return task.describe()
+    if method in ("mika.task.steer", "mika.task.answer"):
+        task = TASKS.get(str(params.get("taskId") or ""))
+        if task is None:
+            raise ValueError("任务不存在")
+        with task.lock:
+            task.inbox.append(str(params.get("text") or ""))
+        return {"accepted": True}
+    if method == "mika.task.cancel":
+        task = TASKS.get(str(params.get("taskId") or ""))
+        if task is None:
+            raise ValueError("任务不存在")
+        task.cancelled = True
+        return {"cancelled": True}
+    if method == "mika.display.snapshot":
+        return active_display_payload()
+    if method == "mika.display.start":
+        ensure_display()
+        return active_display_payload()
+    if method == "mika.launch_app":
+        display_id = ensure_display()
+        package = str(params.get("package") or "")
+        execute_tool(display_id, "phone_launch_app", {"package": package})
+        return {"launched": package}
+    raise KeyError(method)
+
+
+def handle(conn):
+    buffer = b""
+    try:
+        while True:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            buffer += chunk
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                respond(conn, line)
+    except OSError:
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def respond(conn, line):
+    try:
+        request = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    request_id = request.get("id")
+    method = request.get("method", "")
+    params = request.get("params") if isinstance(request.get("params"), dict) else {}
+    try:
+        result = dispatch_method(method, params)
+    except KeyError:
+        payload = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "method not found"}}
+    except Exception as exc:
+        payload = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": str(exc)}}
+    else:
+        payload = {"jsonrpc": "2.0", "id": request_id, "result": result}
+    try:
+        conn.sendall(json.dumps(payload).encode() + b"\n")
+    except OSError:
+        pass
+
+
+def background_work():
+    try:
+        config = load_config()
+        set_status(
+            "provisioning",
+            "准备系统助手环境",
+            modelConfigured=bool(config.get("gateway_ready") and config.get("model")),
+            gatewayReady=bool(config.get("gateway_ready")),
+            model=config.get("model", ""),
+        )
+        provisioned = run_payload("provision.sh")
+        output = (provisioned.stdout or "") + (provisioned.stderr or "")
+        if provisioned.returncode != 0 or "ASSISTANT_PROVISION_OK" not in output:
+            detail = output.strip()[-300:] or "系统助手环境配置失败"
+            raise RuntimeError(detail)
+        set_status("ready", "就绪", displayId=-1,
+                   modelConfigured=bool(config.get("gateway_ready") and config.get("model")),
+                   gatewayReady=bool(config.get("gateway_ready")),
+                   model=config.get("model", ""))
+    except Exception as exc:
+        set_status("degraded", str(exc))
+
+
+def main():
+    def handle_signal(signum, frame):
+        with DISPLAY_LOCK:
+            stop_assistant_display_locked()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+    if not SOCKET_PATH:
+        print("MACDORA_PLUGIN_SOCKET_PATH missing", file=sys.stderr)
+        return 2
+    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_file = open(STATE_DIR / "service.lock", "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("another service instance is running", file=sys.stderr)
+        return 1
+
+    sock_path = Path(SOCKET_PATH)
+    sock_path.parent.mkdir(parents=True, exist_ok=True)
+    if sock_path.exists():
+        sock_path.unlink()
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+    os.chmod(sock_path, 0o600)
+    server.listen(8)
+
+    endpoint = {
+        "schemaVersion": 1, "pluginId": PLUGIN_ID, "instanceId": INSTANCE_ID,
+        "pid": HOST_PID, "socketPath": str(sock_path), "protocol": "json-rpc-2.0",
+    }
+    tmp = STATE_DIR / "endpoint.json.tmp"
+    tmp.write_text(json.dumps(endpoint))
+    os.replace(tmp, STATE_DIR / "endpoint.json")
+    os.chmod(STATE_DIR / "endpoint.json", 0o600)
+
+    threading.Thread(target=background_work, daemon=True).start()
+    threading.Thread(target=display_idle_monitor, daemon=True).start()
+
+    deadline = time.monotonic() + 90 * 60
+    server.settimeout(5)
+    try:
+        while time.monotonic() < deadline:
+            if HOST_PID > 0 and os.getppid() != HOST_PID:
+                break
+            try:
+                conn, _ = server.accept()
+            except socket.timeout:
+                continue
+            threading.Thread(target=handle, args=(conn,), daemon=True).start()
+    finally:
+        with DISPLAY_LOCK:
+            stop_assistant_display_locked()
+        server.close()
+        for path in (sock_path, STATE_DIR / "endpoint.json"):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        lock_file.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

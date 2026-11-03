@@ -11,6 +11,9 @@ final class GuestAuthenticationPreservationTests: XCTestCase {
         XCTAssertTrue(verticalScript.contains(
             "target_fingerprint=\"Samsung/SM-F926U/SM-F926U:12/V417IR/eng.nioh.20241225.154630:user/release-keys\""
         ))
+        XCTAssertTrue(verticalScript.contains("\"ro.system.build.fingerprint\""))
+        XCTAssertTrue(verticalScript.contains("\"ro.vendor.build.fingerprint\""))
+        XCTAssertTrue(verticalScript.contains("setprop gsm.operator.numeric 46000"))
         XCTAssertFalse(verticalScript.contains("target_model=\"Android SDK built for arm64\""))
     }
 
@@ -62,6 +65,7 @@ final class GuestAuthenticationPreservationTests: XCTestCase {
         defer { fixture.remove() }
         try fixture.runSetup(expectedStatus: 1)
         fixture.assertAuthenticationPreserved()
+        fixture.assertZygoteWasNotStopped()
     }
 
     func testLegacyPhoneIdentityMigrationDoesNotDeleteApplicationAuthentication() throws {
@@ -71,6 +75,66 @@ final class GuestAuthenticationPreservationTests: XCTestCase {
         try fixture.runSetup()
         fixture.assertGuestIdentityIsTablet()
         fixture.assertAuthenticationPreserved()
+    }
+
+    func testEarlyBootHookAppliesIdentityBeforeZygote() {
+        let identity = RuntimeSoftwareDefaults.earlyDeviceIdentityScript()
+        XCTAssertTrue(identity.contains("sys.androiduse.zygote_model"))
+        XCTAssertTrue(identity.contains("androiduse.device_identity 1"))
+        XCTAssertTrue(
+            identity.contains("androiduse.device_identity_version \(RuntimeSoftwareDefaults.deviceIdentityVersion)")
+        )
+        XCTAssertTrue(identity.contains("setprop debug.egl.blobcache.multifile true"))
+        XCTAssertTrue(identity.contains(
+            "setprop debug.egl.blobcache.multifile_limit \(RuntimeSoftwareDefaults.angleBlobCacheLimitBytes)"
+        ))
+        for fingerprint in [
+            "ro.system.build.fingerprint",
+            "ro.product.build.fingerprint",
+            "ro.system_ext.build.fingerprint",
+            "ro.vendor.build.fingerprint",
+            "ro.vendor_dlkm.build.fingerprint",
+            "ro.system_dlkm.build.fingerprint",
+            "ro.odm.build.fingerprint"
+        ] {
+            XCTAssertTrue(identity.contains(fingerprint), "Missing early fingerprint \(fingerprint)")
+        }
+        XCTAssertTrue(identity.contains("setprop gsm.operator.numeric 46000"))
+        XCTAssertTrue(identity.contains("setprop gsm.sim.operator.numeric 460000"))
+        XCTAssertTrue(identity.contains("\"ro.kernel.qemu\""))
+        XCTAssertTrue(identity.contains("\"ro.boot.qemu\""))
+        XCTAssertTrue(identity.contains("\"ro.hardware\""))
+        XCTAssertTrue(identity.contains("\"ro.boot.hardware\""))
+        XCTAssertTrue(identity.contains("\"ro.boot.hardware.vulkan\""))
+        XCTAssertTrue(identity.contains("\"ro.product.system_dlkm.model\""))
+        XCTAssertTrue(identity.contains("\"ro.soc.model\""))
+        XCTAssertTrue(identity.contains("\"ro.soc.manufacturer\""))
+        XCTAssertTrue(identity.contains("patch_prop \"u:object_r:serialno_prop:s0\" \"ro.serialno\""))
+        XCTAssertTrue(identity.contains("patch_prop \"u:object_r:serialno_prop:s0\" \"ro.boot.serialno\""))
+        XCTAssertFalse(identity.contains("ctl.restart zygote"))
+        XCTAssertFalse(identity.contains("ctl.stop zygote"))
+
+        let recovery = RuntimeSoftwareDefaults.guestDeviceIdentityScript()
+        XCTAssertFalse(recovery.contains("ctl.stop zygote"))
+
+        let identityRC = RuntimeSoftwareDefaults.earlyDeviceIdentityInitRC
+        XCTAssertTrue(identityRC.contains("ANDROIDUSE_DEVICE_IDENTITY_V1"))
+        XCTAssertTrue(identityRC.contains("on post-fs"))
+        XCTAssertTrue(identityRC.contains("wait_for_prop androiduse.device_identity 1"))
+
+        let winextRC = RuntimeSoftwareDefaults.earlyWindowExtensionsInitRC
+        XCTAssertTrue(winextRC.contains("ANDROIDUSE_WINEXT_V1"))
+        XCTAssertTrue(winextRC.contains("wait_for_prop androiduse.winext_ready 1"))
+
+        let winext = RuntimeSoftwareDefaults.earlyWindowExtensionsScript()
+        XCTAssertTrue(winext.contains("androidx.window.extensions.jar"))
+        XCTAssertTrue(winext.contains("androiduse.winext_ready 1"))
+
+        XCTAssertEqual(
+            recovery.components(separatedBy: "cur_zygote_model=\"stale\"").count - 1,
+            1,
+            "Window-extension refresh must not masquerade as a device identity change."
+        )
     }
 
     func testWarmReopenPreservesApplicationAuthentication() throws {
@@ -110,9 +174,33 @@ private final class GuestIdentityShellFixture {
         }
         var values = [
             "ro.product.board": identity.board,
+            "ro.product.first_api_level": identity.firstAPILevel,
+            "ro.board.platform": identity.boardPlatform,
+            "ro.soc.manufacturer": "Qualcomm",
+            "ro.soc.model": identity.socModel,
+            "ro.serialno": identity.serial,
+            "ro.boot.serialno": identity.serial,
             "ro.build.characteristics": identity.characteristics,
+            "ro.build.type": "user",
+            "ro.build.tags": "release-keys",
+            "ro.build.product": identity.device,
+            "ro.build.id": identity.buildID,
+            "ro.build.version.incremental": identity.buildIncremental,
+            "ro.build.flavor": "\(identity.device)-user",
+            "ro.build.description": "\(identity.device)-user 12 \(identity.buildID) \(identity.buildIncremental) release-keys",
+            "ro.build.display.id": identity.buildID,
+            "ro.hardware": "qcom",
+            "ro.boot.hardware": "qcom",
+            "ro.boot.hardware.vulkan": "qcom",
             "qemu.sf.lcd_density": identity.density,
             "ro.build.fingerprint": identity.fingerprint,
+            "ro.system.build.fingerprint": identity.fingerprint,
+            "ro.product.build.fingerprint": identity.fingerprint,
+            "ro.system_ext.build.fingerprint": identity.fingerprint,
+            "ro.vendor.build.fingerprint": identity.fingerprint,
+            "ro.vendor_dlkm.build.fingerprint": identity.fingerprint,
+            "ro.system_dlkm.build.fingerprint": identity.fingerprint,
+            "ro.odm.build.fingerprint": identity.fingerprint,
             "live_zygote_pid": "100"
         ]
         if let marker {
@@ -120,7 +208,7 @@ private final class GuestIdentityShellFixture {
             values["sys.androiduse.zygote_pid"] = stalePID ? "99" : "100"
             values["sys.androiduse.winext_patch"] = "v2"
         }
-        for namespace in ["", "system.", "product.", "system_ext.", "vendor.", "vendor_dlkm.", "odm."] {
+        for namespace in ["", "system.", "product.", "system_ext.", "vendor.", "vendor_dlkm.", "system_dlkm.", "odm."] {
             for (key, value) in ["brand": identity.brand, "manufacturer": identity.manufacturer, "model": identity.model, "device": identity.device, "name": identity.name] {
                 values["ro.product.\(namespace)\(key)"] = value
             }
@@ -221,6 +309,15 @@ private final class GuestIdentityShellFixture {
         let commands = (try? String(contentsOf: root.appendingPathComponent("commands"), encoding: .utf8)) ?? ""
         XCTAssertFalse(commands.components(separatedBy: .newlines).contains { $0.hasPrefix("force-stop ") },
                        "Shared environment preparation must not mark an unrelated application as stopped.", file: file, line: line)
+    }
+
+    func assertZygoteWasNotStopped(file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: root.appendingPathComponent("properties/ctl.stop").path),
+            "Identity recovery must leave zygote alive until the single restart gate.",
+            file: file,
+            line: line
+        )
     }
 
     func remove() { try? FileManager.default.removeItem(at: root) }

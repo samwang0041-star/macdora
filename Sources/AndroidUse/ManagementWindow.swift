@@ -825,6 +825,14 @@ final class TFSegmentedControl: NSView {
     let options: [Option]
     var selectedValue: String { didSet { refreshSegments() } }
     var onSelect: ((String) -> Void)?
+    var isEnabled: Bool = true {
+        didSet {
+            alphaValue = isEnabled ? 1 : 0.45
+            for button in segmentButtons.values {
+                button.isEnabled = isEnabled
+            }
+        }
+    }
 
     private let track = TFCardView(frame: .zero)
     private let stack = NSStackView()
@@ -903,6 +911,7 @@ final class TFSegmentedControl: NSView {
     required init?(coder: NSCoder) { nil }
 
     @objc private func segmentTapped(_ sender: NSButton) {
+        guard isEnabled else { return }
         guard sender.tag >= 0, sender.tag < options.count else { return }
         let next = options[sender.tag].value
         guard next != selectedValue else { return }
@@ -1024,8 +1033,8 @@ final class TFToggleSwitch: NSControl {
     }
 }
 
-private final class APKDropCardView: TFCardView {
-    var onDropAPK: ((URL) -> Void)?
+private final class FileDropCardView: TFCardView {
+    var onDropFiles: (([URL]) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1036,7 +1045,7 @@ private final class APKDropCardView: TFCardView {
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
         guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-              urls.contains(where: { $0.pathExtension.lowercased() == "apk" }) else {
+              !urls.isEmpty else {
             return []
         }
         fillColor = TFTheme.accentSoft
@@ -1053,10 +1062,10 @@ private final class APKDropCardView: TFCardView {
         fillColor = .clear
         strokeColor = TFTheme.line
         guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-              let apkURL = urls.first(where: { $0.pathExtension.lowercased() == "apk" }) else {
+              !urls.isEmpty else {
             return false
         }
-        onDropAPK?(apkURL)
+        onDropFiles?(urls)
         return true
     }
 }
@@ -1130,7 +1139,8 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     var onCloseApp: ((String) -> Void)?
     var onCloseActiveApp: (() -> Void)?
     var onInstall: (() -> Void)?
-    var onDropAPK: ((URL) -> Void)?
+    var onDropFiles: (([URL]) -> Void)?
+    var onExportDownload: (() -> Void)?
     var onStartRuntime: (() -> Void)?
     var onStop: (() -> Void)?
     var onRefreshApps: (() -> Void)?
@@ -1171,12 +1181,14 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     private var currentReadiness: [ReadinessCheckItem] = []
     private var cameraEnabled = true
     private var canChangeCamera = true
+    private var canChangeDeviceProfile = true
     private var rootPath = ""
     private var bannerMessage: String?
     private weak var pluginManager: SystemPluginManager?
     private(set) var activePluginDetailID: String?
     private var locationWorkspaceViews: [String: DeveloperLocationWorkspaceView] = [:]
     private var agentWorkspaceViews: [String: HostServiceAgentWorkspaceView] = [:]
+    private var assistantWorkspaceViews: [String: AssistantPluginWorkspaceView] = [:]
     private var livePluginCatalogStatusLabels: [String: NSTextField] = [:]
     private var livePluginDetailTitleLabels: [String: NSTextField] = [:]
     private var livePluginDetailStatusLabels: [String: NSTextField] = [:]
@@ -1583,6 +1595,9 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         for ws in locationWorkspaceViews.values {
             ws.refreshTheme()
         }
+        for ws in assistantWorkspaceViews.values {
+            ws.refreshTheme()
+        }
         for ws in agentWorkspaceViews.values {
             ws.refreshTheme()
         }
@@ -1665,6 +1680,11 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                 agentWorkspaceViews[existingID]?.removeFromSuperview()
                 agentWorkspaceViews.removeValue(forKey: existingID)
             }
+            for existingID in Array(assistantWorkspaceViews.keys)
+                where !pm.isPluginInstalled(existingID) || !pm.isPluginEnabled(existingID) {
+                assistantWorkspaceViews[existingID]?.removeFromSuperview()
+                assistantWorkspaceViews.removeValue(forKey: existingID)
+            }
             if selectedSection == .plugins,
                let detailID = activePluginDetailID,
                pm.isPluginEnabled(detailID),
@@ -1706,6 +1726,17 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
            ws.superview === pageStack {
             if let pm = pluginManager, let loc = pm.locationPlugin(for: detailID) {
                 ws.bindPlugin(loc)
+                refreshLivePluginControls(for: detailID)
+            }
+            return
+        }
+        if selectedSection == .plugins,
+           let detailID = activePluginDetailID,
+           pluginManager?.isPluginEnabled(detailID) == true,
+           let ws = assistantWorkspaceViews[detailID],
+           ws.superview === pageStack {
+            if let pm = pluginManager, let host = pm.hostServicePlugin(for: detailID) {
+                ws.bindPlugin(host)
                 refreshLivePluginControls(for: detailID)
             }
             return
@@ -1842,6 +1873,7 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     func updatePreferences(
         cameraEnabled: Bool,
         canChangeCamera: Bool,
+        canChangeDeviceProfile: Bool = true,
         rootPath: String,
         preferences: ContainerPreferences,
         readiness: [ReadinessCheckItem],
@@ -1854,12 +1886,14 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         let settingsChanged =
             self.cameraEnabled != cameraEnabled ||
             self.canChangeCamera != canChangeCamera ||
+            self.canChangeDeviceProfile != canChangeDeviceProfile ||
             self.rootPath != rootPath ||
             self.currentPreferences != preferences
         let keepAwakeChanged = self.currentOfficeKeepAwake != officeKeepAwake
         let readinessChanged = self.currentReadiness != readiness
         self.cameraEnabled = cameraEnabled
         self.canChangeCamera = canChangeCamera
+        self.canChangeDeviceProfile = canChangeDeviceProfile
         self.rootPath = rootPath
         self.currentPreferences = preferences
         self.currentOfficeKeepAwake = officeKeepAwake
@@ -2304,6 +2338,19 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             }
             addFullWidth(ws, to: pageStack)
             configurePluginKeepAwakeControl(ws, plugin: hostPlugin)
+        } else if item.isAssistantHostService,
+                  let hostPlugin = pm.hostServicePlugin(for: item.id) {
+            let ws: AssistantPluginWorkspaceView
+            if let existing = assistantWorkspaceViews[item.id] {
+                existing.bindPlugin(hostPlugin)
+                existing.removeFromSuperview()
+                ws = existing
+            } else {
+                let created = AssistantPluginWorkspaceView(plugin: hostPlugin)
+                assistantWorkspaceViews[item.id] = created
+                ws = created
+            }
+            addFullWidth(ws, to: pageStack)
         }
     }
 
@@ -2914,13 +2961,13 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
     }
 
     private func makeDropInstallZone() -> NSView {
-        let drop = APKDropCardView(frame: .zero)
+        let drop = FileDropCardView(frame: .zero)
         drop.translatesAutoresizingMaskIntoConstraints = false
         drop.cornerRadius = 12
         drop.dashed = true
         drop.fillColor = .clear
         drop.strokeColor = TFTheme.line
-        drop.onDropAPK = { [weak self] url in self?.onDropAPK?(url) }
+        drop.onDropFiles = { [weak self] urls in self?.onDropFiles?(urls) }
 
         let icon = NSImageView()
         icon.translatesAutoresizingMaskIntoConstraints = false
@@ -2930,26 +2977,33 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
         icon.contentTintColor = TFTheme.ink3
         drop.addSubview(icon)
 
-        let lbl = NSTextField(labelWithString: "拖入 APK，安装新应用")
+        let lbl = NSTextField(labelWithString: "拖入 APK 安装，其他文件存入 Download")
         lbl.font = .systemFont(ofSize: 12.5, weight: .regular)
         lbl.textColor = TFTheme.ink2
         lbl.lineBreakMode = .byTruncatingTail
         lbl.translatesAutoresizingMaskIntoConstraints = false
         drop.addSubview(lbl)
 
-        let chooseBtn = TFButton(title: "选择文件…", variant: .ghost, size: .sm)
+        let chooseBtn = TFButton(title: "选择 APK…", variant: .ghost, size: .sm)
         chooseBtn.onClick = { [weak self] in self?.onInstall?() }
-        drop.addSubview(chooseBtn)
+        let exportBtn = TFButton(title: "导出…", variant: .ghost, size: .sm)
+        exportBtn.toolTip = "导出 Download/Macdora 到 Mac"
+        exportBtn.onClick = { [weak self] in self?.onExportDownload?() }
+        let actions = NSStackView(views: [exportBtn, chooseBtn])
+        actions.orientation = .horizontal
+        actions.spacing = 8
+        actions.translatesAutoresizingMaskIntoConstraints = false
+        drop.addSubview(actions)
 
         NSLayoutConstraint.activate([
             drop.heightAnchor.constraint(equalToConstant: 50),
             icon.leadingAnchor.constraint(equalTo: drop.leadingAnchor, constant: 16),
             icon.centerYAnchor.constraint(equalTo: drop.centerYAnchor),
             lbl.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
-            lbl.trailingAnchor.constraint(lessThanOrEqualTo: chooseBtn.leadingAnchor, constant: -12),
+            lbl.trailingAnchor.constraint(lessThanOrEqualTo: actions.leadingAnchor, constant: -12),
             lbl.centerYAnchor.constraint(equalTo: drop.centerYAnchor),
-            chooseBtn.trailingAnchor.constraint(equalTo: drop.trailingAnchor, constant: -14),
-            chooseBtn.centerYAnchor.constraint(equalTo: drop.centerYAnchor)
+            actions.trailingAnchor.constraint(equalTo: drop.trailingAnchor, constant: -14),
+            actions.centerYAnchor.constraint(equalTo: drop.centerYAnchor)
         ])
         return drop
     }
@@ -3215,6 +3269,22 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             self?.selectTabletMode(val == "tablet")
         }
 
+        let profileSeg = TFSegmentedControl(
+            options: GuestDeviceProfile.allCases.map {
+                .init(value: $0.rawValue, label: $0.title)
+            },
+            selectedValue: currentPreferences.deviceProfile.rawValue
+        )
+        profileSeg.identifier = NSUserInterfaceItemIdentifier("settings-device-profile")
+        profileSeg.isEnabled = canChangeDeviceProfile
+        profileSeg.onSelect = { [weak self] raw in
+            guard let self, let profile = GuestDeviceProfile(rawValue: raw) else { return }
+            var prefs = self.currentPreferences
+            prefs.deviceProfile = profile
+            self.currentPreferences = prefs
+            self.onUpdatePreferences?(prefs)
+        }
+
         let scaleSeg = TFSegmentedControl(
             options: DisplayInterfaceScale.allCases.map {
                 .init(value: $0.rawValue, label: "\($0.title) \($0.percentage)%")
@@ -3242,7 +3312,9 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             options: [
                 .init(value: "30", label: "30Hz"),
                 .init(value: "45", label: "45Hz"),
-                .init(value: "60", label: "60Hz")
+                .init(value: "60", label: "60Hz"),
+                .init(value: "90", label: "90Hz"),
+                .init(value: "120", label: "120Hz")
             ],
             selectedValue: String(currentPreferences.targetFPS)
         )
@@ -3266,6 +3338,13 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                     title: "窗口布局",
                     detail: "始终使用同一平板，仅调整显示方向",
                     control: modeSeg
+                ),
+                makeSettingRow(
+                    title: "设备机型",
+                    detail: canChangeDeviceProfile
+                        ? "应用看到的品牌与型号；重启环境后生效"
+                        : "停止运行环境后可切换",
+                    control: profileSeg
                 ),
                 makeSettingRow(
                     title: "界面大小",
@@ -3306,6 +3385,15 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
             self.onUpdatePreferences?(prefs)
         }
 
+        let backgroundFrameSavingToggle = TFToggleSwitch(isOn: currentPreferences.backgroundFrameSavingEnabled)
+        backgroundFrameSavingToggle.onToggle = { [weak self] enabled in
+            guard let self else { return }
+            var prefs = self.currentPreferences
+            prefs.backgroundFrameSavingEnabled = enabled
+            self.currentPreferences = prefs
+            self.onUpdatePreferences?(prefs)
+        }
+
         let imeToggle = TFToggleSwitch(isOn: currentPreferences.directIMEEnabled)
         imeToggle.onToggle = { [weak self] enabled in
             guard let self else { return }
@@ -3337,6 +3425,11 @@ final class ManagementWindow: NSWindowController, NSWindowDelegate, NSSearchFiel
                     title: "后台常驻",
                     detail: "关闭窗口后保持运行，下次打开更快",
                     control: keepWarmToggle
+                ),
+                makeSettingRow(
+                    title: "后台节能",
+                    detail: "应用窗口全部隐藏时降至 15 FPS，恢复显示时自动还原",
+                    control: backgroundFrameSavingToggle
                 ),
                 makeSettingRow(
                     title: "原生中文输入",

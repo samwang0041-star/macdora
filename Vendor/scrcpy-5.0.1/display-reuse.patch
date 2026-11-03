@@ -1,0 +1,110 @@
+diff -ruN a/server/src/main/java/com/genymobile/scrcpy/device/Device.java b/server/src/main/java/com/genymobile/scrcpy/device/Device.java
+--- a/server/src/main/java/com/genymobile/scrcpy/device/Device.java	2026-10-08 14:41:27
++++ b/server/src/main/java/com/genymobile/scrcpy/device/Device.java	2026-11-02 15:08:54
+@@ -15,6 +15,7 @@
+ 
+ import android.annotation.SuppressLint;
+ import android.app.ActivityOptions;
++import android.content.ComponentName;
+ import android.content.Intent;
+ import android.content.pm.ApplicationInfo;
+ import android.content.pm.PackageManager;
+@@ -27,6 +28,9 @@
+ import android.view.KeyCharacterMap;
+ import android.view.KeyEvent;
+ 
++import java.io.IOException;
++import java.lang.reflect.Field;
++import java.lang.reflect.Method;
+ import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Locale;
+@@ -137,6 +137,22 @@
+ 
+     public static boolean setDisplayPower(int displayId, boolean on) {
+         assert displayId != Device.DISPLAY_ID_NONE;
++
++        if (displayId > 0) {
++            try {
++                Process process = new ProcessBuilder(
++                        "/system/bin/cmd", "display", on ? "power-reset" : "power-off", String.valueOf(displayId))
++                        .redirectErrorStream(true)
++                        .start();
++                return process.waitFor() == 0;
++            } catch (IOException e) {
++                Ln.e("Could not change virtual display power", e);
++                return false;
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++                return false;
++            }
++        }
+ 
+         if (USE_ANDROID_15_DISPLAY_POWER && Build.VERSION.SDK_INT >= AndroidVersions.API_35_ANDROID_15) {
+             return ServiceManager.getDisplayManager().requestDisplayPower(displayId, on);
+@@ -295,6 +298,57 @@
+         return result;
+     }
+ 
++    /**
++     * 把同一包名在各屏上的已有根任务搬到目标屏。Android 会为虚拟屏新起一个任务，
++     * 新任务不会继承另一块屏上的登录态；先搬任务再 startActivity 可以保留原有状态。
++     */
++    private static void moveExistingTaskToDisplay(String packageName, int displayId) {
++        try {
++            Object taskManager = Class.forName("android.app.ActivityTaskManager")
++                    .getMethod("getService").invoke(null);
++            List<?> tasks = null;
++            for (Method method : taskManager.getClass().getMethods()) {
++                if (!"getTasks".equals(method.getName())) {
++                    continue;
++                }
++                Class<?>[] parameters = method.getParameterTypes();
++                if (parameters.length == 3) {
++                    tasks = (List<?>) method.invoke(taskManager, 100, false, false);
++                    break;
++                }
++                if (parameters.length == 4) {
++                    tasks = (List<?>) method.invoke(taskManager, 100, false, false, -1);
++                }
++            }
++            if (tasks == null) {
++                return;
++            }
++            Class<?> taskInfo = Class.forName("android.app.TaskInfo");
++            Field taskId = taskInfo.getField("taskId");
++            Field taskDisplay = taskInfo.getField("displayId");
++            Field topActivity = taskInfo.getField("topActivity");
++            Field baseActivity = taskInfo.getField("baseActivity");
++            Method move = taskManager.getClass().getMethod("moveRootTaskToDisplay", int.class, int.class);
++            for (Object task : tasks) {
++                ComponentName top = (ComponentName) topActivity.get(task);
++                ComponentName base = (ComponentName) baseActivity.get(task);
++                boolean matches = top != null && packageName.equals(top.getPackageName())
++                        || base != null && packageName.equals(base.getPackageName());
++                if (!matches) {
++                    continue;
++                }
++                if (taskDisplay.getInt(task) == displayId) {
++                    return;
++                }
++                move.invoke(taskManager, taskId.getInt(task), displayId);
++                Ln.i("Moved existing task " + taskId.getInt(task) + " to display " + displayId);
++                return;
++            }
++        } catch (Throwable e) {
++            Ln.w("task reuse failed: " + e);
++        }
++    }
++
+     public static void startApp(String packageName, int displayId, boolean forceStop) {
+         PackageManager pm = FakeContext.get().getPackageManager();
+ 
+@@ -304,6 +358,7 @@
+             return;
+         }
+ 
++        moveExistingTaskToDisplay(packageName, displayId);
+         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+ 
+         Bundle options = null;
